@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- groupId 与 GitHub 用户名对应。 -->
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>AI Lite</name>
+    <description>Lightweight LLM gateway, agent loop and session runtime for Spring Boot 2.x and JDK 8.</description>
+    <url>https://github.com/yinwenyuan28-afk/ai-lite</url>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>yinwenyuan28-afk</id>
+            <name>yinwenyuan28-afk</name>
+        </developer>
+    </developers>
+
+    <scm>
+        <url>https://github.com/yinwenyuan28-afk/ai-lite</url>
+        <connection>scm:git:https://github.com/yinwenyuan28-afk/ai-lite.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/yinwenyuan28-afk/ai-lite.git</developerConnection>
+    </scm>
+
+    <properties>
+        <java.version>1.8</java.version>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <!-- 编译基线是 Boot 2.1；CI 会用 -Dspring-boot.version=2.7.18 再验证一次。 -->
+        <spring-boot.version>2.1.10.RELEASE</spring-boot.version>
+        <okhttp.version>4.12.0</okhttp.version>
+        <!-- Boot 2.1 的 BOM 把 kotlin-stdlib 锁在 1.2.x，OkHttp 4.x 需要 1.8+。 -->
+        <kotlin.version>1.9.25</kotlin.version>
+        <junit.version>4.13.2</junit.version>
+        <assertj.version>3.11.1</assertj.version>
+    </properties>
+
+    <modules>
+        <module>ai-lite-core</module>
+        <module>ai-lite-http-okhttp</module>
+        <module>ai-lite-http-jdk8</module>
+        <module>ai-lite-session-redis</module>
+        <module>ai-lite-session-jdbc</module>
+        <module>ai-lite-store-jdbc</module>
+        <module>ai-lite-spring-boot-starter</module>
+        <module>ai-lite-demo</module>
+    </modules>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- 内部模块统一版本 -->
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-http-okhttp</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-http-jdk8</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-session-redis</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-session-jdbc</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-store-jdbc</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-spring-boot-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <!-- 显式覆盖 Boot BOM 里的旧版本；声明在 import 之后才生效。 -->
+            <dependency>
+                <groupId>com.squareup.okhttp3</groupId>
+                <artifactId>okhttp</artifactId>
+                <version>${okhttp.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.squareup.okhttp3</groupId>
+                <artifactId>mockwebserver</artifactId>
+                <version>${okhttp.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-stdlib</artifactId>
+                <version>${kotlin.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>junit</groupId>
+                <artifactId>junit</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.assertj</groupId>
+                <artifactId>assertj-core</artifactId>
+                <version>${assertj.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.8.1</version>
+                    <configuration>
+                        <source>${maven.compiler.source}</source>
+                        <target>${maven.compiler.target}</target>
+                        <encoding>${project.build.sourceEncoding}</encoding>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>2.22.2</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>3.1.2</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+
+    <profiles>
+        <!-- JDK 21 才编译虚拟线程模块；JDK 8/17 构建时自动跳过。 -->
+        <profile>
+            <id>jdk21</id>
+            <activation>
+                <jdk>[21,)</jdk>
+            </activation>
+            <modules>
+                <module>ai-lite-executor-jdk21</module>
+            </modules>
+        </profile>
+    </profiles>
+</project>

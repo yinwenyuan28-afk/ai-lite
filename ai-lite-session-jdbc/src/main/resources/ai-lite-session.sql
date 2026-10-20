@@ -1,0 +1,11 @@
+-- AI Lite 会话表。按实际数据库调整 VARCHAR/CLOB 类型；
+-- 表名必须与 JdbcAgentSessionStore 构造参数一致。
+CREATE TABLE AI_LITE_SESSION (
+    USER_ID       VARCHAR(128) NOT NULL,
+    SESSION_ID    VARCHAR(191) NOT NULL,
+    BIZ_ID        VARCHAR(128),
+    VERSION       BIGINT       NOT NULL,
+    MESSAGES_JSON CLOB,
+    UPDATED_AT    TIMESTAMP,
+    PRIMARY KEY (USER_ID, SESSION_ID)
+);

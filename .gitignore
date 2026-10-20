@@ -1,0 +1,31 @@
+# Maven
+target/
+*.class
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+application-local.yml
+application-local.yaml
+.env
+env/
+*.pem
+*.key
+auth.json
+
+# Logs
+*.log
+logs/
+
+# 内部计划文档，不进入公开仓库
+PLAN.md

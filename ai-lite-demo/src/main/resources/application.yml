@@ -1,0 +1,32 @@
+ai-lite:
+  enabled: true
+  llm:
+    # 允许调用的业务 id。未登记会在发请求前被拒绝。
+    biz-ids:
+      - demo-chat
+    default-profile: demo
+    providers:
+      demo:
+        api: openai-completions
+        base-url: ${AI_LITE_DEMO_BASE_URL:http://127.0.0.1:8000/v1}
+        api-key: ${AI_LITE_DEMO_API_KEY:demo}
+        models:
+          - id: ${AI_LITE_DEMO_MODEL:demo-model}
+            reasoning: false
+            input: [text]
+            context-window: 32768
+            max-tokens: 4096
+    profiles:
+      demo:
+        provider: demo
+        model: ${AI_LITE_DEMO_MODEL:demo-model}
+        thinking-level: "off"
+  executor:
+    mode: platform
+  session:
+    enabled: true
+
+# 只有显式打开时才会真正发请求，避免 demo 启动就联网。
+ai-lite.demo:
+  run: false
+  prompt: 用一句话介绍你自己

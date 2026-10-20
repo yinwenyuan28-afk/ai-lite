@@ -1,0 +1,3 @@
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+io.github.yinwenyuan28.ailite.autoconfigure.AiLiteAutoConfiguration,\
+io.github.yinwenyuan28.ailite.autoconfigure.AiLiteSessionAutoConfiguration

@@ -1,0 +1,20 @@
+# 复制为 application-local.yml 后再填真实值。
+# application-local.yml 已在 .gitignore 中，不会被提交。
+# 启动时加 --spring.profiles.active=local。
+ai-lite:
+  llm:
+    providers:
+      demo:
+        base-url: https://your-endpoint.example.com/v1
+        api-key: your-real-key-here
+        models:
+          - id: your-model-id
+            reasoning: false
+            input: [text]
+            context-window: 32768
+            max-tokens: 4096
+    profiles:
+      demo:
+        provider: demo
+        model: your-model-id
+        thinking-level: "off"
