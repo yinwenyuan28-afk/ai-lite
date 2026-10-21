@@ -1,6 +1,7 @@
 # 配置参考
 
 所有配置都在 `ai-lite` 前缀下。完整示例见 `ai-lite-demo/src/main/resources/application.yml`。
+业务 API 的用法见 [api-usage.md](api-usage.md)。
 
 ## 1. 顶层
 
@@ -10,6 +11,7 @@ ai-lite:
   llm: { ... }
   executor: { ... }
   session: { ... }
+  prompt: { ... }
 ```
 
 | 字段 | 默认值 | 说明 |
@@ -128,8 +130,9 @@ executor:
 
 | 字段 | 说明 |
 | --- | --- |
-| `mode` | `platform`、`direct`、`virtual` |
+| `mode` | `platform`、`direct`、`virtual`、`coroutines` |
 | `virtual` | 需要 JDK 21 和 `ai-lite-executor-jdk21` 依赖 |
+| `coroutines` | 需要 `ai-lite-executor-coroutines` 依赖；JDK 8 可用 |
 | `rejection-policy` | `abort` 或 `caller-runs` |
 
 ## 4. 会话 `ai-lite.session`
@@ -139,12 +142,52 @@ session:
   enabled: true
   max-entries: 10000
   ttl-seconds: 604800
+  jdbc:
+    table-name: AI_LITE_SESSION
 ```
 
-默认是有界内存存储。引入 `ai-lite-session-redis` 或 `ai-lite-session-jdbc` 后，
-自行提供一个 `AgentSessionStore` / `SessionCache` Bean 覆盖默认实现。
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 会话 Bean 开关 |
+| `max-entries` | `10000` | 内存存储最大会话数 |
+| `ttl-seconds` | `604800` | 内存存储过期秒数 |
+| `jdbc.table-name` | `AI_LITE_SESSION` | 引入 `ai-lite-session-jdbc` 且容器有 `JdbcTemplate` 时使用的表名；只允许字母、数字和下划线 |
 
-## 5. 密钥处理
+默认是有界内存存储。引入 `ai-lite-session-jdbc` 后，只要容器里有 `JdbcTemplate`，
+自动改用 `JdbcAgentSessionStore`，Starter 的内存存储会让位；表名由
+`ai-lite.session.jdbc.table-name` 指定。引入 `ai-lite-session-redis` 后，
+自行提供一个 `SessionCache` Bean，并用 `CachingAgentSessionStore` 包装持久层。
+
+## 5. 提示词 `ai-lite.prompt`
+
+```yaml
+prompt:
+  enabled: true
+  cache-seconds: 60
+  keys:
+    - key: resume-parse
+      title: 简历解析
+      placeholders: [resume, job]
+      biz-id: my-biz
+      profile: main
+      default-system-template: "请解析这份简历：{{resume}}"
+      default-user-template: "目标岗位：{{job}}"
+```
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 关闭后不装配提示词 Bean |
+| `cache-seconds` | `60` | 生效版本本地缓存秒数；0 表示每次都读存储 |
+| `keys[].key` | - | 稳定编码，只能用小写字母、数字和短横线，最长 64 |
+| `keys[].placeholders` | `[]` | 发布前必须出现在模板里的占位符名 |
+| `keys[].default-system-template` | - | 没有生效版本或存储不可用时使用的系统模板 |
+| `keys[].default-user-template` | - | 兜底用户模板 |
+| `keys[].biz-id` / `profile` | - | 业务侧关联信息，库不强制使用 |
+
+渲染优先级：生效版本 → 调用方兜底 → 配置默认模板。数据库不可用时 `render`
+不会抛异常；只有完全没有系统模板时才报错。
+
+## 6. 密钥处理
 
 推荐顺序：
 
@@ -154,7 +197,7 @@ session:
 
 不推荐把密钥写进 `application.yml` 或代码。开源仓库里不要出现任何真实密钥。
 
-## 6. 常见供应商示例
+## 7. 常见供应商示例
 
 ### vLLM / Qwen
 
