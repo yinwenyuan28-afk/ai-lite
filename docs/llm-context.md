@@ -296,6 +296,40 @@ thinking 回传规则：
 - 只有 `thinkingText` 和 `thinkingSignature` 都存在时才发送 thinking block；Anthropic 要求回传的 thinking block 带签名。
 - 多个连续工具结果会被合并成同一条 `user` 消息里的多个 `tool_result` block。
 
+### 3.4 图片消息
+
+图片只允许出现在 `USER` / `OTHER` 消息里，且模型配置的 `input` 必须包含 `image`。`LlmImage` 接受裸 base64 或 `data:<mime>;base64,<data>`，后者会在构造时去掉前缀。
+
+同一个 `LlmMessage` 在三种协议里的形状：
+
+```json
+// OpenAI Chat Completions
+{"role":"user","content":[
+  {"type":"text","text":"描述这张图"},
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}
+]}
+
+// OpenAI Responses
+{"role":"user","content":[
+  {"type":"input_text","text":"描述这张图"},
+  {"type":"input_image","detail":"auto","image_url":"data:image/png;base64,AAAA"}
+]}
+
+// Anthropic Messages
+{"role":"user","content":[
+  {"type":"text","text":"描述这张图"},
+  {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
+]}
+```
+
+说明：
+
+- 文本为空时只发送图片分片；多张图片按调用方顺序追加。
+- Anthropic 会合并相邻同角色消息，合并后按各源消息的块顺序拼接。
+- 非 base64 data URL、空 MIME、非 `image/*`、空数据在网关发请求前被拒绝。
+- 网关不做压缩/缩放/大小校验，也不估算图片 token；usage 以供应商返回为准。
+- **图片不进入会话持久化**：`AgentSessionMessage` 不保存图片，`AgentSessionLoop` 首轮也会用会话历史覆盖 `call.getMessages()`。图片输入请走 `LlmGateway.one/round/toolLoop` 或 `AgentLoop.run`。
+
 ---
 
 ## 4. 一轮工具循环后，上下文怎么增长

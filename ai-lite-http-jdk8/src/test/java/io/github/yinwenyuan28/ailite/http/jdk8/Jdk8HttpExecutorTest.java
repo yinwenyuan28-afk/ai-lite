@@ -4,6 +4,7 @@ import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
+import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import org.junit.After;
@@ -112,9 +113,40 @@ public class Jdk8HttpExecutorTest {
                 .hasMessageContaining("500");
     }
 
+    @Test
+    public void preCancelledSyncCallDoesNotReachTheServer() {
+        LlmCancelHandle cancel = new LlmCancelHandle();
+        cancel.cancel();
+
+        assertThatThrownBy(() -> executor.execute(request(cancel)))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("调用已取消");
+        assertThat(server.getRequestCount()).isZero();
+    }
+
+    @Test
+    public void preCancelledAsyncCallDoesNotReachTheServer() {
+        LlmCancelHandle cancel = new LlmCancelHandle();
+        cancel.cancel();
+
+        assertThatThrownBy(() -> executor.executeAsync(request(cancel))
+                .get(5, java.util.concurrent.TimeUnit.SECONDS))
+                .hasCauseInstanceOf(LlmCallException.class)
+                .hasMessageContaining("调用已取消");
+        assertThat(server.getRequestCount()).isZero();
+    }
+
     private HttpRequest request(String path) {
+        return request(path, null);
+    }
+
+    private HttpRequest request(LlmCancelHandle cancel) {
+        return request("/v1/chat/completions", cancel);
+    }
+
+    private HttpRequest request(String path, LlmCancelHandle cancel) {
         return new HttpRequest(server.url(path).toString(),
                 Collections.singletonMap("Content-Type", "application/json"), "{}",
-                5000, 5000, null);
+                5000, 5000, cancel);
     }
 }

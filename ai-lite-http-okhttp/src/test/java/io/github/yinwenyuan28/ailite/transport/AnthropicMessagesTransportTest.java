@@ -2,11 +2,13 @@ package io.github.yinwenyuan28.ailite.transport;
 
 import io.github.yinwenyuan28.ailite.http.okhttp.OkHttpExecutor;
 import io.github.yinwenyuan28.ailite.llm.LlmCompletion;
+import io.github.yinwenyuan28.ailite.llm.LlmImage;
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmRequest;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmThinkingLevel;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
+import com.fasterxml.jackson.databind.JsonNode;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import org.junit.After;
@@ -115,6 +117,69 @@ public class AnthropicMessagesTransportTest {
         assertThat(body).contains("\"thinking\":\"think\"");
         assertThat(body).contains("\"signature\":\"sig\"");
         assertThat(body).contains("\"text\":\"answer\"");
+    }
+
+    @Test
+    public void imagePartsUseBase64SourceBlocks() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: {\"type\":\"message_stop\"}\n\n"));
+
+        String base = server.url("").toString();
+        io.github.yinwenyuan28.ailite.llm.ResolvedModel model = TestModels.model(
+                AnthropicMessagesTransport.API, base, "anthropic-budget",
+                LlmThinkingLevel.OFF, false);
+        LlmRequest request = new LlmRequest(model,
+                Collections.<LlmMessage>singletonList(LlmMessage.user("describe", Arrays.asList(
+                        new LlmImage("image/png", "AAAA"),
+                        new LlmImage("image/jpeg", "BBBB")))),
+                Collections.<LlmTool>emptyList(), true, null, null, null, null, null);
+
+        transport.complete(request);
+
+        JsonNode content = io.github.yinwenyuan28.ailite.json.AiLiteJson.readTree(
+                server.takeRequest().getBody().readUtf8())
+                .get("messages").get(0).get("content");
+        assertThat(content.size()).isEqualTo(3);
+        assertThat(content.get(0).path("type").asText()).isEqualTo("text");
+        assertThat(content.get(0).path("text").asText()).isEqualTo("describe");
+        assertThat(content.get(1).path("type").asText()).isEqualTo("image");
+        assertThat(content.get(1).path("source").path("type").asText()).isEqualTo("base64");
+        assertThat(content.get(1).path("source").path("media_type").asText())
+                .isEqualTo("image/png");
+        assertThat(content.get(1).path("source").path("data").asText()).isEqualTo("AAAA");
+        assertThat(content.get(2).path("source").path("media_type").asText())
+                .isEqualTo("image/jpeg");
+        assertThat(content.get(2).path("source").path("data").asText()).isEqualTo("BBBB");
+    }
+
+    @Test
+    public void adjacentUserMessagesMergeWithoutLosingImageBlocks() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: {\"type\":\"message_stop\"}\n\n"));
+
+        String base = server.url("").toString();
+        io.github.yinwenyuan28.ailite.llm.ResolvedModel model = TestModels.model(
+                AnthropicMessagesTransport.API, base, "anthropic-budget",
+                LlmThinkingLevel.OFF, false);
+        LlmRequest request = new LlmRequest(model,
+                Arrays.asList(
+                        LlmMessage.user("see", Collections.singletonList(
+                                new LlmImage("image/png", "AAAA"))),
+                        LlmMessage.user("and also")),
+                Collections.<LlmTool>emptyList(), true, null, null, null, null, null);
+
+        transport.complete(request);
+
+        JsonNode content = io.github.yinwenyuan28.ailite.json.AiLiteJson.readTree(
+                server.takeRequest().getBody().readUtf8())
+                .get("messages").get(0).get("content");
+        assertThat(content.size()).isEqualTo(3);
+        assertThat(content.get(0).path("text").asText()).isEqualTo("see");
+        assertThat(content.get(1).path("type").asText()).isEqualTo("image");
+        assertThat(content.get(1).path("source").path("data").asText()).isEqualTo("AAAA");
+        assertThat(content.get(2).path("text").asText()).isEqualTo("and also");
     }
 
     private LlmRequest request(final StringBuilder deltas, List<LlmTool> tools) {

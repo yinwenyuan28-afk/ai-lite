@@ -15,7 +15,8 @@ AI Lite 是面向 **Spring Boot 2.x / JDK 8** 存量系统的 AI 接入层，提
 
 JDK 8 没有虚拟线程，但等待模型响应的大部分时间并不需要占住线程：
 
-- 网关提供 `oneAsync` / `roundAsync` / `toolLoopAsync`，返回 `CompletableFuture`。
+- 单次模型调用入口：`gateway.one`（同步）、`gateway.oneAsync`（future）、`LlmCoroutines.one`（suspend）、`LlmCoroutines.oneAsync`（Java 别名）。
+- 网关还提供 `roundAsync` / `toolLoopAsync`，返回 `CompletableFuture`。
 - OkHttp 适配器用 `enqueue` 做真正的非阻塞请求；Responses 和 Anthropic 的 SSE 也在回调线程解析。
 - `ai-lite-executor-coroutines` 提供 Kotlin 协程调度器和 suspend 桥接，挂起点不占载体线程。
 - JDK 21 下可切换到 `ai-lite-executor-jdk21` 的真虚拟线程，上层 API 不变。
@@ -26,7 +27,7 @@ JDK 8 没有虚拟线程，但等待模型响应的大部分时间并不需要�
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 404 个测试用例通过（Redis 不可用时 18 个 Redis 集成用例跳过），包含针对空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等场景的对抗性测试。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 463 个测试通过、0 失败；Redis 不可用时 1 个 Redis 集成测试类整体跳过（可用时该类 18 个用例运行）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
 
 ## 环境要求
 
@@ -178,9 +179,14 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 ## 文档
 
 - [上层调用 API 使用指南](docs/api-usage.md)：网关、编排、会话、提示词、执行器与扩展点。
+- [单次模型调用入口](docs/entry-points.md)：四个入口的返回、阻塞、取消矩阵与 L1–L4 契约。
+- [重试边界](docs/retry.md)：网关不做自动重试，以及对 429/5xx/超时/取消的分类建议。
+- [架构说明](docs/architecture.md)：模块拓扑、调用链、线程与取消模型、扩展点与设计取舍。
+- [夯实单次模型调用入口](docs/夯实单次模型调用入口-plan.md)：单次模型调用入口的 parity、L1/L2 取消、异常与重试边界。
 - [Agent Loop 发给 LLM 的上下文](docs/llm-context.md)：每轮请求组成、thinking 字段和协议差异。
 - [配置参考](docs/configuration.md)：所有 `ai-lite.*` 字段。
 - [用户级线程实现](docs/user-level-concurrency.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
+- [编排层异步对抗性测试设计](docs/testing/README.md)：103 个竞态/异常用例，按 AgentLoop、会话层、网关拆分。
 - [QPS 基准](benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
 
 ## 构建

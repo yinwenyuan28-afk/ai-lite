@@ -2,6 +2,7 @@ package io.github.yinwenyuan28.ailite.autoconfigure;
 
 import io.github.yinwenyuan28.ailite.assembly.AgentLoop;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
+import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.session.AgentSessionLoop;
 import io.github.yinwenyuan28.ailite.session.AgentSessionStore;
 import io.github.yinwenyuan28.ailite.session.InMemoryAgentSessionStore;
@@ -30,7 +31,8 @@ public class AiLiteSessionAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "ai-lite.session", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public AgentSessionLoop aiLiteSessionLoop(AgentLoop agentLoop, AgentSessionStore sessionStore) {
-        return new AgentSessionLoop(agentLoop, sessionStore);
+    public AgentSessionLoop aiLiteSessionLoop(AgentLoop agentLoop, AgentSessionStore sessionStore,
+                                             ExecutorProvider executor) {
+        return new AgentSessionLoop(agentLoop, sessionStore, executor);
     }
 }

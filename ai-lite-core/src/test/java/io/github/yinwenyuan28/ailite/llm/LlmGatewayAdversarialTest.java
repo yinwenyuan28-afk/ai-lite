@@ -389,8 +389,8 @@ public class LlmGatewayAdversarialTest {
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
         assertThat(result.getRounds()).isEqualTo(1);
         assertThat(transport.requests).hasSize(1);
-        // 当前实现会先把本轮工具跑完，再检查取消。
-        assertThat(executions[0]).isEqualTo(1);
+        // 取消在响应返回时已经发生，网关先检查取消，不再执行本轮工具。
+        assertThat(executions[0]).isZero();
     }
 
     @Test

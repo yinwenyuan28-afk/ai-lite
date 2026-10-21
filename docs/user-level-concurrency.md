@@ -72,6 +72,8 @@ JDK 8 没有虚拟线程，可选方案只有：
 
 协程桥接和虚拟线程都只解决执行轴；真正把 QPS 拉起来的是 I/O 轴。上一节的基准里，纯 Java `CompletableFuture` 和 Kotlin 协程的 QPS 几乎一样，就是这个原因。
 
+四种执行器模式（platform / direct / virtual / coroutines）各自执行什么、横向对比和配置字段的生效范围，见 [architecture.md](architecture.md) 的 5.2 节和 [configuration.md](configuration.md) 第 3 节。本节只展开与“用户级线程”直接相关的 virtual 和 coroutines 两个实现。
+
 ---
 
 ## 3. 公共底座：异步调用链
@@ -151,9 +153,11 @@ next()
 ### 3.4 上层异步封装
 
 - `AgentLoop.runAsync`（`ai-lite-core/src/main/java/io/github/yinwenyuan28/ailite/assembly/AgentLoop.java:143`）
-  把 7 个生命周期钩子按原顺序串到异步轮次上；工具批次交给 `CompletableFuture.runAsync`。
+  把 7 个生命周期钩子按原顺序串到异步轮次上；工具批次交给注入的
+  `ExecutorProvider.io()`，不再落到 `ForkJoinPool.commonPool()`。
 - `AgentSessionLoop.resumeAsync`（`ai-lite-core/src/main/java/io/github/yinwenyuan28/ailite/session/AgentSessionLoop.java:112`）
-  先异步加载会话，再跑 `AgentLoop.runAsync`，最后在同一 future 链里落盘。
+  会话加载、循环、落盘全部在注入的 `io()` 上执行；取消返回的 future 会同步取消
+  内层循环和正在进行的 HTTP 请求。
 
 这样，从 HTTP 到 Agent 循环再到会话续聊，整条链路都不需要为"等待"占一个业务线程。
 
@@ -223,7 +227,11 @@ ai-lite:
 - **有阻塞 SDK / JDBC / 老代码**：把 `mode` 设为 `virtual`，`ExecutorProvider.io()` 返回虚拟线程执行器。异步日志和任何显式通过 `io()` 提交的阻塞任务会跑在虚拟线程上。
 - **两者一起用**：异步网关负责网络等待，虚拟线程负责阻塞工具或阻塞 SDK；载体线程不会被这些阻塞任务拖住。
 
-需要说明：工具批次目前在 `AgentLoop.runAsync` 里走 `CompletableFuture.runAsync`（ForkJoinPool），并不会自动使用 `ExecutorProvider.io()`。如果工具是阻塞型，建议自己实现 `ToolExecutor` 并注入虚拟线程执行器，或在工具内部显式使用 `io()`。
+工具批次现在通过 `AgentLoop` 注入的 `ExecutorProvider.io()` 执行，并逐条走
+`ToolExecutor`，不再使用 `ForkJoinPool.commonPool()`。`AgentLoop` 默认复用网关的
+执行器，也可以显式传入；`mode=virtual` 时工具自然跑在虚拟线程上。逐条执行是为了
+保留 `beforeTool` / `afterTool` 的顺序和拒绝语义；需要整批并行时用网关的
+`toolLoop` 或自定义 `ToolExecutor.executeAsync`。
 
 `mode=virtual` 不会改变网关 API，也不会自动把同步 `gateway.one()` 变成异步。它只是把"执行阻塞任务的地方"换成了虚拟线程。
 
@@ -375,6 +383,8 @@ object LlmCoroutines {
 }
 ```
 
+这四个方法统称**「单次模型调用入口」**：`gateway.one`（同步）、`gateway.oneAsync`（future）、`LlmCoroutines.one`（suspend）、`LlmCoroutines.oneAsync`（Java 别名）。
+
 Java 不能直接调用 `suspend` 函数（它多一个 `Continuation` 参数），所以：
 
 - Java 调用方用 `gateway.oneAsync(...)` 或 `LlmCoroutines.oneAsync(...)`。
@@ -443,6 +453,7 @@ okhttp3.Call.cancel() → 关闭连接
 
 - `LlmGateway.invokeAsync` 在 `cancel == null` 时也会创建一个内部 `LlmCancelHandle`，所以 `future.cancel(...)` 永远能中断底层请求，不要求调用方显式传句柄。
 - `AgentLoop.runAsync` 同样创建内部句柄，并把 `ctx.getCancel()` 传给 `gateway.roundAsync`，所以取消能打断进行中的模型请求，而不只是"下一轮不再发"。
+- `AgentSessionLoop.resumeAsync` 也会在内部创建句柄，并把返回 future 的 `cancel()` 接到句柄上；取消会穿过 `thenCompose` 传到内层循环，不再需要调用方额外传句柄。
 - `OkHttpExecutor.buildCall` 把 `Call.cancel()` 绑定到 `LlmCancelHandle`。
 
 取消是协作式的：如果工具或自定义传输忽略中断，协程会停止等待，但底层工作可能继续。写工具时请检查 `Thread.interrupted()` 或尊重传入的取消句柄。
@@ -702,7 +713,7 @@ new OkHttpExecutor(client);
 
 - `await()` 可能抛 `CompletionException`，按需解包。
 - `AsyncLlmCallLogger` 仍然异步落库；协程取消不会阻塞日志线程。
-- 工具执行默认在 ForkJoinPool；如果工具有阻塞 I/O，换成虚拟线程或专用池。
+- 工具执行走注入的 `ExecutorProvider.io()`；如果工具有阻塞 I/O，`mode=virtual` 或自定义执行器即可，不需要再单独换池。
 
 ---
 
@@ -726,7 +737,7 @@ new OkHttpExecutor(client);
 
 **Q：Java 能直接调用 `LlmCoroutines.one` 吗？**
 
-不能直接调用 `suspend` 函数。Java 用 `gateway.oneAsync(...)` 或 `LlmCoroutines.oneAsync(...)`。
+不能直接调用 `suspend` 函数。Java 用 `gateway.oneAsync(...)` 或 `LlmCoroutines.oneAsync(...)`；后者是单次模型调用入口的 Java future 别名。
 
 **Q：为什么不用 Quasar？**
 

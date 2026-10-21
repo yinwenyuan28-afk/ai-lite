@@ -7,6 +7,7 @@ import io.github.yinwenyuan28.ailite.assembly.AgentModelOutput;
 import io.github.yinwenyuan28.ailite.assembly.AgentToolCall;
 import io.github.yinwenyuan28.ailite.assembly.ToolDecision;
 import io.github.yinwenyuan28.ailite.assembly.TurnDecision;
+import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
@@ -24,7 +25,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Supplier;
 
 /**
  * 可续聊封装：组合 AgentLoop + AgentSessionStore。
@@ -36,8 +36,24 @@ public final class AgentSessionLoop {
 
     private final AgentLoop loop;
     private final AgentSessionStore store;
+    private final ExecutorProvider executor;
 
+    /**
+     * 复用 AgentLoop 的 I/O 执行器。
+     *
+     * @param loop  Agent 循环
+     * @param store 会话存储
+     */
     public AgentSessionLoop(AgentLoop loop, AgentSessionStore store) {
+        this(loop, store, null);
+    }
+
+    /**
+     * @param loop     Agent 循环
+     * @param store    会话存储
+     * @param executor 会话加载和落盘使用的 I/O 执行器，null 表示复用 AgentLoop 的
+     */
+    public AgentSessionLoop(AgentLoop loop, AgentSessionStore store, ExecutorProvider executor) {
         if (loop == null) {
             throw new LlmCallException("AgentLoop 不能为空");
         }
@@ -46,6 +62,7 @@ public final class AgentSessionLoop {
         }
         this.loop = loop;
         this.store = store;
+        this.executor = executor == null ? loop.getExecutor() : executor;
     }
 
     /**
@@ -97,7 +114,10 @@ public final class AgentSessionLoop {
     }
 
     /**
-     * 异步续聊。模型等待不占调用线程；加载和保存仍在线程池里完成。
+     * 异步续聊。模型等待不占调用线程；加载和保存都在注入的 I/O 执行器里完成。
+     *
+     * <p>取消返回的 future 会同时取消内层 AgentLoop 和正在进行的 HTTP 请求，
+     * 不需要调用方额外传取消句柄。</p>
      *
      * @param userId       用户 id
      * @param sessionId    会话 id
@@ -115,14 +135,22 @@ public final class AgentSessionLoop {
                                                        final Integer maxRounds,
                                                        final LlmCancelHandle cancel,
                                                        final List<AgentSessionMessage> newUserTurns) {
-        return CompletableFuture.supplyAsync(new Supplier<Prepared>() {
-            @Override
-            public Prepared get() {
-                return prepare(userId, sessionId, call, lifecycles, newUserTurns);
+        // 即使调用方只拿到返回的 future，也要让 cancel() 能传到内层循环和 HTTP。
+        final LlmCancelHandle effectiveCancel = cancel == null ? new LlmCancelHandle() : cancel;
+        CompletableFuture<Prepared> prepared = CompletableFuture.supplyAsync(
+                () -> prepare(userId, sessionId, call, lifecycles, newUserTurns), executor.io());
+        CompletableFuture<ResumeResult> future = prepared.thenComposeAsync(preparedTurn ->
+                        loop.runAsync(call.withMessages(preparedTurn.llmMessages), tools,
+                                preparedTurn.hooks, maxRounds, effectiveCancel)
+                                .thenApplyAsync(result -> finish(userId, sessionId, call,
+                                        preparedTurn, result), executor.io()),
+                executor.io());
+        future.whenComplete((value, error) -> {
+            if (future.isCancelled()) {
+                effectiveCancel.cancel();
             }
-        }).thenCompose(prepared -> loop.runAsync(call.withMessages(prepared.llmMessages), tools,
-                prepared.hooks, maxRounds, cancel)
-                .thenApply(result -> finish(userId, sessionId, call, prepared, result)));
+        });
+        return future;
     }
 
     private Prepared prepare(String userId, String sessionId, LlmCall call,

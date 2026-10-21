@@ -1,12 +1,14 @@
 package io.github.yinwenyuan28.ailite.llm;
 
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
+import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.util.Strings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -14,6 +16,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
@@ -35,6 +38,7 @@ public final class LlmGateway {
     private final ModelResolver resolver;
     private final Map<String, LlmTransport> transports;
     private final AsyncLlmCallLogger logger;
+    private final ExecutorProvider executor;
     private final ToolExecutor toolExecutor;
 
     /**
@@ -61,8 +65,23 @@ public final class LlmGateway {
                 }
             }
         }
-        this.logger = new AsyncLlmCallLogger(executor, store);
+        this.executor = executor == null ? new DirectExecutorProvider() : executor;
+        this.logger = new AsyncLlmCallLogger(this.executor, store);
         this.toolExecutor = toolExecutor == null ? new SequentialToolExecutor() : toolExecutor;
+    }
+
+    /**
+     * @return 网关使用的 I/O 执行器，供 AgentLoop / AgentSessionLoop 复用，避免落到公共池
+     */
+    public ExecutorProvider getExecutor() {
+        return executor;
+    }
+
+    /**
+     * @return 工具执行器，供 AgentLoop 复用
+     */
+    public ToolExecutor getToolExecutor() {
+        return toolExecutor;
     }
 
     /**
@@ -73,6 +92,21 @@ public final class LlmGateway {
      */
     public LlmResult one(LlmCall call) {
         return invoke(call, null, null, MODE_ONE, false, null, null);
+    }
+
+    /**
+     * 问一次，并允许另一个线程中止在途请求。
+     *
+     * <p>取消会触发传输层绑定的 abort：OkHttp 传输下在途请求立即中断；JDK 8 传输
+     * 在正文读取阶段可能等到读超时。无论传输是否响应 abort，网关都会在返回前把
+     * 终态改写为 {@code ABORTED}。不传句柄时只能等超时。</p>
+     *
+     * @param call   调用参数
+     * @param cancel 取消句柄，可为 null
+     * @return 调用结果；取消时为 {@code ABORTED}
+     */
+    public LlmResult one(LlmCall call, LlmCancelHandle cancel) {
+        return invoke(call, null, null, MODE_ONE, false, null, cancel);
     }
 
     /**
@@ -267,7 +301,9 @@ public final class LlmGateway {
                 executeTools, limit, stream, onDelta, effectiveCancel);
         run.result.whenComplete((value, error) -> {
             if (run.result.isCancelled()) {
+                // future.cancel(true) 不是终态：底层要 abort，调用记录也要留下一条 aborted。
                 effectiveCancel.cancel();
+                run.cancelledByFuture();
             }
         });
         run.next();
@@ -292,8 +328,9 @@ public final class LlmGateway {
         private final Consumer<String> onDelta;
         private final LlmCancelHandle cancel;
         private final CompletableFuture<LlmResult> result = new CompletableFuture<LlmResult>();
+        private final AtomicBoolean recorded = new AtomicBoolean(false);
 
-        private int completed;
+        private volatile int completed;
         private LlmCompletion last;
 
         private AsyncRun(LlmCall call, String bizId, ResolvedModel model, List<LlmMessage> transcript,
@@ -318,7 +355,8 @@ public final class LlmGateway {
                 return;
             }
             if (cancel != null && cancel.isCancelled()) {
-                record(attempt, completed == 0 ? 0 : completed, LlmStopReason.ABORTED, 0, 0L, null);
+                recordOnce(attempt, completed == 0 ? 0 : completed,
+                        LlmStopReason.ABORTED, 0, 0L, null);
                 result.complete(result(attempt, last, LlmStopReason.ABORTED, completed));
                 return;
             }
@@ -333,6 +371,12 @@ public final class LlmGateway {
                 fail(ex, round, System.currentTimeMillis() - started);
                 return;
             }
+            if (future == null) {
+                // 适配器违反 SPI 时不能让调用方挂在一个永远不完成的 future 上。
+                fail(new LlmCallException("协议适配器返回了空 future"), round,
+                        System.currentTimeMillis() - started);
+                return;
+            }
             future.whenComplete((completion, error) -> {
                 if (result.isDone()) {
                     return;
@@ -342,29 +386,40 @@ public final class LlmGateway {
                     fail(unwrap(error), round, latency);
                     return;
                 }
+                if (completion == null) {
+                    // 空结果按协议错误收口，避免 NPE 落在回调线程里导致 future 永不完成。
+                    fail(new LlmCallException("协议适配器返回了空结果"), round, latency);
+                    return;
+                }
                 completed = round;
                 last = completion;
                 attempt.add(completion.getUsage(), latency);
 
+                if (cancel != null && cancel.isCancelled()) {
+                    // transport 不配合 abort 时由网关兜底：取消优先于正常完成。
+                    recordOnce(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
+                    result.complete(result(attempt, completion, LlmStopReason.ABORTED, completed));
+                    return;
+                }
                 if (completion.getStop() == LlmStopReason.ABORTED) {
-                    record(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
+                    recordOnce(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
                     result.complete(result(attempt, completion, LlmStopReason.ABORTED, completed));
                     return;
                 }
                 boolean wantsTool = executeTools && completion.getStop() == LlmStopReason.TOOL_USE
                         && !completion.getToolCalls().isEmpty();
                 if (!wantsTool) {
-                    record(attempt, round, completion.getStop(), success(completion.getStop()),
+                    recordOnce(attempt, round, completion.getStop(), success(completion.getStop()),
                             latency, null);
                     result.complete(result(attempt, completion, completion.getStop(), completed));
                     return;
                 }
                 if (round >= limit) {
-                    record(attempt, round, LlmStopReason.MAX_ROUNDS, 0, latency, null);
+                    recordOnce(attempt, round, LlmStopReason.MAX_ROUNDS, 0, latency, null);
                     result.complete(result(attempt, completion, LlmStopReason.MAX_ROUNDS, completed));
                     return;
                 }
-                record(attempt, round, LlmStopReason.TOOL_USE, 1, latency, null);
+                recordOnce(attempt, round, LlmStopReason.TOOL_USE, 1, latency, null);
                 transcript.add(LlmMessage.assistant(completion.getContent(),
                         completion.getToolCalls()));
                 CompletableFuture<List<String>> toolFuture;
@@ -372,6 +427,10 @@ public final class LlmGateway {
                     toolFuture = toolExecutor.executeAsync(tools, completion.getToolCalls());
                 } catch (RuntimeException ex) {
                     fail(new LlmCallException("工具执行失败", ex), round, latency);
+                    return;
+                }
+                if (toolFuture == null) {
+                    fail(new LlmCallException("工具执行器返回了空 future"), round, latency);
                     return;
                 }
                 toolFuture.whenComplete((results, toolError) -> {
@@ -382,9 +441,11 @@ public final class LlmGateway {
                         fail(new LlmCallException("工具执行失败", unwrap(toolError)), round, latency);
                         return;
                     }
+                    List<String> texts = results == null
+                            ? Collections.<String>emptyList() : results;
                     for (int i = 0; i < completion.getToolCalls().size(); i++) {
                         LlmToolCall toolCall = completion.getToolCalls().get(i);
-                        String text = i < results.size() ? results.get(i) : "";
+                        String text = i < texts.size() ? texts.get(i) : "";
                         transcript.add(LlmMessage.toolResult(toolCall.getId(), text));
                     }
                     if (cancel != null && cancel.isCancelled()) {
@@ -398,15 +459,30 @@ public final class LlmGateway {
 
         private void fail(Throwable cause, int round, long latency) {
             if (cancel != null && cancel.isCancelled()) {
-                record(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
+                recordOnce(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
                 result.complete(result(attempt, null, LlmStopReason.ABORTED, completed));
                 return;
             }
-            record(attempt, round, LlmStopReason.ERROR, 0, latency, cause.getMessage());
+            recordOnce(attempt, round, LlmStopReason.ERROR, 0, latency, cause.getMessage());
             if (cause instanceof LlmCallException) {
                 result.completeExceptionally(cause);
             } else {
                 result.completeExceptionally(new LlmCallException("模型调用失败", cause));
+            }
+        }
+
+        /**
+         * future 被调用方取消时补一条记录。终态已被取消，不能再 complete 结果。
+         */
+        private void cancelledByFuture() {
+            recordOnce(attempt, completed == 0 ? 0 : completed,
+                    LlmStopReason.ABORTED, 0, 0L, null);
+        }
+
+        private void recordOnce(Attempt attempt, int round, LlmStopReason stop, int success,
+                                long latencyMs, String error) {
+            if (recorded.compareAndSet(false, true)) {
+                record(attempt, round, stop, success, latencyMs, error);
             }
         }
     }
@@ -493,10 +569,21 @@ public final class LlmGateway {
                 throw new LlmCallException("模型调用失败", ex);
             }
             long latency = System.currentTimeMillis() - started;
+            if (completion == null) {
+                // 同步路径同样按协议错误收口，避免空结果在后面的字段访问里变成 NPE。
+                record(attempt, round, LlmStopReason.ERROR, 0, latency,
+                        "协议适配器返回了空结果");
+                throw new LlmCallException("协议适配器返回了空结果");
+            }
             completed = round;
             last = completion;
             attempt.add(completion.getUsage(), latency);
 
+            if (cancel != null && cancel.isCancelled()) {
+                // 与异步路径一致：传输层忽略 abort 并正常返回时，取消仍然优先。
+                record(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
+                return result(attempt, completion, LlmStopReason.ABORTED, completed);
+            }
             if (completion.getStop() == LlmStopReason.ABORTED) {
                 record(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
                 return result(attempt, completion, LlmStopReason.ABORTED, completed);

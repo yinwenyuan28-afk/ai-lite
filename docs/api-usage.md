@@ -90,10 +90,10 @@ public class ChatService {
 
 | 任务 | 推荐 API |
 | --- | --- |
-| 单次对话 | ⭐ `gateway.one(LlmCall.profile(...))` |
+| 单次模型调用入口（同步） | ⭐ `gateway.one(LlmCall.profile(...))` |
 | 流式对话 | ⭐ `gateway.oneByStream(...)` |
 | 工具循环 | ⭐ `gateway.toolLoop(call, tools, maxRounds)` |
-| 高并发单次调用 | ⭐ `gateway.oneAsync(call)` |
+| 单次模型调用入口（异步） | ⭐ `gateway.oneAsync(call)` |
 | 高并发工具循环 | ⭐ `gateway.toolLoopAsync(call, tools, maxRounds)` |
 | Agent + 生命周期 | ⭐ `agentLoop.run(...)` / `agentLoop.runAsync(...)` |
 | 多步骤编排 | ⭐ `workflow.run(Arrays.asList(Workflow.oneStep(...), ...))` |
@@ -102,7 +102,7 @@ public class ChatService {
 | 提示词渲染 | ⭐ `promptManager.render(key, vars)` |
 | 提示词发布 | ⭐ `createDraft(...)` → `saveDraft(...)` → `publish(...)` |
 | 取消调用 | ⭐ `LlmCancelHandle.cancel()` 或 `future.cancel(...)` |
-| Kotlin 顺序写法 | ⭐ `LlmCoroutines.one(...)` |
+| 单次模型调用入口（Kotlin 挂起） | ⭐ `LlmCoroutines.one(...)` |
 | 调用记录落库 | `JdbcLlmCallStore` |
 | 会话落库 | `JdbcAgentSessionStore` + `ai-lite.session.jdbc.table-name` |
 | 自定义协议 | `LlmTransport` |
@@ -114,19 +114,38 @@ public class ChatService {
 
 ### 3.1 方法总览
 
+方法分三档：`one` 系列（`gateway.one` / `oneAsync` / `LlmCoroutines.one` / `oneAsync`）统称**「单次模型调用入口」**，是基石（单次请求，不涉及工具）；`round` 系列只把工具声明发给模型、不执行；`toolLoop` 系列才真正执行工具并续轮。
+
+#### 3.1.1 ⭐ 单次模型调用入口（`one` 系列）
+
 | 方法 | 说明 | 返回 | 常用 |
 | --- | --- | --- | --- |
-| `one(LlmCall)` | 单次调用，不带工具 | `LlmResult` | ⭐ |
-| `oneByStream(LlmCall, Consumer<String>, LlmCancelHandle)` | 单次调用，边生成边回调 | `LlmResult` | ⭐ |
+| `one(LlmCall)` | 单次调用，不带工具，阻塞当前线程直到返回 | `LlmResult` | ⭐ |
+| `one(LlmCall, LlmCancelHandle)` | 同步 + 外部取消句柄，在途请求可被其他线程中止 | `LlmResult` |  |
+| `oneByStream(LlmCall, Consumer<String>, LlmCancelHandle)` | 同一次调用，边生成边回调增量文本 | `LlmResult` | ⭐ |
+| `oneAsync(LlmCall)` | 非阻塞单次调用，等待响应时不占调用线程 | `CompletableFuture<LlmResult>` | ⭐ |
+| `oneAsync(LlmCall, LlmCancelHandle)` | 非阻塞 + 外部取消句柄 | `CompletableFuture<LlmResult>` |  |
+| `oneByStreamAsync(LlmCall, Consumer<String>, LlmCancelHandle)` | 非阻塞 + 流式回调 | `CompletableFuture<LlmResult>` |  |
+
+语义：
+
+- 不向模型声明任何工具，因此不存在工具执行；正常结束时 `stopReason` 只会是 `STOP` 或 `LENGTH`，`getToolCalls()` 为空列表。
+- `oneByStream` / `oneByStreamAsync` 与 `one` / `oneAsync` 是同一件事，只多一个增量回调，最终仍返回完整 `LlmResult`。
+- 这是上层所有编排的落点：`Workflow.oneStep`、`AgentLoop` 的普通轮次、`AgentSessionLoop` 的续聊，最终都汇到这一档（带工具的轮次走 `round`）。
+- 调用参数（biz-id 登记、模型解析、超时、取消）的校验与错误语义见 3.10，这一档不额外放宽。
+- 所有入口都保证 L2（取消后不再推进）；L1（在途请求中止）取决于传输层：OkHttp 全阶段有效，JDK 8 `HttpURLConnection` 在正文读取阶段可能等到读超时。同步入口必须传 `LlmCancelHandle` 才具备在途取消；`one(call)` 只受超时约束。
+- 网关不做自动重试，重试策略由调用方包在入口外面。完整矩阵见 [单次模型调用入口](entry-points.md) 与 [重试边界](retry.md)。
+
+#### 3.1.2 工具与多轮方法
+
+| 方法 | 说明 | 返回 | 常用 |
+| --- | --- | --- | --- |
 | `round(LlmCall, List<LlmTool>)` | 只发一轮并声明工具，不执行工具 | `LlmResult` |  |
+| `roundAsync(LlmCall, List<LlmTool>)` | 非阻塞单轮工具声明 | `CompletableFuture<LlmResult>` |  |
+| `roundAsync(LlmCall, List<LlmTool>, LlmCancelHandle)` | 同上 + 取消 | `CompletableFuture<LlmResult>` |  |
 | `toolLoop(LlmCall, List<LlmTool>, Integer)` | 工具循环，最多 N 轮 | `LlmResult` | ⭐ |
 | `toolLoop(LlmCall, List<LlmTool>)` | 同上，默认 8 轮 | `LlmResult` |  |
 | `toolLoopByStream(...)` | 流式工具循环 | `LlmResult` |  |
-| `oneAsync(LlmCall)` | 非阻塞单次调用 | `CompletableFuture<LlmResult>` | ⭐ |
-| `oneAsync(LlmCall, LlmCancelHandle)` | 非阻塞 + 外部取消句柄 | `CompletableFuture<LlmResult>` |  |
-| `oneByStreamAsync(LlmCall, Consumer<String>, LlmCancelHandle)` | 非阻塞流式 | `CompletableFuture<LlmResult>` |  |
-| `roundAsync(LlmCall, List<LlmTool>)` | 非阻塞单轮工具声明 | `CompletableFuture<LlmResult>` |  |
-| `roundAsync(LlmCall, List<LlmTool>, LlmCancelHandle)` | 同上 + 取消 | `CompletableFuture<LlmResult>` |  |
 | `toolLoopAsync(LlmCall, List<LlmTool>, Integer)` | 非阻塞工具循环 | `CompletableFuture<LlmResult>` | ⭐ |
 | `toolLoopAsync(LlmCall, List<LlmTool>)` | 默认 8 轮 | `CompletableFuture<LlmResult>` |  |
 | `toolLoopAsync(LlmCall, List<LlmTool>, Integer, LlmCancelHandle)` | 非阻塞 + 取消 | `CompletableFuture<LlmResult>` |  |
@@ -136,7 +155,7 @@ public class ChatService {
 
 语义要点：
 
-- `one` / `round` 不执行工具；`round` 会把工具声明发给模型，模型可能返回 `toolCalls`。
+- `round` 会把工具声明发给模型，模型可能返回 `toolCalls`，但网关不执行；需要自己处理时可以据 `getStopReason() == TOOL_USE` 分支。
 - `toolLoop` 在模型要求工具时执行工具，把结果写回上下文，再请求下一轮。
 - 最后一轮仍需工具时，停止原因返回 `MAX_ROUNDS`。
 - 未登记 `biz-id`、未配置模型、未知协议、工具名为空或重复，都会在发请求前抛 `LlmCallException`。
@@ -189,10 +208,14 @@ LlmCall next = call.withMessages(newMessages);
 
 ```java
 LlmImage image = new LlmImage("image/png", base64WithoutDataUrlPrefix);
+// 也接受完整的 data URL，构造时会去掉前缀
+LlmImage fromDataUrl = new LlmImage("image/png", "data:image/png;base64,AAAA");
 LlmMessage message = LlmMessage.user("描述这张图", Collections.singletonList(image));
 ```
 
-模型配置的 `input` 必须包含 `image`，否则网关会在发请求前拒绝。
+模型配置的 `input` 必须包含 `image`，否则网关会在发请求前拒绝。`mime` 必须非空且以 `image/` 开头（大小写不敏感），`data` 必须非空；同一消息可以放多张图片，顺序保持不变。支持裸 base64 和 `data:<mime>;base64,<data>`，非 base64 的 data URL 会被拒绝。网关不压缩、不缩放、不校验大小，调用方负责遵守供应商的尺寸和字节限制。
+
+**图片不进入会话存储**：`AgentSessionMessage` 不保存图片，`AgentSessionLoop` 的首轮 `call.getMessages()` 也会被会话历史覆盖。`LlmGateway.one/round/toolLoop` 和 `AgentLoop.run` 支持图片输入，`AgentSessionLoop` 不支持；需要多轮携带图片时，使用单次模型调用入口自行维护消息。
 
 `LlmRole`：`SYSTEM`、`USER`、`ASSISTANT`、`TOOL_RESULT`、`OTHER`。`OTHER` 在出站前折叠成用户文本。
 
@@ -275,15 +298,18 @@ cancel.cancel();
 
 | 方法 | 说明 |
 | --- | --- |
-| `cancel()` | 幂等；触发已绑定的中断动作 |
+| `cancel()` | 幂等；触发已绑定的中断动作，abort 最多执行一次 |
 | `isCancelled()` | 是否已取消 |
 | `bindAbort(Runnable)` | 传输层绑定 `Call.cancel()` 等动作；传 `null` 解绑 |
+
+一个句柄只服务一次调用：第一次 abort 后进入终态，不复位。重试或发起新请求时请创建新句柄。
 
 取消语义：
 
 - 已经取消的调用在发请求前返回 `ABORTED`。
 - 进行中的请求会通过 `Call.cancel()` 中断。
 - `CompletableFuture.cancel(...)` 也会触发同样的中断；即使没有显式传句柄，网关内部也会创建。
+- `AgentLoop.runAsync` 和 `AgentSessionLoop.resumeAsync` 同样把返回 future 的取消接到内部句柄，会话层的取消会穿过 `thenCompose` 传到内层循环。
 - 取消是协作式的：忽略中断的自定义工具/传输可能继续执行。
 
 ### 3.8 流式调用
@@ -444,6 +470,10 @@ public interface Assembly<I, O> {
 | `ensureSession(userId, sessionId, bizId)` | 不存在则创建空会话并返回；已存在直接返回 | ⭐ |
 | `resume(userId, sessionId, call, tools, lifecycles, maxRounds, cancel, newUserTurns)` | 同步续聊一轮 | ⭐ |
 | `resumeAsync(...)` | 异步续聊一轮，返回 `CompletableFuture<ResumeResult>` | ⭐ |
+
+`resumeAsync` 的会话加载和落盘都在注入的 `ExecutorProvider.io()` 上执行；取消返回的
+future 会同时取消内层 `AgentLoop` 和正在进行的 HTTP 请求。<code>AgentSessionLoop</code>
+默认复用 `AgentLoop` 的执行器，也可以构造时显式传入。
 
 ```java
 AgentSession session = sessionLoop.ensureSession(userId, sessionId, "my-biz");
@@ -698,14 +728,14 @@ public interface ExecutorProvider extends Closeable {
 }
 ```
 
-`io()` 用于**阻塞任务**：异步调用日志、用户自己的阻塞 SDK。它不参与网关的异步 LLM 路径。
+`io()` 用于**阻塞副作用任务**：异步调用日志、`AgentLoop` 的工具执行、会话加载/落盘，以及业务自己的阻塞 SDK。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整对比见 [architecture.md](architecture.md) 的 5.2 节。
 
 | 实现 | 模块 | 构造/说明 |
 | --- | --- | --- |
-| `PlatformExecutorProvider` | core | `(AiLiteConfig.Executor)`；有界 `ThreadPoolExecutor` |
+| `PlatformExecutorProvider` | core | `(AiLiteConfig.Executor)`；有界 `ThreadPoolExecutor`，默认核心 `max(2, CPU)`、最大 `max(4, CPU×2)` |
 | `DirectExecutorProvider` | core | 调用线程内联执行，测试用 |
-| `CoroutineExecutorProvider` | `ai-lite-executor-coroutines` | `(parallelism = max(4, CPU*2), threadNamePrefix)` |
-| `VirtualThreadExecutorProvider` | `ai-lite-executor-jdk21` | 每任务一个虚拟线程，JDK 21+ |
+| `CoroutineExecutorProvider` | `ai-lite-executor-coroutines` | `(parallelism = max(4, CPU*2), threadNamePrefix)`；通过 Starter 时由 `core-size` 指定载体数 |
+| `VirtualThreadExecutorProvider` | `ai-lite-executor-jdk21` | 每任务一个虚拟线程，JDK 21+；忽略池字段 |
 
 配置：
 
@@ -721,6 +751,8 @@ ai-lite:
     rejection-policy: abort   # abort / caller-runs
 ```
 
+不同模式对字段的生效范围不同：`direct` / `virtual` 忽略全部池字段；`coroutines` 只用 `core-size`（载体数）和 `thread-name-prefix`；`platform` 使用全部字段。字段默认值和选型建议见 [configuration.md](configuration.md) 第 3 节。
+
 ### 7.2 Kotlin 协程桥接
 
 ```kotlin
@@ -733,15 +765,17 @@ runBlocking(provider.dispatcher()) {
 }
 ```
 
+`LlmCoroutines.one` 是单次模型调用入口的 Kotlin suspend 形式；`LlmCoroutines.oneAsync` 是同一个入口的 Java future 别名。
+
 | API | 说明 |
 | --- | --- |
 | `CoroutineExecutorProvider.dispatcher()` | 协程调度器，挂起点不占载体 |
 | `CoroutineExecutorProvider.io()` | 同一个池的阻塞视图 |
 | `CoroutineExecutorProvider.close()` | 关闭载体池 |
-| `LlmCoroutines.one(gateway, call, cancel?)` | 单次调用 |
+| `LlmCoroutines.one(gateway, call, cancel?)` | 单次模型调用入口（suspend） |
 | `LlmCoroutines.round(gateway, call, tools, cancel?)` | 单轮工具声明 |
 | `LlmCoroutines.toolLoop(gateway, call, tools, maxRounds?, cancel?)` | 工具循环 |
-| `LlmCoroutines.oneAsync(gateway, call, cancel?)` | Java 可调用的 `CompletableFuture` 入口 |
+| `LlmCoroutines.oneAsync(gateway, call, cancel?)` | 单次模型调用入口的 Java 别名，等价于 `gateway.oneAsync` |
 
 Java 不能直接调用 `suspend` 函数；Java 用 `gateway.oneAsync(...)` 或 `LlmCoroutines.oneAsync(...)`。
 

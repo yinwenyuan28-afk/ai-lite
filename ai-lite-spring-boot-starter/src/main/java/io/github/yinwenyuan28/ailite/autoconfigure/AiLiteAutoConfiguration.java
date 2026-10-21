@@ -136,8 +136,8 @@ public class AiLiteAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public AgentLoop aiLiteAgentLoop(LlmGateway gateway) {
-        return new AgentLoop(gateway);
+    public AgentLoop aiLiteAgentLoop(LlmGateway gateway, ExecutorProvider executor) {
+        return new AgentLoop(gateway, executor);
     }
 
     /**

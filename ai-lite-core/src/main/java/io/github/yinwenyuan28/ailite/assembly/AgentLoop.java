@@ -1,6 +1,6 @@
 package io.github.yinwenyuan28.ailite.assembly;
 
-import io.github.yinwenyuan28.ailite.json.AiLiteJson;
+import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
@@ -11,12 +11,12 @@ import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
 import io.github.yinwenyuan28.ailite.llm.LlmToolCall;
 import io.github.yinwenyuan28.ailite.llm.LlmUsage;
+import io.github.yinwenyuan28.ailite.llm.ToolExecutor;
 import io.github.yinwenyuan28.ailite.util.Strings;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
@@ -28,12 +28,45 @@ import java.util.concurrent.CompletionException;
 public final class AgentLoop {
 
     private final LlmGateway gateway;
+    private final ExecutorProvider executor;
+    private final ToolExecutor toolExecutor;
 
+    /**
+     * 复用网关的 I/O 执行器和工具执行器。
+     *
+     * @param gateway 模型网关
+     */
     public AgentLoop(LlmGateway gateway) {
+        this(gateway, null, null);
+    }
+
+    /**
+     * @param gateway  模型网关
+     * @param executor I/O 执行器，null 表示复用网关的
+     */
+    public AgentLoop(LlmGateway gateway, ExecutorProvider executor) {
+        this(gateway, executor, null);
+    }
+
+    /**
+     * @param gateway      模型网关
+     * @param executor     I/O 执行器，null 表示复用网关的
+     * @param toolExecutor 工具执行器，null 表示复用网关的
+     */
+    public AgentLoop(LlmGateway gateway, ExecutorProvider executor, ToolExecutor toolExecutor) {
         if (gateway == null) {
             throw new LlmCallException("网关不能为空");
         }
         this.gateway = gateway;
+        this.executor = executor == null ? gateway.getExecutor() : executor;
+        this.toolExecutor = toolExecutor == null ? gateway.getToolExecutor() : toolExecutor;
+    }
+
+    /**
+     * @return 本循环使用的 I/O 执行器
+     */
+    public ExecutorProvider getExecutor() {
+        return executor;
     }
 
     /**
@@ -156,7 +189,14 @@ public final class AgentLoop {
         final LlmCancelHandle effectiveCancel = cancel == null ? new LlmCancelHandle() : cancel;
         AgentLoopContext ctx = AgentLoopContext.copy(call.getBizId(), call.getMessages(), tools,
                 effectiveCancel);
-        eachBeforeRun(hooks, ctx);
+        // 异步入口不向调用方同步抛 hook 异常，统一用 future 表达。
+        try {
+            eachBeforeRun(hooks, ctx);
+        } catch (RuntimeException ex) {
+            CompletableFuture<LlmResult> failed = new CompletableFuture<LlmResult>();
+            failed.completeExceptionally(ex);
+            return failed;
+        }
         AsyncRun run = new AsyncRun(call, hooks, ctx, limit);
         run.result.whenComplete((value, error) -> {
             if (run.result.isCancelled()) {
@@ -193,6 +233,16 @@ public final class AgentLoop {
         }
 
         private void next() {
+            // 回调里抛出的 RuntimeException 如果没有出口，会停在一个没人观察的
+            // CompletableFuture 上，导致调用方的 future 永远不完成。
+            try {
+                advance();
+            } catch (RuntimeException ex) {
+                result.completeExceptionally(ex);
+            }
+        }
+
+        private void advance() {
             if (result.isDone()) {
                 return;
             }
@@ -243,7 +293,7 @@ public final class AgentLoop {
                             public void run() {
                                 runTools(ctx, hooks, shown);
                             }
-                        });
+                        }, executor.io());
                     } catch (RuntimeException ex) {
                         result.completeExceptionally(ex);
                         return;
@@ -326,7 +376,11 @@ public final class AgentLoop {
         return current;
     }
 
-    private static void runTools(AgentLoopContext ctx, List<AgentLifecycle> hooks, LlmResult shown) {
+    /**
+     * 执行一轮工具调用。beforeTool 可以改写参数或拒绝，实际执行交给 ToolExecutor，
+     * 同时保留 AgentLoop 自己的逐条生命周期顺序。
+     */
+    private void runTools(AgentLoopContext ctx, List<AgentLifecycle> hooks, LlmResult shown) {
         List<LlmToolCall> calls = shown.getToolCalls();
         ctx.getMessages().add(LlmMessage.assistant(shown.getContent(),
                 shown.getThinkingText(), shown.getThinkingSignature(), calls));
@@ -366,29 +420,18 @@ public final class AgentLoop {
         }
     }
 
-    private static String execute(List<LlmTool> tools, AgentToolCall call) {
-        LlmTool tool = null;
-        if (tools != null) {
-            for (LlmTool candidate : tools) {
-                if (candidate != null && candidate.name().equals(call.getName())) {
-                    tool = candidate;
-                    break;
-                }
+    /**
+     * 单次工具执行走 ToolExecutor。逐条调用是为了保留 beforeTool/afterTool 的顺序；
+     * 批量并行仍由 gateway.toolLoop 的 ToolExecutor.executeAsync 负责。
+     */
+    private String execute(List<LlmTool> tools, AgentToolCall call) {
+        LlmToolCall target = new LlmToolCall(call.getId(), call.getName(), call.getArgumentsJson());
+        try {
+            List<String> results = toolExecutor.execute(tools, Collections.singletonList(target));
+            if (results == null || results.isEmpty()) {
+                return "";
             }
-        }
-        if (tool == null) {
-            return "未找到工具: " + Strings.defaultString(call.getName());
-        }
-        Map<String, Object> arguments;
-        try {
-            String json = call.getArgumentsJson();
-            arguments = Strings.isBlank(json)
-                    ? new LinkedHashMap<String, Object>() : AiLiteJson.readMap(json);
-        } catch (RuntimeException ex) {
-            return "工具参数不是合法 JSON";
-        }
-        try {
-            String text = tool.execute(arguments);
+            String text = results.get(0);
             return text == null ? "" : text;
         } catch (RuntimeException ex) {
             return "工具执行失败";

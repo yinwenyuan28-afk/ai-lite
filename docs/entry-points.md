@@ -1,0 +1,181 @@
+# 单次模型调用入口
+
+「单次模型调用入口」指一次请求、一次响应、不执行工具的调用方式。它们是网关最薄的出口，也是所有编排逻辑的基础。
+
+本文只描述这些入口：返回什么、是否阻塞、怎么取消、出错怎么分类、重试放在哪里。编排层（`AgentLoop`、`AgentSessionLoop`、`Workflow`）不在本文范围内。
+
+---
+
+## 1. 入口清单
+
+| 入口 | 返回 | 是否阻塞 | 取消方式 | 适用场景 |
+| --- | --- | --- | --- | --- |
+| `LlmGateway.one(LlmCall)` | `LlmResult` | 阻塞调用线程直到响应或超时 | 只能靠超时 | 脚本、CLI、请求线程本来就该等待的同步业务 |
+| `LlmGateway.one(LlmCall, LlmCancelHandle)` | `LlmResult` | 同上，但支持其他线程中止 | `handle.cancel()` | 同步代码里需要“用户点了停止” |
+| `LlmGateway.oneAsync(LlmCall)` | `CompletableFuture<LlmResult>` | 不阻塞，提交后立即返回 | `future.cancel(true)` | Web 请求线程、批量并发、JDK 8 高并发接入 |
+| `LlmGateway.oneAsync(LlmCall, LlmCancelHandle)` | `CompletableFuture<LlmResult>` | 同上 | handle 或 `future.cancel(true)` | 需要把取消句柄传给上层（超时、断连、业务取消） |
+| `LlmCoroutines.one(gateway, call, cancel?)` | `LlmResult`（suspend） | 挂起协程，不占载体线程 | 取消 `Job` 或 `handle.cancel()` | Kotlin 协程代码 |
+| `LlmCoroutines.oneAsync(gateway, call, cancel?)` | `CompletableFuture<LlmResult>` | 不阻塞 | 同 `oneAsync` | 给 Java 侧保留的静态方法形式 |
+
+流式变体属于同一个家族：
+
+- `oneByStream(call, onDelta, cancel)`
+- `oneByStreamAsync(call, onDelta, cancel)`
+
+它们和 `one` 的区别只是“边生成边回调”，结果字段、校验、异常和取消语义完全一致。
+
+### `LlmCoroutines.oneAsync` 的定位
+
+`LlmCoroutines.oneAsync` 不是 suspend 函数，它只是 `gateway.oneAsync(call, cancel)` 的静态转发，方便 Java 调用方统一从 `LlmCoroutines` 取值。0.x 保留；1.0 再评估是否移除。Kotlin 调用方应优先用 `LlmCoroutines.one`。
+
+### 图片消息（base64）
+
+单次入口支持多模态图片，不需要额外 API：
+
+```java
+LlmImage image = new LlmImage("image/png", base64); // 裸 base64 或 data URL 均可
+LlmCall call = LlmCall.profile("biz", "main",
+        Collections.singletonList(LlmMessage.user("描述这张图",
+                Collections.singletonList(image))));
+LlmResult result = gateway.one(call);
+```
+
+- 模型配置的 `input` 必须包含 `image`，否则发请求前抛 `LlmCallException`。
+- 图片只允许出现在 `USER` / `OTHER` 消息；同一消息可带多张，顺序保持不变。
+- 支持裸 base64 和 `data:<mime>;base64,<data>`；非 base64 的 data URL、空 MIME、非 `image/*`、空数据都会被拒绝。
+- 三个协议分别序列化为 OpenAI `image_url`、Responses `input_image`、Anthropic `base64` source。
+- 网关不压缩、不缩放、不校验大小；供应商的尺寸和字节限制由调用方负责。
+- 图片不进入会话存储（`AgentSessionMessage` 不保存图片）；`AgentSessionLoop` 的首轮 `call.getMessages()` 也会被会话历史覆盖，图片输入请使用 `LlmGateway.one/round/toolLoop` 或 `AgentLoop.run`。
+
+---
+
+## 2. 取消契约 L1–L4
+
+“支持取消”必须分层承诺，否则无法验收。
+
+| 层级 | 含义 | 是否保证 |
+| --- | --- | --- |
+| L1 请求中止 | 在途 HTTP 请求被 abort，不再等待响应 | **保证（OkHttp）；JDK 8 传输见 2.1** |
+| L2 不再推进 | 取消后不再发新请求、不重试、不产生新的业务推进 | **保证** |
+| L3 无副作用 | 取消后不写任何业务数据 | 不保证；调用记录日志仍可能落库 |
+| L4 供应商停止计费 | 服务端立即停止生成和计费 | 不保证；客户端无法控制 |
+
+准确表述是：
+
+> **所有单次模型调用入口都保证 L2；L1 取决于传输层实现。内置 OkHttp 传输保证 L1，JDK 8 传输在正文读取阶段是 best-effort。L3 / L4 不承诺。**
+
+### 2.1 传输层差异
+
+L1 不是协议层能单方面保证的能力，最终取决于 HTTP 客户端能否打断阻塞读：
+
+| 传输 | 等响应头阶段 | 读正文 / SSE 阶段 |
+| --- | --- | --- |
+| OkHttp（推荐） | `Call.cancel()` 立即生效 | `Call.cancel()` 立即生效 |
+| JDK 8 `HttpURLConnection` | `disconnect()` 通常能解除阻塞 | `disconnect()` 不保证唤醒正在阻塞的 `read()`，可能等到读超时或下一次数据到达 |
+
+所以在 JDK 8 传输上，同步 `one(call, cancel)` 取消后最坏要等到读超时才返回。**对取消时延敏感的同步调用请使用 OkHttp 传输。** 网关的 L2 不受影响：一旦观察到取消，就不会再发新请求。
+
+### 2.2 终态语义
+
+| 取消方式 | 同步入口 | 异步入口 | 协程入口 |
+| --- | --- | --- | --- |
+| `LlmCancelHandle.cancel()` | 返回 `LlmResult(stopReason=ABORTED)` | future 正常完成，结果 `ABORTED` | `one` 正常返回 `ABORTED` |
+| `future.cancel(true)` | — | future 进入 cancelled，`get()` 抛 `CancellationException`；底层 HTTP 仍被 abort | `await()` 抛 `CancellationException` |
+| 协程 `Job.cancel()` | — | 底层 future 被取消，HTTP abort | `await()` 抛 `CancellationException` |
+
+补充规则：
+
+- **发请求前取消**：不发 HTTP，直接得到 `ABORTED`。
+- **重复取消**：只有一个终态，`abort` 动作最多执行一次。
+- **取消与完成竞态**：要么得到正常结果，要么得到 `ABORTED` / `CancellationException`，不会同时出现两个结果。网关在正常完成分支也会再检查一次取消状态，因此不依赖传输层是否遵守 abort 约定。
+- **取消后不重试**：网关内部没有重试，取消不会被任何内部逻辑重新发起。
+- **一个句柄只服务一次调用**：`LlmCancelHandle` 第一次 abort 后进入终态，不复位。重试或发起新请求时请创建新句柄。
+
+### 2.3 为什么 `oneAsync` 自动创建取消句柄
+
+即使调用方没有显式传 `LlmCancelHandle`，网关也会创建一个内部句柄，并把 `future.cancel(true)` 转成 `handle.cancel()`。这样“取消返回的 future”始终能中断底层 HTTP，而不是只把 future 标记为已取消、连接继续跑到超时。
+
+---
+
+## 3. 错误分类
+
+四个入口使用同一套校验和异常映射。
+
+| 类别 | 典型原因 | 表现 | 是否发出 HTTP |
+| --- | --- | --- | --- |
+| 配置/校验错误 | 配置缺失、bizId 未登记、模型不存在、协议不支持、消息为空、图片模型不支持、工具列表非法 | 同步抛 `LlmCallException` | 否 |
+| 传输错误 | 连接失败、读写超时、DNS、TLS、5xx | 同步入口抛 `LlmCallException`；异步入口 future 异常完成 | 是 |
+| 协议解析错误 | 响应不是合法 JSON、SSE 结构异常、字段缺失 | `LlmCallException`，保留根因 | 是 |
+| 业务拒绝 | 400/401/403/404、内容审核拒绝 | `LlmCallException`，错误摘要已遮蔽 api key | 是 |
+| 取消 | handle / future / Job 取消 | 见第 2.1 节 | 可能已发出 |
+| 超时 | 连接或读取超时 | `LlmCallException`，根因是 `SocketTimeoutException` | 是 |
+
+约定：
+
+- 参数校验在**发请求前**完成，`oneAsync` 的校验异常也是**同步抛出**，不会延迟到 future。
+- 异步入口的失败统一通过 future 异常完成表达，并保留根因；`ExecutionException` / `CompletionException` 会逐层解包到最内层原因。
+- 错误摘要写入调用记录前会遮蔽 api key，并截断到 200 字符。
+
+---
+
+## 4. 调用记录
+
+每次单次调用写一条 `LlmCallRecord`（工具循环按轮写多条）。**`future.cancel(true)` 也会补一条 `aborted` 记录。**
+
+| 字段 | 含义 |
+| --- | --- |
+| `stopReason` | 归一化停止原因；取消为 `aborted` |
+| `success` | 正常停止记 1；`error` / `aborted` / `maxRounds` 记 0 |
+| `inputTokens` / `outputTokens` / `totalTokens` | 各轮 usage 之和 |
+| `latencyMs` | 各轮耗时之和 |
+| `errorBrief` | 错误摘要，已遮蔽 api key，最多 200 字符 |
+
+记录通过注入的 `ExecutorProvider.io()` 异步写入。写入失败只记日志，不影响主调用。**取消后仍可能写一条 `aborted` 记录**，这是 L3 不保证的原因，属于预期行为。
+
+---
+
+## 5. 重试放在哪里
+
+网关**不做自动重试**：
+
+- `LlmGateway` 每轮只调用一次 transport，失败即进入 `ERROR` 或抛异常。
+- `OkHttpExecutor` 默认 `retryOnConnectionFailure(false)`，关闭 OkHttp 自己的连接重试。
+- `Attempt` 只负责 usage / latency 累加，不承担重试。
+
+重试属于调用方策略，应放在单次入口之外：
+
+```text
+调用方 / RetryPolicy
+  └─ gateway.oneAsync(call, cancel)
+       ├─ 次数、指数退避、可重试分类、总 deadline
+       └─ 每次尝试独立调用，独立记录
+```
+
+可重试：429、5xx、连接/读超时、可识别的瞬时 IO 错误。
+不可重试：400/401/403/404、参数/协议错误、内容审核拒绝、取消。
+流式：未收到首个 delta 前可重试；收到后不自动重试。
+
+详见 [重试边界](retry.md)。
+
+---
+
+## 6. 选择建议
+
+| 场景 | 选择 |
+| --- | --- |
+| 普通 Web 请求，业务线程可以等待 | `one` |
+| Web 请求需要尽快释放 Tomcat 线程 | `oneAsync`，controller 返回异步类型 |
+| 需要用户主动停止 | `one(call, handle)` 或 `oneAsync(call, handle)` |
+| Kotlin 协程 | `LlmCoroutines.one` |
+| 需要边生成边推给前端 | `oneByStream` / `oneByStreamAsync` |
+| 需要工具调用 | 不属于单次入口，用 `round` / `toolLoop` 或编排层 |
+
+---
+
+## 7. 相关文档
+
+- [API 使用指南](api-usage.md)
+- [架构说明](architecture.md)
+- [用户级并发与取消](user-level-concurrency.md)
+- [重试边界](retry.md)
+- [夯实单次模型调用入口](夯实单次模型调用入口-plan.md)

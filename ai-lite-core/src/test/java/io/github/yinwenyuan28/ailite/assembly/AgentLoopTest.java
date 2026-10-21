@@ -1,6 +1,8 @@
 package io.github.yinwenyuan28.ailite.assembly;
 
+import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.executor.PlatformExecutorProvider;
 import io.github.yinwenyuan28.ailite.llm.GatewayTestSupport;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
@@ -18,6 +20,7 @@ import io.github.yinwenyuan28.ailite.llm.LlmTransport;
 import io.github.yinwenyuan28.ailite.llm.LlmUsage;
 import io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore;
 import io.github.yinwenyuan28.ailite.llm.SequentialToolExecutor;
+import io.github.yinwenyuan28.ailite.llm.ToolExecutor;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -32,6 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * AgentLoop 的 7 个生命周期时机、拒绝/停止共识、工具执行和异步版本。
@@ -383,6 +387,100 @@ public class AgentLoopTest {
         assertThatThrownBy(() -> future.get(5, TimeUnit.SECONDS))
                 .isInstanceOf(ExecutionException.class)
                 .hasCauseInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    public void asyncBeforeModelHookExceptionOnLaterRoundCompletesExceptionally() {
+        GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport()
+                .enqueue(toolUse("c1", "echo", "{\"q\":\"x\"}"))
+                .enqueue(stop("done"));
+        AgentLoop loop = new AgentLoop(gateway(transport));
+        final int[] beforeModelCalls = new int[1];
+        RecordingLifecycle broken = new RecordingLifecycle("a") {
+            @Override
+            public void beforeModel(AgentLoopContext ctx) {
+                super.beforeModel(ctx);
+                beforeModelCalls[0]++;
+                if (beforeModelCalls[0] == 2) {
+                    throw new IllegalStateException("beforeModel down");
+                }
+            }
+        };
+
+        CompletableFuture<LlmResult> future = loop.runAsync(call(),
+                Collections.singletonList(tool("echo", new int[1], null)),
+                Collections.singletonList(broken), Integer.valueOf(4), null);
+
+        Throwable thrown = catchThrowable(() -> future.get(5, TimeUnit.SECONDS));
+        assertThat(thrown).isInstanceOf(ExecutionException.class);
+        assertThat(thrown.getCause())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("beforeModel down");
+    }
+
+    @Test
+    public void asyncToolsRunOnInjectedIoExecutor() throws Exception {
+        GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport()
+                .enqueue(toolUse("c1", "echo", "{\"q\":\"x\"}"))
+                .enqueue(stop("done"));
+        AiLiteConfig.Executor config = new AiLiteConfig.Executor();
+        config.setCoreSize(1);
+        config.setMaxSize(1);
+        config.setThreadNamePrefix("agent-io-");
+        PlatformExecutorProvider executor = new PlatformExecutorProvider(config);
+        final String[] toolThread = new String[1];
+        LlmTool echo = new LlmTool() {
+            @Override
+            public String name() {
+                return "echo";
+            }
+
+            @Override
+            public String description() {
+                return "echo";
+            }
+
+            @Override
+            public Map<String, Object> parameters() {
+                return Collections.<String, Object>singletonMap("type", "object");
+            }
+
+            @Override
+            public String execute(Map<String, Object> arguments) {
+                toolThread[0] = Thread.currentThread().getName();
+                return "ok";
+            }
+        };
+        try {
+            new AgentLoop(gateway(transport), executor).runAsync(call(),
+                    Collections.singletonList(echo), null, Integer.valueOf(4), null)
+                    .get(5, TimeUnit.SECONDS);
+        } finally {
+            executor.close();
+        }
+
+        assertThat(toolThread[0]).startsWith("agent-io-");
+    }
+
+    @Test
+    public void asyncToolsGoThroughToolExecutor() throws Exception {
+        GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport()
+                .enqueue(toolUse("c1", "echo", "{\"q\":\"x\"}"))
+                .enqueue(stop("done"));
+        final AtomicBoolean used = new AtomicBoolean(false);
+        ToolExecutor custom = new ToolExecutor() {
+            @Override
+            public List<String> execute(List<LlmTool> tools, List<LlmToolCall> calls) {
+                used.set(true);
+                return new SequentialToolExecutor().execute(tools, calls);
+            }
+        };
+        AgentLoop loop = new AgentLoop(gateway(transport), new DirectExecutorProvider(), custom);
+
+        loop.runAsync(call(), Collections.singletonList(tool("echo", new int[1], null)),
+                null, Integer.valueOf(4), null).get(5, TimeUnit.SECONDS);
+
+        assertThat(used).isTrue();
     }
 
     @Test

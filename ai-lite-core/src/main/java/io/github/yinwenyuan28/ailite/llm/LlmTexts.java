@@ -57,12 +57,40 @@ public final class LlmTexts {
                 if (!acceptsImage) {
                     throw new LlmCallException("模型不接受图片");
                 }
+                for (LlmImage image : message.getImages()) {
+                    validateImage(image);
+                }
             }
             for (LlmToolCall call : message.getToolCalls()) {
                 if (call == null || Strings.isBlank(call.getId())) {
                     throw new LlmCallException("工具调用缺少 id");
                 }
             }
+        }
+    }
+
+    /**
+     * 图片参数的统一校验：null、空 MIME、非 image/*、空 base64、非 base64 data URL
+     * 都在发请求前拒绝。
+     */
+    private static void validateImage(LlmImage image) {
+        if (image == null) {
+            throw new LlmCallException("图片不能为空");
+        }
+        String mime = image.getMime();
+        if (Strings.isBlank(mime)) {
+            throw new LlmCallException("图片 MIME 不能为空");
+        }
+        if (!mime.regionMatches(true, 0, "image/", 0, 6)) {
+            throw new LlmCallException("图片 MIME 必须以 image/ 开头: " + mime);
+        }
+        String data = image.getData();
+        if (Strings.isBlank(data)) {
+            throw new LlmCallException("图片数据不能为空");
+        }
+        if (data.regionMatches(true, 0, "data:", 0, 5)) {
+            // 走到这里说明是 data URL，但不是 base64 形式；三个协议只能发送 base64。
+            throw new LlmCallException("仅支持 base64 data URL");
         }
     }
 

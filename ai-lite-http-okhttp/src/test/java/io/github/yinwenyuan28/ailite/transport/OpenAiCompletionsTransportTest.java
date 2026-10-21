@@ -2,11 +2,13 @@ package io.github.yinwenyuan28.ailite.transport;
 
 import io.github.yinwenyuan28.ailite.http.okhttp.OkHttpExecutor;
 import io.github.yinwenyuan28.ailite.llm.LlmCompletion;
+import io.github.yinwenyuan28.ailite.llm.LlmImage;
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmRequest;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmThinkingLevel;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
+import com.fasterxml.jackson.databind.JsonNode;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -132,6 +134,69 @@ public class OpenAiCompletionsTransportTest {
         String body = server.takeRequest().getBody().readUtf8();
         assertThat(body).contains("\"content\":\"answer\"");
         assertThat(body).contains("\"reasoning_content\":\"think\"");
+    }
+
+    @Test
+    public void imagePartsKeepTextFirstAndUseDataUrls() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(
+                "{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{}}"));
+
+        String base = server.url("/v1").toString();
+        io.github.yinwenyuan28.ailite.llm.ResolvedModel model = TestModels.model(
+                OpenAiCompletionsTransport.API, base, "none", LlmThinkingLevel.OFF, false);
+        LlmRequest request = new LlmRequest(model,
+                Arrays.asList(
+                        LlmMessage.user("describe", Arrays.asList(
+                                new LlmImage("image/png", "AAAA"),
+                                new LlmImage("image/jpeg", "BBBB"))),
+                        LlmMessage.user("", Collections.singletonList(
+                                new LlmImage("image/webp", "CCCC")))),
+                Collections.<LlmTool>emptyList(), false, null, null, null, null, null);
+
+        transport.complete(request);
+
+        JsonNode messages = io.github.yinwenyuan28.ailite.json.AiLiteJson.readTree(
+                server.takeRequest().getBody().readUtf8()).get("messages");
+        JsonNode content = messages.get(0).get("content");
+        assertThat(content.size()).isEqualTo(3);
+        assertThat(content.get(0).path("type").asText()).isEqualTo("text");
+        assertThat(content.get(0).path("text").asText()).isEqualTo("describe");
+        assertThat(content.get(1).path("image_url").path("url").asText())
+                .isEqualTo("data:image/png;base64,AAAA");
+        assertThat(content.get(2).path("image_url").path("url").asText())
+                .isEqualTo("data:image/jpeg;base64,BBBB");
+
+        JsonNode imageOnly = messages.get(1).get("content");
+        assertThat(imageOnly.size()).isEqualTo(1);
+        assertThat(imageOnly.get(0).path("type").asText()).isEqualTo("image_url");
+        assertThat(imageOnly.get(0).path("image_url").path("url").asText())
+                .isEqualTo("data:image/webp;base64,CCCC");
+    }
+
+    @Test
+    public void streamingRequestStillSerializesImageParts() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
+                        + "\"finish_reason\":\"stop\"}],\"usage\":{}}\n\n"
+                        + "data: [DONE]\n\n"));
+
+        String base = server.url("/v1").toString();
+        io.github.yinwenyuan28.ailite.llm.ResolvedModel model = TestModels.model(
+                OpenAiCompletionsTransport.API, base, "none", LlmThinkingLevel.OFF, false);
+        LlmRequest request = new LlmRequest(model,
+                Collections.<LlmMessage>singletonList(LlmMessage.user("describe",
+                        Collections.singletonList(new LlmImage("image/png", "AAAA")))),
+                Collections.<LlmTool>emptyList(), true, null, null, null, null, null);
+
+        transport.complete(request);
+
+        JsonNode content = io.github.yinwenyuan28.ailite.json.AiLiteJson.readTree(
+                server.takeRequest().getBody().readUtf8())
+                .get("messages").get(0).get("content");
+        assertThat(content.size()).isEqualTo(2);
+        assertThat(content.get(1).path("image_url").path("url").asText())
+                .isEqualTo("data:image/png;base64,AAAA");
     }
 
     private LlmRequest request(boolean stream, List<LlmTool> tools,

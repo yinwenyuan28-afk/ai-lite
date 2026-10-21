@@ -70,6 +70,77 @@ public class LlmTextsTest {
     }
 
     @Test
+    public void validateRejectsNullImageElement() {
+        List<LlmImage> images = Collections.singletonList(null);
+        List<LlmMessage> messages = Collections.singletonList(LlmMessage.user("look", images));
+
+        assertThatThrownBy(() -> LlmTexts.validate(messages, true))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessage("图片不能为空");
+    }
+
+    @Test
+    public void validateRejectsBlankMime() {
+        List<LlmImage> images = Collections.singletonList(new LlmImage("  ", "AAAA"));
+        List<LlmMessage> messages = Collections.singletonList(LlmMessage.user("look", images));
+
+        assertThatThrownBy(() -> LlmTexts.validate(messages, true))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessage("图片 MIME 不能为空");
+    }
+
+    @Test
+    public void validateRejectsNonImageMime() {
+        List<LlmImage> images = Collections.singletonList(new LlmImage("text/plain", "AAAA"));
+        List<LlmMessage> messages = Collections.singletonList(LlmMessage.user("look", images));
+
+        assertThatThrownBy(() -> LlmTexts.validate(messages, true))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("图片 MIME 必须以 image/ 开头");
+    }
+
+    @Test
+    public void validateRejectsBlankData() {
+        List<LlmImage> images = Collections.singletonList(new LlmImage("image/png", " "));
+        List<LlmMessage> messages = Collections.singletonList(LlmMessage.user("look", images));
+
+        assertThatThrownBy(() -> LlmTexts.validate(messages, true))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessage("图片数据不能为空");
+    }
+
+    @Test
+    public void validateRejectsNonBase64DataUrl() {
+        List<LlmImage> images = Collections.singletonList(new LlmImage("image/svg+xml",
+                "data:image/svg+xml;charset=utf-8,<svg/>"));
+        List<LlmMessage> messages = Collections.singletonList(LlmMessage.user("look", images));
+
+        assertThatThrownBy(() -> LlmTexts.validate(messages, true))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessage("仅支持 base64 data URL");
+    }
+
+    @Test
+    public void validateAcceptsUppercaseImageMime() {
+        List<LlmImage> images = Collections.singletonList(new LlmImage("IMAGE/PNG", "AAAA"));
+        List<LlmMessage> messages = Collections.singletonList(LlmMessage.user("look", images));
+
+        LlmTexts.validate(messages, true);
+    }
+
+    @Test
+    public void validateAcceptsMultipleImagesAndImageOnlyMessage() {
+        List<LlmMessage> messages = Arrays.asList(
+                LlmMessage.user("two images", Arrays.asList(
+                        new LlmImage("image/png", "AAAA"),
+                        new LlmImage("image/jpeg", "BBBB"))),
+                LlmMessage.user("", Collections.singletonList(
+                        new LlmImage("image/webp", "CCCC"))));
+
+        LlmTexts.validate(messages, true);
+    }
+
+    @Test
     public void validateAcceptsWellFormedConversation() {
         List<LlmMessage> messages = Arrays.asList(
                 LlmMessage.system("rules"),

@@ -117,6 +117,8 @@ profiles:
 
 ## 3. 执行器 `ai-lite.executor`
 
+`ExecutorProvider.io()` 执行的是**阻塞副作用任务**：会话加载/落盘、工具执行、调用记录落表，以及协程模式下显式提交的阻塞代码。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整说明和对比见 [architecture.md](architecture.md) 的 5.2 节。
+
 ```yaml
 executor:
   mode: platform
@@ -128,12 +130,34 @@ executor:
   rejection-policy: abort
 ```
 
-| 字段 | 说明 |
-| --- | --- |
-| `mode` | `platform`、`direct`、`virtual`、`coroutines` |
-| `virtual` | 需要 JDK 21 和 `ai-lite-executor-jdk21` 依赖 |
-| `coroutines` | 需要 `ai-lite-executor-coroutines` 依赖；JDK 8 可用 |
-| `rejection-policy` | `abort` 或 `caller-runs` |
+| 字段 | 默认值 | 生效模式 | 说明 |
+| --- | --- | --- | --- |
+| `mode` | `platform` | 全部 | `platform`、`direct`、`virtual`、`coroutines` |
+| `core-size` | `max(2, CPU)` | platform、coroutines | platform 的核心线程数；coroutines 通过 Starter 时的载体线程数 |
+| `max-size` | `max(4, CPU×2)` | platform | 最大线程数 |
+| `queue-capacity` | `1000` | platform | 有界队列容量；队列满后按拒绝策略处理 |
+| `keep-alive-seconds` | `60` | platform | 空闲线程存活时间 |
+| `thread-name-prefix` | `ai-lite-` | platform、coroutines | coroutines 模式会在后面追加 `coroutine-` |
+| `rejection-policy` | `abort` | platform | `abort` 或 `caller-runs` |
+
+### 3.1 模式差异
+
+| 模式 | `io()` 的行为 | 依赖 | 说明 |
+| --- | --- | --- | --- |
+| `platform` | 有界 `ThreadPoolExecutor` | 无 | 每个阻塞任务占一个平台线程；并发上限由 `max-size` 和队列控制 |
+| `direct` | 调用线程内联执行 | 无 | 不建池、不切线程；适合测试或确定任务很短、不需要并发的场景 |
+| `virtual` | 每任务一个虚拟线程 | JDK 21 + `ai-lite-executor-jdk21` | 阻塞在可挂起操作时卸载载体；注意 `synchronized`/native pinning |
+| `coroutines` | 固定载体池的阻塞视图 | `ai-lite-executor-coroutines` | 协程续体走 `dispatcher()`；`io()` 与载体池共用，长阻塞会饿死其他协程 |
+
+选型建议：
+
+- JDK 8、Java 为主、阻塞任务量中等：`platform`。
+- 单元测试、需要确定性时序：`direct`。
+- JDK 21、工具或老 SDK 是阻塞式：`virtual`。
+- JDK 8 + Kotlin、LLM 等待占主导：`coroutines`，并实际使用 `LlmCoroutines`。
+- 如果主要是等模型、阻塞任务很少：`platform` 就够了，换执行器不会显著提升模型 QPS。
+
+注意：`direct` 和 `virtual` 会忽略所有池字段；`coroutines` 只使用 `core-size` 和 `thread-name-prefix`，`max-size`、`queue-capacity`、`keep-alive-seconds`、`rejection-policy` 不生效。`platform` 默认 `abort`，队列满会拒绝会话加载/落盘；异步调用日志会吞掉拒绝并打 warn，不影响主调用。
 
 ## 4. 会话 `ai-lite.session`
 

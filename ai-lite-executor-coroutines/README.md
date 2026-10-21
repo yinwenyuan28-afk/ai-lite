@@ -29,9 +29,13 @@ CompletableFuture<LlmResult> future = gateway.oneAsync(call);
 // ai-lite.executor.mode=coroutines
 ```
 
+`LlmCoroutines.one` 是**单次模型调用入口**的 Kotlin suspend 形式；`LlmCoroutines.oneAsync` 是同一个入口的 Java future 别名，等价于 `gateway.oneAsync`。
+
 ## 边界
 
 - `provider.io()` 返回的 Executor 仍会阻塞载体线程，只适合短任务。
 - 真正高并发请使用 `dispatcher()` + `LlmCoroutines`，或直接使用网关的 `*Async`。
-- 协程取消会取消返回的 `CompletableFuture`，进而触发 HTTP 请求中断。
+- 协程取消会取消返回的 `CompletableFuture`，网关再把取消转成 `LlmCancelHandle.cancel()`，触发 HTTP 请求中断。`await()` 使用 `future.cancel(false)`，不要依赖线程中断。
+- L1（真正打断在途 HTTP）取决于传输层：OkHttp 全阶段有效；JDK 8 `HttpURLConnection` 在正文阻塞读阶段可能等到读超时。完整分层见 `docs/entry-points.md`。
+- `LlmCoroutinesParityTest` 锁定桥接语义：不重试、不改写请求、不吞 `CancellationException`。
 - 默认载体线程数是 `max(4, CPU 核数 * 2)`。

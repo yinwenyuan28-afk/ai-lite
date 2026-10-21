@@ -2,11 +2,13 @@ package io.github.yinwenyuan28.ailite.transport;
 
 import io.github.yinwenyuan28.ailite.http.okhttp.OkHttpExecutor;
 import io.github.yinwenyuan28.ailite.llm.LlmCompletion;
+import io.github.yinwenyuan28.ailite.llm.LlmImage;
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmRequest;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmThinkingLevel;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
+import com.fasterxml.jackson.databind.JsonNode;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import org.junit.After;
@@ -86,6 +88,64 @@ public class OpenAiResponsesTransportTest {
         assertThat(body).contains("\"reasoning\":{\"effort\":\"high\",\"summary\":\"auto\"}");
         assertThat(body).contains("\"tools\"");
         assertThat(body).contains("\"name\":\"echo\"");
+    }
+
+    @Test
+    public void imagePartsUseInputImageWithDataUrl() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: {\"type\":\"response.completed\",\"response\":{}}\n\n"));
+
+        String base = server.url("/v1").toString();
+        io.github.yinwenyuan28.ailite.llm.ResolvedModel model = TestModels.model(
+                OpenAiResponsesTransport.API, base, "reasoning-effort",
+                LlmThinkingLevel.OFF, false);
+        LlmRequest request = new LlmRequest(model,
+                Collections.<LlmMessage>singletonList(LlmMessage.user("describe", Arrays.asList(
+                        new LlmImage("image/png", "AAAA"),
+                        new LlmImage("image/jpeg", "BBBB")))),
+                Collections.<LlmTool>emptyList(), true, null, null, null, null, null);
+
+        transport.complete(request);
+
+        JsonNode input = io.github.yinwenyuan28.ailite.json.AiLiteJson.readTree(
+                server.takeRequest().getBody().readUtf8()).get("input");
+        JsonNode content = input.get(0).get("content");
+        assertThat(content.size()).isEqualTo(3);
+        assertThat(content.get(0).path("type").asText()).isEqualTo("input_text");
+        assertThat(content.get(0).path("text").asText()).isEqualTo("describe");
+        assertThat(content.get(1).path("type").asText()).isEqualTo("input_image");
+        assertThat(content.get(1).path("detail").asText()).isEqualTo("auto");
+        assertThat(content.get(1).path("image_url").asText())
+                .isEqualTo("data:image/png;base64,AAAA");
+        assertThat(content.get(2).path("image_url").asText())
+                .isEqualTo("data:image/jpeg;base64,BBBB");
+    }
+
+    @Test
+    public void imageOnlyMessageProducesSingleInputImage() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: {\"type\":\"response.completed\",\"response\":{}}\n\n"));
+
+        String base = server.url("/v1").toString();
+        io.github.yinwenyuan28.ailite.llm.ResolvedModel model = TestModels.model(
+                OpenAiResponsesTransport.API, base, "reasoning-effort",
+                LlmThinkingLevel.OFF, false);
+        LlmRequest request = new LlmRequest(model,
+                Collections.<LlmMessage>singletonList(LlmMessage.user("",
+                        Collections.singletonList(new LlmImage("image/png", "AAAA")))),
+                Collections.<LlmTool>emptyList(), true, null, null, null, null, null);
+
+        transport.complete(request);
+
+        JsonNode content = io.github.yinwenyuan28.ailite.json.AiLiteJson.readTree(
+                server.takeRequest().getBody().readUtf8())
+                .get("input").get(0).get("content");
+        assertThat(content.size()).isEqualTo(1);
+        assertThat(content.get(0).path("type").asText()).isEqualTo("input_image");
+        assertThat(content.get(0).path("image_url").asText())
+                .isEqualTo("data:image/png;base64,AAAA");
     }
 
     private LlmRequest request(StringBuilder deltas) {
