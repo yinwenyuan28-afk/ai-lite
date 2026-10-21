@@ -70,7 +70,7 @@ public class AnthropicMessagesTransportTest {
         LlmCompletion result = transport.complete(request(deltas, Collections.<LlmTool>emptyList()));
 
         assertThat(deltas.toString()).isEqualTo("think\n\nhello");
-        assertThat(result.getContent()).isEqualTo("think\n\nhello");
+        assertThat(result.getContent()).isEqualTo("hello");
         assertThat(result.getThinkingText()).isEqualTo("think");
         assertThat(result.getStop()).isEqualTo(LlmStopReason.TOOL_USE);
         assertThat(result.getToolCalls()).hasSize(1);
@@ -92,6 +92,29 @@ public class AnthropicMessagesTransportTest {
         assertThat(body).contains("\"input_schema\"");
         assertThat(body).contains("\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":16384}");
         assertThat(body).contains("\"stream\":true");
+    }
+
+    @Test
+    public void assistantThinkingAndSignatureAreSentAsBlock() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: {\"type\":\"message_stop\"}\n\n"));
+
+        String base = server.url("").toString();
+        io.github.yinwenyuan28.ailite.llm.ResolvedModel model = TestModels.model(
+                AnthropicMessagesTransport.API, base, "anthropic-budget", LlmThinkingLevel.HIGH, true);
+        LlmRequest request = new LlmRequest(model,
+                Arrays.asList(LlmMessage.system("rules"), LlmMessage.user("hi"),
+                        LlmMessage.assistant("answer", "think", "sig", null)),
+                Collections.<LlmTool>emptyList(), true, null, null, null, null, null);
+
+        transport.complete(request);
+
+        String body = server.takeRequest().getBody().readUtf8();
+        assertThat(body).contains("\"type\":\"thinking\"");
+        assertThat(body).contains("\"thinking\":\"think\"");
+        assertThat(body).contains("\"signature\":\"sig\"");
+        assertThat(body).contains("\"text\":\"answer\"");
     }
 
     private LlmRequest request(final StringBuilder deltas, List<LlmTool> tools) {

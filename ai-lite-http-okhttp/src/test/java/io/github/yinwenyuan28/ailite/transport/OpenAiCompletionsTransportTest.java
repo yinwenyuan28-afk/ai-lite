@@ -46,7 +46,7 @@ public class OpenAiCompletionsTransportTest {
     }
 
     @Test
-    public void blockingResponseSplicesReasoningAndContent() {
+    public void blockingResponseKeepsReasoningSeparate() {
         server.enqueue(new MockResponse().setResponseCode(200).setBody(
                 "{\"choices\":[{\"message\":{\"content\":\"answer\","
                         + "\"reasoning_content\":\"think\"},\"finish_reason\":\"stop\"}],"
@@ -54,7 +54,7 @@ public class OpenAiCompletionsTransportTest {
 
         LlmCompletion result = transport.complete(request(false, Collections.<LlmTool>emptyList(), null));
 
-        assertThat(result.getContent()).isEqualTo("think\n\nanswer");
+        assertThat(result.getContent()).isEqualTo("answer");
         assertThat(result.getThinkingText()).isEqualTo("think");
         assertThat(result.getStop()).isEqualTo(LlmStopReason.STOP);
         assertThat(result.getUsage().getTotalTokens()).isEqualTo(15);
@@ -76,7 +76,8 @@ public class OpenAiCompletionsTransportTest {
         LlmCompletion result = transport.complete(request(true, Collections.<LlmTool>emptyList(), deltas));
 
         assertThat(deltas.toString()).isEqualTo("think\n\nhi");
-        assertThat(result.getContent()).isEqualTo("think\n\nhi");
+        assertThat(result.getContent()).isEqualTo("hi");
+        assertThat(result.getThinkingText()).isEqualTo("think");
         assertThat(result.getStop()).isEqualTo(LlmStopReason.TOOL_USE);
         assertThat(result.getToolCalls()).hasSize(1);
         assertThat(result.getToolCalls().get(0).getName()).isEqualTo("now");
@@ -111,6 +112,26 @@ public class OpenAiCompletionsTransportTest {
         String body = server.takeRequest().getBody().readUtf8();
         assertThat(body).contains("\"thinking\":{\"type\":\"enabled\"}");
         assertThat(body).contains("\"reasoning_effort\":\"high\"");
+    }
+
+    @Test
+    public void assistantThinkingIsSentAsSeparateReasoningContent() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(
+                "{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{}}"));
+
+        String base = server.url("/v1").toString();
+        io.github.yinwenyuan28.ailite.llm.ResolvedModel model = TestModels.model(
+                OpenAiCompletionsTransport.API, base, "deepseek", LlmThinkingLevel.OFF, true);
+        LlmRequest request = new LlmRequest(model,
+                Arrays.asList(LlmMessage.system("rules"), LlmMessage.user("hi"),
+                        LlmMessage.assistant("answer", "think", null)),
+                Collections.<LlmTool>emptyList(), false, null, null, null, null, null);
+
+        transport.complete(request);
+
+        String body = server.takeRequest().getBody().readUtf8();
+        assertThat(body).contains("\"content\":\"answer\"");
+        assertThat(body).contains("\"reasoning_content\":\"think\"");
     }
 
     private LlmRequest request(boolean stream, List<LlmTool> tools,

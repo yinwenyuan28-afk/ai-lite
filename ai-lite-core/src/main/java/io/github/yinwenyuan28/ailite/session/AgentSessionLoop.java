@@ -240,7 +240,8 @@ public final class AgentSessionLoop {
             }
             LlmResult raw = output.getResult();
             recorded.add(AgentSessionMessage.fromResult(
-                    raw.getThinkingText(), output.getContent(), raw.getToolCalls()));
+                    raw.getThinkingText(), raw.getThinkingSignature(),
+                    output.getContent(), raw.getToolCalls()));
         }
 
         @Override

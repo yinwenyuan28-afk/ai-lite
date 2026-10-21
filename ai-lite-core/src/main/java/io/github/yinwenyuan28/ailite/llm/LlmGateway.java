@@ -564,10 +564,11 @@ public final class LlmGateway {
     private LlmResult result(Attempt attempt, LlmCompletion completion, LlmStopReason stop, int rounds) {
         String content = completion == null ? "" : completion.getContent();
         String thinking = completion == null ? null : completion.getThinkingText();
+        String signature = completion == null ? null : completion.getThinkingSignature();
         List<LlmToolCall> calls = completion == null ? null : completion.getToolCalls();
-        return new LlmResult(content, thinking, stop, attempt.usage(), attempt.model.getProvider(),
-                attempt.model.getModelId(), attempt.model.getThinkingLevel(), attempt.latencyMs,
-                rounds, calls);
+        return new LlmResult(content, thinking, signature, stop, attempt.usage(),
+                attempt.model.getProvider(), attempt.model.getModelId(),
+                attempt.model.getThinkingLevel(), attempt.latencyMs, rounds, calls);
     }
 
     private void record(Attempt attempt, int round, LlmStopReason stop, int success,

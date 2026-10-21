@@ -14,7 +14,6 @@ import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmRequest;
 import io.github.yinwenyuan28.ailite.llm.LlmRole;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
-import io.github.yinwenyuan28.ailite.llm.LlmTexts;
 import io.github.yinwenyuan28.ailite.llm.LlmThinking;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
 import io.github.yinwenyuan28.ailite.llm.LlmToolCall;
@@ -437,7 +436,7 @@ public final class OpenAiResponsesTransport implements LlmTransport {
                 effective = forced == LlmStopReason.ABORTED
                         ? LlmStopReason.ABORTED : LlmStopReason.TOOL_USE;
             }
-            return new LlmCompletion(LlmTexts.splice(reasoning.toString(), content.toString()),
+            return new LlmCompletion(content.toString(),
                     Strings.isBlank(reasoning.toString()) ? null : reasoning.toString(),
                     effective, usage, calls);
         }

@@ -42,6 +42,17 @@ public class LlmMessageTest {
     }
 
     @Test
+    public void assistantKeepsTextAndThinkingSeparate() {
+        LlmMessage message = LlmMessage.assistant("answer", "think", "sig",
+                Collections.singletonList(new LlmToolCall("c1", "now", "{}")));
+
+        assertThat(message.getText()).isEqualTo("answer");
+        assertThat(message.getThinkingText()).isEqualTo("think");
+        assertThat(message.getThinkingSignature()).isEqualTo("sig");
+        assertThat(message.getToolCalls()).hasSize(1);
+    }
+
+    @Test
     public void toolResultKeepsCallId() {
         LlmMessage message = LlmMessage.toolResult("c1", "ok");
 

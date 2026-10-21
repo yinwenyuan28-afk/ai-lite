@@ -41,6 +41,30 @@ public class AgentLoopTest {
     private static final List<LlmMessage> MESSAGES = Collections.singletonList(LlmMessage.user("hi"));
 
     @Test
+    public void thinkingIsKeptSeparateInNextRoundAssistantMessage() {
+        GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport()
+                .enqueue(new LlmCompletion("visible", "think", LlmStopReason.TOOL_USE,
+                        LlmUsage.zero(),
+                        Collections.singletonList(new LlmToolCall("c1", "echo", "{}"))))
+                .enqueue(stop("done"));
+        AgentLoop loop = new AgentLoop(gateway(transport));
+
+        loop.run(call(), Collections.singletonList(tool("echo", new int[1], null)),
+                null, Integer.valueOf(4), null);
+
+        List<LlmMessage> second = transport.requests().get(1).getMessages();
+        LlmMessage assistant = null;
+        for (LlmMessage message : second) {
+            if (message.getRole() == LlmRole.ASSISTANT) {
+                assistant = message;
+            }
+        }
+        assertThat(assistant).isNotNull();
+        assertThat(assistant.getText()).isEqualTo("visible");
+        assertThat(assistant.getThinkingText()).isEqualTo("think");
+    }
+
+    @Test
     public void hooksRunInOrderAndToolExecutes() {
         GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport()
                 .enqueue(toolUse("c1", "echo", "{\"q\":\"x\"}"))

@@ -128,6 +128,9 @@ public final class AgentSessionCodec {
             if (message.getThinkingText() != null) {
                 item.put("thinkingText", message.getThinkingText());
             }
+            if (message.getThinkingSignature() != null) {
+                item.put("thinkingSignature", message.getThinkingSignature());
+            }
             if (message.getToolCallId() != null) {
                 item.put("toolCallId", message.getToolCallId());
             }
@@ -180,7 +183,7 @@ public final class AgentSessionCodec {
             }
         }
         return AgentSessionMessage.of(id, role, text(node, "text"), text(node, "thinkingText"),
-                toolCalls, text(node, "toolCallId"));
+                text(node, "thinkingSignature"), toolCalls, text(node, "toolCallId"));
     }
 
     private static String text(JsonNode node, String field) {

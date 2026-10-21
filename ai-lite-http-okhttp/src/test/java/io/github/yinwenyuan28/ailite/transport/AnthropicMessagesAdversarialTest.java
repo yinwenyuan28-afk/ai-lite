@@ -152,7 +152,8 @@ public class AnthropicMessagesAdversarialTest {
         }));
 
         assertThat(deltas.toString()).isEqualTo("think\n\nab");
-        assertThat(result.getContent()).isEqualTo("think\n\nab");
+        assertThat(result.getContent()).isEqualTo("ab");
+        assertThat(result.getThinkingText()).isEqualTo("think");
     }
 
     @Test

@@ -15,7 +15,6 @@ import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmRequest;
 import io.github.yinwenyuan28.ailite.llm.LlmRole;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
-import io.github.yinwenyuan28.ailite.llm.LlmTexts;
 import io.github.yinwenyuan28.ailite.llm.LlmThinking;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
 import io.github.yinwenyuan28.ailite.llm.LlmToolCall;
@@ -234,6 +233,14 @@ public final class AnthropicMessagesTransport implements LlmTransport {
             }
             if (message.getRole() == LlmRole.ASSISTANT) {
                 ArrayNode content = TransportSupport.array();
+                if (Strings.isNotBlank(message.getThinkingText())
+                        && Strings.isNotBlank(message.getThinkingSignature())) {
+                    ObjectNode thinking = TransportSupport.object();
+                    thinking.put("type", "thinking");
+                    thinking.put("thinking", message.getThinkingText());
+                    thinking.put("signature", message.getThinkingSignature());
+                    content.add(thinking);
+                }
                 if (Strings.isNotEmpty(message.getText())) {
                     ObjectNode text = TransportSupport.object();
                     text.put("type", "text");
@@ -389,6 +396,11 @@ public final class AnthropicMessagesTransport implements LlmTransport {
                     state.reasoning.append(text);
                     TransportSupport.emit(request.getOnDelta(), text);
                 }
+            } else if ("signature_delta".equals(deltaType)) {
+                String signature = TransportSupport.text(delta, "signature");
+                if (Strings.isNotEmpty(signature)) {
+                    state.signature.append(signature);
+                }
             } else if ("input_json_delta".equals(deltaType)) {
                 int index = event.path("index").asInt(0);
                 ToolBuf buf = state.tools.get(Integer.valueOf(index));
@@ -462,6 +474,7 @@ public final class AnthropicMessagesTransport implements LlmTransport {
 
     private static final class AnthropicState {
         private final StringBuilder reasoning = new StringBuilder();
+        private final StringBuilder signature = new StringBuilder();
         private final StringBuilder content = new StringBuilder();
         private final Map<Integer, ToolBuf> tools = new TreeMap<Integer, ToolBuf>();
         private boolean blankEmitted;
@@ -486,8 +499,9 @@ public final class AnthropicMessagesTransport implements LlmTransport {
                 effective = forced == LlmStopReason.ABORTED
                         ? LlmStopReason.ABORTED : LlmStopReason.TOOL_USE;
             }
-            return new LlmCompletion(LlmTexts.splice(reasoning.toString(), content.toString()),
+            return new LlmCompletion(content.toString(),
                     Strings.isBlank(reasoning.toString()) ? null : reasoning.toString(),
+                    Strings.isBlank(signature.toString()) ? null : signature.toString(),
                     effective, LlmUsage.of(inputTokens, outputTokens, inputTokens + outputTokens), calls);
         }
     }

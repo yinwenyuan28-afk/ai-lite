@@ -5,7 +5,8 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * 一条结构化消息。助手正文如果包含思考，已经由传输层拼在 text 前面。
+ * 一条结构化消息。助手正文和思考是独立字段：
+ * {@link #getText()} 只放可见正文，{@link #getThinkingText()} 放推理原文。
  *
  * <p>图片和工具调用在构造时复制成只读列表，避免调用方后续修改影响已发出的请求。</p>
  */
@@ -13,14 +14,18 @@ public final class LlmMessage {
 
     private final LlmRole role;
     private final String text;
+    private final String thinkingText;
+    private final String thinkingSignature;
     private final List<LlmImage> images;
     private final List<LlmToolCall> toolCalls;
     private final String toolCallId;
 
-    private LlmMessage(LlmRole role, String text, List<LlmImage> images,
-                       List<LlmToolCall> toolCalls, String toolCallId) {
+    private LlmMessage(LlmRole role, String text, String thinkingText, String thinkingSignature,
+                       List<LlmImage> images, List<LlmToolCall> toolCalls, String toolCallId) {
         this.role = role;
         this.text = text == null ? "" : text;
+        this.thinkingText = thinkingText;
+        this.thinkingSignature = thinkingSignature;
         this.images = images == null
                 ? Collections.<LlmImage>emptyList()
                 : Collections.unmodifiableList(new ArrayList<LlmImage>(images));
@@ -37,7 +42,7 @@ public final class LlmMessage {
      * @return 消息对象
      */
     public static LlmMessage system(String text) {
-        return new LlmMessage(LlmRole.SYSTEM, text, null, null, null);
+        return new LlmMessage(LlmRole.SYSTEM, text, null, null, null, null, null);
     }
 
     /**
@@ -47,7 +52,7 @@ public final class LlmMessage {
      * @return 消息对象
      */
     public static LlmMessage user(String text) {
-        return new LlmMessage(LlmRole.USER, text, null, null, null);
+        return new LlmMessage(LlmRole.USER, text, null, null, null, null, null);
     }
 
     /**
@@ -58,18 +63,46 @@ public final class LlmMessage {
      * @return 消息对象
      */
     public static LlmMessage user(String text, List<LlmImage> images) {
-        return new LlmMessage(LlmRole.USER, text, images, null, null);
+        return new LlmMessage(LlmRole.USER, text, null, null, images, null, null);
     }
 
     /**
      * 助手消息。工具循环中用于把模型返回的正文和工具调用写回上下文。
      *
-     * @param text      助手正文
+     * @param text      可见正文
      * @param toolCalls 工具调用列表，可为 null
      * @return 消息对象
      */
     public static LlmMessage assistant(String text, List<LlmToolCall> toolCalls) {
-        return new LlmMessage(LlmRole.ASSISTANT, text, null, toolCalls, null);
+        return assistant(text, null, null, toolCalls);
+    }
+
+    /**
+     * 带思考文本的助手消息。
+     *
+     * @param text         可见正文
+     * @param thinkingText 推理原文，可为 null
+     * @param toolCalls    工具调用列表，可为 null
+     * @return 消息对象
+     */
+    public static LlmMessage assistant(String text, String thinkingText,
+                                       List<LlmToolCall> toolCalls) {
+        return assistant(text, thinkingText, null, toolCalls);
+    }
+
+    /**
+     * 带思考文本和签名的助手消息。Anthropic 回传 thinking block 时需要签名。
+     *
+     * @param text              可见正文
+     * @param thinkingText      推理原文，可为 null
+     * @param thinkingSignature 推理签名，可为 null
+     * @param toolCalls         工具调用列表，可为 null
+     * @return 消息对象
+     */
+    public static LlmMessage assistant(String text, String thinkingText, String thinkingSignature,
+                                       List<LlmToolCall> toolCalls) {
+        return new LlmMessage(LlmRole.ASSISTANT, text, thinkingText, thinkingSignature,
+                null, toolCalls, null);
     }
 
     /**
@@ -80,7 +113,7 @@ public final class LlmMessage {
      * @return 消息对象
      */
     public static LlmMessage toolResult(String toolCallId, String text) {
-        return new LlmMessage(LlmRole.TOOL_RESULT, text, null, null, toolCallId);
+        return new LlmMessage(LlmRole.TOOL_RESULT, text, null, null, null, null, toolCallId);
     }
 
     /**
@@ -90,7 +123,7 @@ public final class LlmMessage {
      * @return 消息对象
      */
     public static LlmMessage other(String text) {
-        return new LlmMessage(LlmRole.OTHER, text, null, null, null);
+        return new LlmMessage(LlmRole.OTHER, text, null, null, null, null, null);
     }
 
     /**
@@ -101,15 +134,32 @@ public final class LlmMessage {
      * @return 消息对象
      */
     public static LlmMessage other(String text, List<LlmImage> images) {
-        return new LlmMessage(LlmRole.OTHER, text, images, null, null);
+        return new LlmMessage(LlmRole.OTHER, text, null, null, images, null, null);
     }
 
     public LlmRole getRole() {
         return role;
     }
 
+    /**
+     * @return 可见正文；不含 thinking
+     */
     public String getText() {
         return text;
+    }
+
+    /**
+     * @return 推理原文；没有时为 null
+     */
+    public String getThinkingText() {
+        return thinkingText;
+    }
+
+    /**
+     * @return 推理签名；没有时为 null
+     */
+    public String getThinkingSignature() {
+        return thinkingSignature;
     }
 
     public List<LlmImage> getImages() {

@@ -63,7 +63,7 @@ public class OpenAiResponsesTransportTest {
         LlmCompletion result = transport.complete(request(deltas));
 
         assertThat(deltas.toString()).isEqualTo("think\n\nhello");
-        assertThat(result.getContent()).isEqualTo("think\n\nhello");
+        assertThat(result.getContent()).isEqualTo("hello");
         assertThat(result.getThinkingText()).isEqualTo("think");
         assertThat(result.getStop()).isEqualTo(LlmStopReason.TOOL_USE);
         assertThat(result.getToolCalls()).hasSize(1);

@@ -50,6 +50,37 @@ public class AgentSessionTest {
     }
 
     @Test
+    public void codecKeepsThinkingSignature() {
+        AgentSession session = session("u", "s", 0L);
+        session.setMessages(Collections.singletonList(
+                AgentSessionMessage.assistant("answer", "think", "sig", null)));
+
+        String json = AgentSessionCodec.encodeSession(session);
+
+        assertThat(json).contains("\"thinkingSignature\":\"sig\"");
+        AgentSession decoded = AgentSessionCodec.decodeSession(json);
+        assertThat(decoded.getMessages().get(0).getThinkingText()).isEqualTo("think");
+        assertThat(decoded.getMessages().get(0).getThinkingSignature()).isEqualTo("sig");
+        assertThat(decoded.getMessages().get(0).getText()).isEqualTo("answer");
+    }
+
+    @Test
+    public void sessionToLlmKeepsThinkingSeparateWhenEnabled() {
+        AgentSession session = session("u", "s", 0L);
+        session.setMessages(Collections.singletonList(
+                AgentSessionMessage.assistant("answer", "think", "sig", null)));
+
+        LlmMessage withThinking = session.toLlmMessages(true).get(0);
+        assertThat(withThinking.getText()).isEqualTo("answer");
+        assertThat(withThinking.getThinkingText()).isEqualTo("think");
+        assertThat(withThinking.getThinkingSignature()).isEqualTo("sig");
+
+        LlmMessage withoutThinking = session.toLlmMessages().get(0);
+        assertThat(withoutThinking.getText()).isEqualTo("answer");
+        assertThat(withoutThinking.getThinkingText()).isNull();
+    }
+
+    @Test
     public void inMemoryStoreIncrementsVersionAndRejectsStaleWrite() {
         InMemoryAgentSessionStore store = new InMemoryAgentSessionStore(10, 60);
         AgentSession session = session("u", "s", 0L);

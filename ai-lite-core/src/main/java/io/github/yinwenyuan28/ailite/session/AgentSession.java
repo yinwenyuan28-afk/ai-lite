@@ -2,7 +2,6 @@ package io.github.yinwenyuan28.ailite.session;
 
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmRole;
-import io.github.yinwenyuan28.ailite.llm.LlmTexts;
 
 import java.util.ArrayList;
 import java.util.Date;
@@ -43,7 +42,7 @@ public final class AgentSession {
     }
 
     /**
-     * @param includeThinking true 时用 splice(thinking, text) 还原旧行为（调试）
+     * @param includeThinking true 时把 thinkingText / thinkingSignature 放进独立字段
      * @return 运行时消息
      */
     public List<LlmMessage> toLlmMessages(boolean includeThinking) {
@@ -65,8 +64,12 @@ public final class AgentSession {
             } else if (role == LlmRole.USER) {
                 out.add(LlmMessage.user(m.getText()));
             } else if (role == LlmRole.ASSISTANT) {
-                String text = includeThinking ? LlmTexts.splice(m.getThinkingText(), m.getText()) : m.getText();
-                out.add(LlmMessage.assistant(text, m.getToolCalls()));
+                if (includeThinking) {
+                    out.add(LlmMessage.assistant(m.getText(), m.getThinkingText(),
+                            m.getThinkingSignature(), m.getToolCalls()));
+                } else {
+                    out.add(LlmMessage.assistant(m.getText(), m.getToolCalls()));
+                }
             } else if (role == LlmRole.TOOL_RESULT) {
                 out.add(LlmMessage.toolResult(m.getToolCallId(), m.getText()));
             } else if (role == LlmRole.OTHER) {

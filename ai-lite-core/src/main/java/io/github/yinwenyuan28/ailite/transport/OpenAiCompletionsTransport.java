@@ -14,7 +14,6 @@ import io.github.yinwenyuan28.ailite.llm.LlmImage;
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmRequest;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
-import io.github.yinwenyuan28.ailite.llm.LlmTexts;
 import io.github.yinwenyuan28.ailite.llm.LlmThinking;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
 import io.github.yinwenyuan28.ailite.llm.LlmToolCall;
@@ -133,7 +132,7 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
         body.put("model", model.getModelId());
         body.put("max_tokens", model.getMaxTokens());
         body.put("stream", request.isStream());
-        body.set("messages", messages(request.getMessages()));
+        body.set("messages", messages(request.getMessages(), model));
         if (request.isStream()) {
             ObjectNode options = TransportSupport.object();
             options.put("include_usage", true);
@@ -196,7 +195,7 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
         }
     }
 
-    private static ArrayNode messages(List<LlmMessage> messages) {
+    private static ArrayNode messages(List<LlmMessage> messages, ResolvedModel model) {
         ArrayNode array = TransportSupport.array();
         for (LlmMessage message : messages) {
             ObjectNode item = TransportSupport.object();
@@ -213,6 +212,10 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
                 case ASSISTANT:
                     item.put("role", "assistant");
                     item.put("content", message.getText());
+                    if (supportsReasoningContent(model.getThinkingFormat())
+                            && Strings.isNotBlank(message.getThinkingText())) {
+                        item.put("reasoning_content", message.getThinkingText());
+                    }
                     if (!message.getToolCalls().isEmpty()) {
                         item.set("tool_calls", toolCallsJson(message.getToolCalls()));
                     }
@@ -252,6 +255,16 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
             parts.add(part);
         }
         return parts;
+    }
+
+    /**
+     * 只有兼容 reasoning_content 的协议才回传推理；OpenAI 官方 reasoning-effort
+     * 不接受该字段，避免把历史推理塞回请求体。
+     */
+    private static boolean supportsReasoningContent(String thinkingFormat) {
+        return "deepseek".equals(thinkingFormat)
+                || "qwen".equals(thinkingFormat)
+                || "chat-template".equals(thinkingFormat);
     }
 
     private static ArrayNode tools(List<LlmTool> tools) {
@@ -319,7 +332,7 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
         List<LlmToolCall> calls = parseToolCalls(message.path("tool_calls"));
         LlmStopReason stop = TransportSupport.mapOpenAiStop(
                 TransportSupport.text(choice, "finish_reason"), !calls.isEmpty());
-        return new LlmCompletion(LlmTexts.splice(reasoning, content), blankToNull(reasoning),
+        return new LlmCompletion(content, blankToNull(reasoning),
                 stop, TransportSupport.usage(root.path("usage")), calls);
     }
 
@@ -480,7 +493,7 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
                 effective = forced == LlmStopReason.ABORTED
                         ? LlmStopReason.ABORTED : LlmStopReason.TOOL_USE;
             }
-            return new LlmCompletion(LlmTexts.splice(reasoning.toString(), content.toString()),
+            return new LlmCompletion(content.toString(),
                     blankToNull(reasoning.toString()), effective, usage, calls);
         }
     }

@@ -328,7 +328,8 @@ public final class AgentLoop {
 
     private static void runTools(AgentLoopContext ctx, List<AgentLifecycle> hooks, LlmResult shown) {
         List<LlmToolCall> calls = shown.getToolCalls();
-        ctx.getMessages().add(LlmMessage.assistant(shown.getContent(), calls));
+        ctx.getMessages().add(LlmMessage.assistant(shown.getContent(),
+                shown.getThinkingText(), shown.getThinkingSignature(), calls));
         for (LlmToolCall call : calls) {
             AgentToolCall mutable = new AgentToolCall(call.getId(), call.getName(), call.getArgumentsJson());
             String denial = null;
@@ -431,7 +432,7 @@ public final class AgentLoop {
     private static LlmResult aborted(LlmResult last, int inputTokens, int outputTokens,
                                      int totalTokens, long latencyMs, int rounds) {
         if (last == null) {
-            return new LlmResult("", null, LlmStopReason.ABORTED, LlmUsage.zero(),
+            return new LlmResult("", null, null, LlmStopReason.ABORTED, LlmUsage.zero(),
                     null, null, null, latencyMs, rounds, null);
         }
         return accumulate(last, LlmStopReason.ABORTED, inputTokens, outputTokens, totalTokens,
@@ -440,14 +441,16 @@ public final class AgentLoop {
 
     private static LlmResult accumulate(LlmResult shown, LlmStopReason stop, int inputTokens,
                                         int outputTokens, int totalTokens, long latencyMs, int rounds) {
-        return new LlmResult(shown.getContent(), shown.getThinkingText(), stop,
+        return new LlmResult(shown.getContent(), shown.getThinkingText(),
+                shown.getThinkingSignature(), stop,
                 LlmUsage.of(inputTokens, outputTokens, totalTokens),
                 shown.getProvider(), shown.getModelId(), shown.getThinkingLevel(),
                 latencyMs, rounds, shown.getToolCalls());
     }
 
     private static LlmResult withContent(LlmResult source, String content) {
-        return new LlmResult(content, source.getThinkingText(), source.getStopReason(),
+        return new LlmResult(content, source.getThinkingText(), source.getThinkingSignature(),
+                source.getStopReason(),
                 source.getUsage(), source.getProvider(), source.getModelId(),
                 source.getThinkingLevel(), source.getLatencyMs(), source.getRounds(),
                 source.getToolCalls());

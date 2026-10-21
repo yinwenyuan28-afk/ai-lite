@@ -101,7 +101,7 @@ public class OpenAiCompletionsAdversarialTest {
         LlmCompletion result = transport.complete(request(false, null, null));
 
         assertThat(result.getThinkingText()).isEqualTo("primary");
-        assertThat(result.getContent()).isEqualTo("primary\n\nanswer");
+        assertThat(result.getContent()).isEqualTo("answer");
     }
 
     @Test
@@ -192,7 +192,7 @@ public class OpenAiCompletionsAdversarialTest {
         LlmCompletion result = transport.complete(request(true, null, null));
 
         assertThat(result.getThinkingText()).isEqualTo("r1");
-        assertThat(result.getContent()).isEqualTo("r1\n\nc");
+        assertThat(result.getContent()).isEqualTo("c");
     }
 
     @Test
