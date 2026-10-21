@@ -207,6 +207,71 @@ public class OkHttpExecutorAdversarialTest {
         assertThat(lines).containsExactly("data: 你好😀", "", "data: surrogate-\uD83D\uDE00-end", "");
     }
 
+    @Test
+    public void asyncSuccessReturnsStatusAndBody() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(201).setBody("payload"));
+
+        HttpResult result = http.executeAsync(request(5000, null)).get(5, TimeUnit.SECONDS);
+
+        assertThat(result.getStatus()).isEqualTo(201);
+        assertThat(result.getBody()).isEqualTo("payload");
+    }
+
+    @Test
+    public void asyncNon2xxCompletesExceptionally() {
+        server.enqueue(new MockResponse().setResponseCode(429).setBody("rate limited"));
+
+        assertThatThrownBy(() -> http.executeAsync(request(5000, null)).get(5, TimeUnit.SECONDS))
+                .hasCauseInstanceOf(LlmCallException.class)
+                .hasMessageContaining("429");
+    }
+
+    @Test
+    public void asyncStreamingDeliversLines() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: a\n\ndata: b\n\n"));
+        final List<String> lines = new ArrayList<String>();
+
+        http.executeStreamingAsync(request(5000, null), collecting(lines)).get(5, TimeUnit.SECONDS);
+
+        assertThat(lines).contains("data: a", "data: b");
+    }
+
+    @Test
+    public void asyncCancelHandleStopsStreaming() {
+        final LlmCancelHandle cancel = new LlmCancelHandle();
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: one\n\ndata: two\n\n"));
+        final List<String> lines = new ArrayList<String>();
+
+        assertThatThrownBy(() -> http.executeStreamingAsync(request(5000, cancel),
+                new StreamListener() {
+                    @Override
+                    public void onLine(String line) {
+                        lines.add(line);
+                        cancel.cancel();
+                    }
+                }).get(5, TimeUnit.SECONDS))
+                .hasCauseInstanceOf(LlmCallException.class)
+                .hasMessageContaining("调用已取消");
+        assertThat(lines).hasSize(1);
+    }
+
+    @Test
+    public void cancellingFutureMarksItCancelled() {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setBody("late")
+                .setBodyDelay(2, TimeUnit.SECONDS));
+
+        java.util.concurrent.CompletableFuture<HttpResult> future =
+                http.executeAsync(request(5000, null));
+        future.cancel(true);
+
+        assertThat(future.isCancelled()).isTrue();
+    }
+
     private HttpRequest request(int readTimeoutMs, LlmCancelHandle cancel) {
         return new HttpRequest(server.url("/chat").toString(), Collections.<String, String>emptyMap(),
                 "{\"hello\":1}", 2000, readTimeoutMs, cancel);

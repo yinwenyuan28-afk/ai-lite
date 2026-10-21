@@ -3,6 +3,7 @@ package io.github.yinwenyuan28.ailite.transport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
@@ -28,6 +29,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * OpenAI Chat Completions 适配器。
@@ -66,6 +69,63 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
         }
         HttpResult result = http.execute(httpRequest);
         return parseBlocking(result.getBody());
+    }
+
+    /**
+     * 非流式走 OkHttp enqueue，等待响应期间不占线程；流式则在回调线程逐行解析。
+     */
+    @Override
+    public CompletableFuture<LlmCompletion> completeAsync(final LlmRequest request) {
+        if (!(http instanceof AsyncHttpExecutor)) {
+            return LlmTransport.super.completeAsync(request);
+        }
+        ResolvedModel model = request.getModel();
+        ObjectNode body = body(request, model);
+        Map<String, String> headers = headers(request, model);
+        String url = TransportSupport.joinUrl(model.getBaseUrl(), "/chat/completions");
+        HttpRequest httpRequest = new HttpRequest(url, headers, body.toString(),
+                request.effectiveConnectTimeoutMs(), request.effectiveReadTimeoutMs(), request.getCancel());
+        final AsyncHttpExecutor async = (AsyncHttpExecutor) http;
+        if (!request.isStream()) {
+            return async.executeAsync(httpRequest).thenApply(result -> parseBlocking(result.getBody()));
+        }
+
+        final State state = new State();
+        final StringBuilder raw = new StringBuilder();
+        final TransportSupport.SseCollector sse = new TransportSupport.SseCollector();
+        return async.executeStreamingAsync(httpRequest, new StreamListener() {
+            @Override
+            public void onLine(String line) {
+                raw.append(line).append('\n');
+                String payload = sse.accept(line);
+                if (payload != null) {
+                    handleEvent(payload, state, request);
+                }
+            }
+        }).handle((ignored, error) -> {
+            if (error != null) {
+                if (request.isCancelled()) {
+                    return state.result(LlmStopReason.ABORTED);
+                }
+                throw new CompletionException(unwrap(error));
+            }
+            String tail = sse.flush();
+            if (tail != null) {
+                handleEvent(tail, state, request);
+            }
+            if (!state.sawData && raw.length() > 0) {
+                return parseBlocking(raw.toString());
+            }
+            return state.result();
+        });
+    }
+
+    private static Throwable unwrap(Throwable error) {
+        Throwable current = error;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 
     private ObjectNode body(LlmRequest request, ResolvedModel model) {

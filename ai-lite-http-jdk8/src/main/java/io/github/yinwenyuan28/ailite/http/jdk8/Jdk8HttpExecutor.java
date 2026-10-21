@@ -1,6 +1,6 @@
 package io.github.yinwenyuan28.ailite.http.jdk8;
 
-import io.github.yinwenyuan28.ailite.http.HttpExecutor;
+import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
@@ -17,6 +17,11 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 零依赖实现，基于 HttpURLConnection。
@@ -24,7 +29,39 @@ import java.util.Map;
  * <p>适合不能引入 OkHttp 的老项目。连接池能力弱于 OkHttp，但行为足够覆盖
  * Chat Completions、Responses 和 Anthropic Messages 的阻塞与 SSE 调用。</p>
  */
-public final class Jdk8HttpExecutor implements HttpExecutor {
+public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
+
+    private final Executor executor;
+    private final java.util.concurrent.ExecutorService ownedExecutor;
+
+    /**
+     * 使用懒创建的守护线程池执行异步调用。
+     */
+    public Jdk8HttpExecutor() {
+        this.ownedExecutor = Executors.newCachedThreadPool(new DaemonThreadFactory());
+        this.executor = ownedExecutor;
+    }
+
+    /**
+     * @param executor 异步调用使用的线程池；由调用方负责关闭
+     */
+    public Jdk8HttpExecutor(Executor executor) {
+        if (executor == null) {
+            throw new IllegalArgumentException("Executor 不能为空");
+        }
+        this.executor = executor;
+        this.ownedExecutor = null;
+    }
+
+    @Override
+    public CompletableFuture<HttpResult> executeAsync(HttpRequest request) {
+        return CompletableFuture.supplyAsync(() -> execute(request), executor);
+    }
+
+    @Override
+    public CompletableFuture<Void> executeStreamingAsync(HttpRequest request, StreamListener listener) {
+        return CompletableFuture.runAsync(() -> executeStreaming(request, listener), executor);
+    }
 
     @Override
     public HttpResult execute(HttpRequest request) {
@@ -156,6 +193,23 @@ public final class Jdk8HttpExecutor implements HttpExecutor {
 
     @Override
     public void close() {
-        // HttpURLConnection 没有需要显式释放的共享资源。
+        if (ownedExecutor != null) {
+            ownedExecutor.shutdownNow();
+        }
+    }
+
+    /**
+     * 守护线程命名，便于线程 dump。
+     */
+    private static final class DaemonThreadFactory implements ThreadFactory {
+
+        private final AtomicInteger counter = new AtomicInteger(1);
+
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, "ai-lite-jdk8-http-" + counter.getAndIncrement());
+            thread.setDaemon(true);
+            return thread;
+        }
     }
 }

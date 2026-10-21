@@ -51,7 +51,7 @@ public class AiLiteAutoConfiguration {
     }
 
     /**
-     * 异步执行器。mode 支持 platform、direct、virtual。
+     * 异步执行器。mode 支持 platform、direct、virtual、coroutines。
      *
      * @param config 配置
      * @return 执行器
@@ -65,6 +65,9 @@ public class AiLiteAutoConfiguration {
         }
         if ("virtual".equalsIgnoreCase(mode)) {
             return virtualExecutor();
+        }
+        if ("coroutines".equalsIgnoreCase(mode)) {
+            return coroutineExecutor(config);
         }
         return new PlatformExecutorProvider(config.getExecutor());
     }
@@ -148,6 +151,23 @@ public class AiLiteAutoConfiguration {
         } catch (Exception ex) {
             throw new IllegalStateException(
                     "ai-lite.executor.mode=virtual 需要 JDK 21 和 ai-lite-executor-jdk21 依赖", ex);
+        }
+    }
+
+    /**
+     * 协程执行器是 JDK 8 可用的可选模块，按配置显式开启。
+     */
+    private static ExecutorProvider coroutineExecutor(AiLiteConfig config) {
+        try {
+            Class<?> type = Class.forName(
+                    "io.github.yinwenyuan28.ailite.executor.coroutines.CoroutineExecutorProvider");
+            AiLiteConfig.Executor executor = config.getExecutor();
+            return (ExecutorProvider) type.getConstructor(int.class, String.class)
+                    .newInstance(Integer.valueOf(executor.getCoreSize()),
+                            executor.getThreadNamePrefix() + "coroutine-");
+        } catch (Exception ex) {
+            throw new IllegalStateException(
+                    "ai-lite.executor.mode=coroutines 需要 ai-lite-executor-coroutines 依赖", ex);
         }
     }
 }

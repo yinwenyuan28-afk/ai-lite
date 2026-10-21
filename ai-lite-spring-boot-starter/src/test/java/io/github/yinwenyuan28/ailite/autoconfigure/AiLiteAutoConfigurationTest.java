@@ -7,11 +7,17 @@ import io.github.yinwenyuan28.ailite.llm.LlmCallStore;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
 import io.github.yinwenyuan28.ailite.session.AgentSessionLoop;
 import io.github.yinwenyuan28.ailite.session.AgentSessionStore;
+import io.github.yinwenyuan28.ailite.session.jdbc.AiLiteSessionJdbcAutoConfiguration;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -54,11 +60,65 @@ public class AiLiteAutoConfigurationTest {
     }
 
     @Test
+    public void jdbcSessionStoreWinsWhenJdbcTemplatePresent() {
+        runner.withConfiguration(AutoConfigurations.of(AiLiteSessionJdbcAutoConfiguration.class))
+                .withUserConfiguration(JdbcConfig.class)
+                .run(context -> {
+                    assertThat(context).hasSingleBean(AgentSessionStore.class);
+                    assertThat(context.getBean(AgentSessionStore.class).getClass().getName())
+                            .isEqualTo("io.github.yinwenyuan28.ailite.session.jdbc.JdbcAgentSessionStore");
+                });
+    }
+
+    @Test
+    public void jdbcSessionStoreWinsWhenJdbcTemplateIsAutoConfigured() {
+        runner.withConfiguration(AutoConfigurations.of(
+                        JdbcTemplateAutoConfiguration.class,
+                        AiLiteSessionJdbcAutoConfiguration.class))
+                .withUserConfiguration(DataSourceConfig.class)
+                .run(context -> {
+                    assertThat(context).hasSingleBean(JdbcTemplate.class);
+                    assertThat(context).hasSingleBean(AgentSessionStore.class);
+                    assertThat(context.getBean(AgentSessionStore.class).getClass().getName())
+                            .isEqualTo("io.github.yinwenyuan28.ailite.session.jdbc.JdbcAgentSessionStore");
+                });
+    }
+
+    @Test
     public void globalSwitchDisablesEverything() {
         runner.withPropertyValues("ai-lite.enabled=false").run(context -> {
             assertThat(context).doesNotHaveBean(LlmGateway.class);
             assertThat(context).doesNotHaveBean(AgentSessionStore.class);
         });
+    }
+
+    /**
+     * 提供 DataSource，让 JdbcTemplateAutoConfiguration 自己创建 JdbcTemplate。
+     */
+    @Configuration
+    static class DataSourceConfig {
+        @Bean
+        public DataSource dataSource() {
+            JdbcDataSource dataSource = new JdbcDataSource();
+            dataSource.setURL("jdbc:h2:mem:session-auto-config-" + System.nanoTime()
+                    + ";DB_CLOSE_DELAY=-1");
+            dataSource.setUser("sa");
+            return dataSource;
+        }
+    }
+
+    /**
+     * 提供 JdbcTemplate，触发 JDBC 会话存储。
+     */
+    @Configuration
+    static class JdbcConfig {
+        @Bean
+        public JdbcTemplate jdbcTemplate() {
+            JdbcDataSource dataSource = new JdbcDataSource();
+            dataSource.setURL("jdbc:h2:mem:session-order-" + System.nanoTime() + ";DB_CLOSE_DELAY=-1");
+            dataSource.setUser("sa");
+            return new JdbcTemplate(dataSource);
+        }
     }
 
     /**

@@ -53,11 +53,14 @@
 
     <modules>
         <module>ai-lite-core</module>
+        <module>ai-lite-prompt</module>
+        <module>ai-lite-prompt-jdbc</module>
         <module>ai-lite-http-okhttp</module>
         <module>ai-lite-http-jdk8</module>
         <module>ai-lite-session-redis</module>
         <module>ai-lite-session-jdbc</module>
         <module>ai-lite-store-jdbc</module>
+        <module>ai-lite-executor-coroutines</module>
         <module>ai-lite-spring-boot-starter</module>
         <module>ai-lite-demo</module>
     </modules>
@@ -76,6 +79,16 @@
             <dependency>
                 <groupId>io.github.yinwenyuan28-afk</groupId>
                 <artifactId>ai-lite-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-prompt</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-prompt-jdbc</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
@@ -101,6 +114,11 @@
             <dependency>
                 <groupId>io.github.yinwenyuan28-afk</groupId>
                 <artifactId>ai-lite-store-jdbc</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-executor-coroutines</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

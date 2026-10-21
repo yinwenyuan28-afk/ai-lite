@@ -3,6 +3,7 @@ package io.github.yinwenyuan28.ailite.transport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
@@ -28,6 +29,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * OpenAI Responses 适配器。
@@ -87,6 +90,54 @@ public final class OpenAiResponsesTransport implements LlmTransport {
             throw ex;
         }
         return state.result(state.stop);
+    }
+
+    /**
+     * Responses 协议本身始终是流式事件，所以异步版本直接在 HTTP 回调线程解析事件。
+     */
+    @Override
+    public CompletableFuture<LlmCompletion> completeAsync(final LlmRequest request) {
+        if (!(http instanceof AsyncHttpExecutor)) {
+            return LlmTransport.super.completeAsync(request);
+        }
+        ResolvedModel model = request.getModel();
+        ObjectNode body = body(request, model);
+        Map<String, String> headers = headers(model);
+        String url = TransportSupport.joinUrl(model.getBaseUrl(), "/responses");
+        HttpRequest httpRequest = new HttpRequest(url, headers, body.toString(),
+                request.effectiveConnectTimeoutMs(), request.effectiveReadTimeoutMs(), request.getCancel());
+
+        final ResponsesState state = new ResponsesState();
+        final TransportSupport.SseCollector sse = new TransportSupport.SseCollector();
+        return ((AsyncHttpExecutor) http).executeStreamingAsync(httpRequest, new StreamListener() {
+            @Override
+            public void onLine(String line) {
+                String payload = sse.accept(line);
+                if (payload != null) {
+                    handleEvent(payload, state, request);
+                }
+            }
+        }).handle((ignored, error) -> {
+            if (error != null) {
+                if (request.isCancelled()) {
+                    return state.result(LlmStopReason.ABORTED);
+                }
+                throw new CompletionException(unwrap(error));
+            }
+            String tail = sse.flush();
+            if (tail != null) {
+                handleEvent(tail, state, request);
+            }
+            return state.result(state.stop);
+        });
+    }
+
+    private static Throwable unwrap(Throwable error) {
+        Throwable current = error;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 
     private ObjectNode body(LlmRequest request, ResolvedModel model) {

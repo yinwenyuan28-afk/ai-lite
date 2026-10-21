@@ -41,13 +41,20 @@ public final class RedisSessionCache implements SessionCache {
             if (Strings.isBlank(json)) {
                 return Optional.empty();
             }
-            AgentSession session = AgentSessionCodec.decodeSession(json);
-            if (session == null || !userId.equals(session.getUserId())) {
+            AgentSession session;
+            try {
+                session = AgentSessionCodec.decodeSession(json);
+            } catch (LlmCallException ex) {
+                // 缓存里的坏数据按 miss 处理，不能让它影响主流程。
+                log.warn("session cache decode failed userId={} sessionId={}", userId, sessionId);
+                safeDelete(userId, sessionId);
+                return Optional.empty();
+            }
+            if (session == null || !userId.equals(session.getUserId())
+                    || !sessionId.equals(session.getSessionId())) {
                 return Optional.empty();
             }
             return Optional.of(session);
-        } catch (LlmCallException ex) {
-            throw ex;
         } catch (RuntimeException ex) {
             return unavailable(ex);
         }
@@ -117,5 +124,14 @@ public final class RedisSessionCache implements SessionCache {
 
     private String key(String userId, String sessionId) {
         return keyPrefix + userId + ":" + sessionId;
+    }
+
+    private void safeDelete(String userId, String sessionId) {
+        try {
+            redis.delete(key(userId, sessionId));
+        } catch (RuntimeException ex) {
+            log.warn("session cache cleanup failed userId={} sessionId={}: {}",
+                    userId, sessionId, ex.getMessage());
+        }
     }
 }

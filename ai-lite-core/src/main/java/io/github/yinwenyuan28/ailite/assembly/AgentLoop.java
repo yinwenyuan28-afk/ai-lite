@@ -17,6 +17,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * 带上下文和生命周期的完整工具循环。每一轮只调网关的 round。
@@ -123,6 +125,205 @@ public final class AgentLoop {
                     inputTokens, outputTokens, totalTokens, latencyMs, completed));
         }
         return finish(hooks, ctx, aborted(last, inputTokens, outputTokens, totalTokens, latencyMs, completed));
+    }
+
+    /**
+     * 非阻塞跑一次 Agent 循环。
+     *
+     * <p>模型调用走 {@code LlmGateway.roundAsync}，等待响应期间不占调用线程；
+     * 工具批次交给 ForkJoinPool 执行。生命周期回调仍在同一顺序上串行调用。</p>
+     *
+     * @param call       调用参数
+     * @param tools      工具列表
+     * @param lifecycles 生命周期，按顺序执行，可为 null
+     * @param maxRounds  最大轮数，null 表示 8
+     * @param cancel     取消句柄，可为 null
+     * @return 结果 future
+     */
+    public CompletableFuture<LlmResult> runAsync(LlmCall call, List<LlmTool> tools,
+                                                 List<AgentLifecycle> lifecycles,
+                                                 Integer maxRounds, LlmCancelHandle cancel) {
+        if (call == null) {
+            throw new LlmCallException("调用不能为空");
+        }
+        int limit = maxRounds == null ? LlmGateway.DEFAULT_MAX_ROUNDS : maxRounds.intValue();
+        if (limit <= 0) {
+            throw new LlmCallException("最大轮数必须大于 0");
+        }
+        List<AgentLifecycle> hooks = lifecycles == null
+                ? new ArrayList<AgentLifecycle>() : lifecycles;
+        // future.cancel 也要能中断正在进行的模型请求，即使调用方没有显式传句柄。
+        final LlmCancelHandle effectiveCancel = cancel == null ? new LlmCancelHandle() : cancel;
+        AgentLoopContext ctx = AgentLoopContext.copy(call.getBizId(), call.getMessages(), tools,
+                effectiveCancel);
+        eachBeforeRun(hooks, ctx);
+        AsyncRun run = new AsyncRun(call, hooks, ctx, limit);
+        run.result.whenComplete((value, error) -> {
+            if (run.result.isCancelled()) {
+                effectiveCancel.cancel();
+            }
+        });
+        run.next();
+        return run.result;
+    }
+
+    /**
+     * 异步循环状态机。每次只在 future 回调里推进一轮。
+     */
+    private final class AsyncRun {
+
+        private final LlmCall call;
+        private final List<AgentLifecycle> hooks;
+        private final AgentLoopContext ctx;
+        private final int limit;
+        private final CompletableFuture<LlmResult> result = new CompletableFuture<LlmResult>();
+
+        private int completed;
+        private int inputTokens;
+        private int outputTokens;
+        private int totalTokens;
+        private long latencyMs;
+        private LlmResult last;
+
+        private AsyncRun(LlmCall call, List<AgentLifecycle> hooks, AgentLoopContext ctx, int limit) {
+            this.call = call;
+            this.hooks = hooks;
+            this.ctx = ctx;
+            this.limit = limit;
+        }
+
+        private void next() {
+            if (result.isDone()) {
+                return;
+            }
+            if (ctx.isCancelled()) {
+                completeWith(aborted(last, inputTokens, outputTokens, totalTokens, latencyMs, completed));
+                return;
+            }
+            eachBeforeModel(hooks, ctx);
+            CompletableFuture<LlmResult> roundFuture;
+            try {
+                roundFuture = gateway.roundAsync(call.withMessages(ctx.getMessages()),
+                        ctx.getTools(), ctx.getCancel());
+            } catch (RuntimeException ex) {
+                result.completeExceptionally(ex);
+                return;
+            }
+            roundFuture.whenComplete((round, error) -> {
+                if (result.isDone()) {
+                    return;
+                }
+                if (error != null) {
+                    result.completeExceptionally(unwrap(error));
+                    return;
+                }
+                completed++;
+                inputTokens += round.getUsage().getInputTokens();
+                outputTokens += round.getUsage().getOutputTokens();
+                totalTokens += round.getUsage().getTotalTokens();
+                latencyMs += round.getLatencyMs();
+
+                AgentModelOutput output = new AgentModelOutput(round);
+                try {
+                    eachAfterModel(hooks, ctx, output);
+                } catch (RuntimeException ex) {
+                    result.completeExceptionally(ex);
+                    return;
+                }
+                final LlmResult shown = withContent(round, output.getContent());
+                final boolean toolUse = shown.getStopReason() == LlmStopReason.TOOL_USE
+                        && !shown.getToolCalls().isEmpty();
+                final boolean lastRound = completed >= limit;
+
+                if (toolUse && !lastRound) {
+                    CompletableFuture<Void> toolsFuture;
+                    try {
+                        toolsFuture = CompletableFuture.runAsync(new Runnable() {
+                            @Override
+                            public void run() {
+                                runTools(ctx, hooks, shown);
+                            }
+                        });
+                    } catch (RuntimeException ex) {
+                        result.completeExceptionally(ex);
+                        return;
+                    }
+                    toolsFuture.whenComplete((ignored, toolError) -> {
+                        if (result.isDone()) {
+                            return;
+                        }
+                        if (toolError != null) {
+                            result.completeExceptionally(unwrap(toolError));
+                            return;
+                        }
+                        afterTurn(shown, toolUse, lastRound);
+                    });
+                    return;
+                }
+                afterTurn(shown, toolUse, lastRound);
+            });
+        }
+
+        private void afterTurn(LlmResult shown, boolean toolUse, boolean lastRound) {
+            boolean stop = false;
+            boolean again = false;
+            try {
+                for (AgentLifecycle hook : hooks) {
+                    if (hook == null) {
+                        continue;
+                    }
+                    TurnDecision decision = hook.afterTurn(ctx, shown);
+                    TurnDecision.Kind kind = decision == null
+                            ? TurnDecision.Kind.MODEL_DECIDES : decision.kind();
+                    if (kind == TurnDecision.Kind.STOP) {
+                        stop = true;
+                    } else if (kind == TurnDecision.Kind.CONTINUE) {
+                        again = true;
+                    }
+                }
+            } catch (RuntimeException ex) {
+                result.completeExceptionally(ex);
+                return;
+            }
+            last = shown;
+            if (ctx.isCancelled()) {
+                completeWith(accumulate(shown, LlmStopReason.ABORTED, inputTokens, outputTokens,
+                        totalTokens, latencyMs, completed));
+                return;
+            }
+            if (toolUse && lastRound) {
+                completeWith(accumulate(shown, LlmStopReason.MAX_ROUNDS, inputTokens, outputTokens,
+                        totalTokens, latencyMs, completed));
+                return;
+            }
+            if (stop) {
+                completeWith(accumulate(shown, LlmStopReason.STOP, inputTokens, outputTokens,
+                        totalTokens, latencyMs, completed));
+                return;
+            }
+            if ((again || toolUse) && completed < limit) {
+                next();
+                return;
+            }
+            completeWith(accumulate(shown, shown.getStopReason(), inputTokens, outputTokens,
+                    totalTokens, latencyMs, completed));
+        }
+
+        private void completeWith(LlmResult value) {
+            try {
+                result.complete(AgentLoop.finish(hooks, ctx, value));
+            } catch (RuntimeException ex) {
+                result.completeExceptionally(ex);
+            }
+        }
+    }
+
+    private static Throwable unwrap(Throwable error) {
+        Throwable current = error;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 
     private static void runTools(AgentLoopContext ctx, List<AgentLifecycle> hooks, LlmResult shown) {

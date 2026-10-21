@@ -23,6 +23,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 /**
  * 可续聊封装：组合 AgentLoop + AgentSessionStore。
@@ -88,6 +90,44 @@ public final class AgentSessionLoop {
                                List<LlmTool> tools, List<AgentLifecycle> lifecycles,
                                Integer maxRounds, LlmCancelHandle cancel,
                                List<AgentSessionMessage> newUserTurns) {
+        Prepared prepared = prepare(userId, sessionId, call, lifecycles, newUserTurns);
+        LlmResult result = loop.run(call.withMessages(prepared.llmMessages), tools,
+                prepared.hooks, maxRounds, cancel);
+        return finish(userId, sessionId, call, prepared, result);
+    }
+
+    /**
+     * 异步续聊。模型等待不占调用线程；加载和保存仍在线程池里完成。
+     *
+     * @param userId       用户 id
+     * @param sessionId    会话 id
+     * @param call         调用参数（消息会被会话历史替换）
+     * @param tools        工具
+     * @param lifecycles   调用方生命周期，排在内置 recorder 之前
+     * @param maxRounds    最大轮数
+     * @param cancel       取消句柄
+     * @param newUserTurns 本轮新增的用户消息
+     * @return 结果与最新会话
+     */
+    public CompletableFuture<ResumeResult> resumeAsync(final String userId, final String sessionId,
+                                                       final LlmCall call, final List<LlmTool> tools,
+                                                       final List<AgentLifecycle> lifecycles,
+                                                       final Integer maxRounds,
+                                                       final LlmCancelHandle cancel,
+                                                       final List<AgentSessionMessage> newUserTurns) {
+        return CompletableFuture.supplyAsync(new Supplier<Prepared>() {
+            @Override
+            public Prepared get() {
+                return prepare(userId, sessionId, call, lifecycles, newUserTurns);
+            }
+        }).thenCompose(prepared -> loop.runAsync(call.withMessages(prepared.llmMessages), tools,
+                prepared.hooks, maxRounds, cancel)
+                .thenApply(result -> finish(userId, sessionId, call, prepared, result)));
+    }
+
+    private Prepared prepare(String userId, String sessionId, LlmCall call,
+                             List<AgentLifecycle> lifecycles,
+                             List<AgentSessionMessage> newUserTurns) {
         AgentSessionStoreSupport.requireKeys(userId, sessionId);
         if (call == null) {
             throw new LlmCallException("调用不能为空");
@@ -116,23 +156,48 @@ public final class AgentSessionLoop {
             }
         }
         hooks.add(recorder);
+        return new Prepared(session, pending, llmMessages, hooks, recorder);
+    }
 
-        LlmResult result = loop.run(call.withMessages(llmMessages), tools, hooks, maxRounds, cancel);
+    private ResumeResult finish(String userId, String sessionId, LlmCall call, Prepared prepared,
+                                LlmResult result) {
         if (result.getStopReason() == LlmStopReason.ABORTED) {
-            return new ResumeResult(result, session);
+            return new ResumeResult(result, prepared.session);
         }
 
-        pending.addAll(recorder.recorded());
+        prepared.pending.addAll(prepared.recorder.recorded());
         AgentSession toSave = new AgentSession();
-        toSave.setUserId(session.getUserId());
-        toSave.setSessionId(session.getSessionId());
-        toSave.setBizId(Strings.isNotBlank(session.getBizId()) ? session.getBizId() : call.getBizId());
-        toSave.setMessages(pending);
-        toSave.setVersion(session.getVersion());
+        toSave.setUserId(prepared.session.getUserId());
+        toSave.setSessionId(prepared.session.getSessionId());
+        toSave.setBizId(Strings.isNotBlank(prepared.session.getBizId())
+                ? prepared.session.getBizId() : call.getBizId());
+        toSave.setMessages(prepared.pending);
+        toSave.setVersion(prepared.session.getVersion());
         store.save(toSave);
         AgentSession saved = store.find(userId, sessionId)
                 .orElseThrow(() -> new LlmCallException("保存会话后读取失败"));
         return new ResumeResult(result, saved);
+    }
+
+    /**
+     * 一次续聊在进入 Agent 循环前的快照。
+     */
+    private static final class Prepared {
+        private final AgentSession session;
+        private final List<AgentSessionMessage> pending;
+        private final List<LlmMessage> llmMessages;
+        private final List<AgentLifecycle> hooks;
+        private final SessionRecorder recorder;
+
+        private Prepared(AgentSession session, List<AgentSessionMessage> pending,
+                         List<LlmMessage> llmMessages, List<AgentLifecycle> hooks,
+                         SessionRecorder recorder) {
+            this.session = session;
+            this.pending = pending;
+            this.llmMessages = llmMessages;
+            this.hooks = hooks;
+            this.recorder = recorder;
+        }
     }
 
     /**

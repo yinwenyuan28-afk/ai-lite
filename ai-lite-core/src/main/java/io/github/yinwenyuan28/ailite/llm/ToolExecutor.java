@@ -1,6 +1,7 @@
 package io.github.yinwenyuan28.ailite.llm;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 工具批量执行 SPI。
@@ -18,4 +19,15 @@ public interface ToolExecutor {
      * @return 与 calls 等长的结果文本，顺序一致
      */
     List<String> execute(List<LlmTool> tools, List<LlmToolCall> calls);
+
+    /**
+     * 异步执行。默认把阻塞实现交给 ForkJoinPool，需要的实现可以覆盖。
+     *
+     * @param tools 本次可用工具
+     * @param calls 模型给出的调用，按原顺序
+     * @return 结果 future
+     */
+    default CompletableFuture<List<String>> executeAsync(List<LlmTool> tools, List<LlmToolCall> calls) {
+        return CompletableFuture.supplyAsync(() -> execute(tools, calls));
+    }
 }

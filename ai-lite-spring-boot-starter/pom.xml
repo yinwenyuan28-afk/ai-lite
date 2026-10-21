@@ -21,7 +21,17 @@
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-prompt</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-http-okhttp</artifactId>
+        </dependency>
+        <!-- 可选：用户显式引入后可用 ai-lite.executor.mode=coroutines。 -->
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-executor-coroutines</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -36,6 +46,16 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-session-jdbc</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

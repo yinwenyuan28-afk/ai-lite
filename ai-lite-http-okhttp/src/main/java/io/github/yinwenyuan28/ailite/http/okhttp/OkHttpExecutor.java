@@ -1,12 +1,13 @@
 package io.github.yinwenyuan28.ailite.http.okhttp;
 
-import io.github.yinwenyuan28.ailite.http.HttpExecutor;
+import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
 import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -17,6 +18,8 @@ import okio.BufferedSource;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -25,7 +28,7 @@ import java.util.concurrent.TimeUnit;
  * <p>所有请求共用一个连接池和 dispatcher；每次调用只在 newBuilder 上覆盖超时，
  * 不会为一次请求新建整套线程和连接资源。</p>
  */
-public final class OkHttpExecutor implements HttpExecutor {
+public final class OkHttpExecutor implements AsyncHttpExecutor {
 
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
@@ -98,6 +101,115 @@ public final class OkHttpExecutor implements HttpExecutor {
         } finally {
             unbind(request.getCancel());
         }
+    }
+
+    @Override
+    public CompletableFuture<HttpResult> executeAsync(final HttpRequest request) {
+        final CompletableFuture<HttpResult> future = new CompletableFuture<HttpResult>();
+        final Call call = buildCall(request);
+        call.enqueue(new Callback() {
+            @Override
+            public void onFailure(Call ignored, IOException ex) {
+                unbind(request.getCancel());
+                completeFailure(future, ex, request.getCancel());
+            }
+
+            @Override
+            public void onResponse(Call ignored, Response response) {
+                try {
+                    if (future.isCancelled()) {
+                        return;
+                    }
+                    ensureSuccessful(response);
+                    ResponseBody body = response.body();
+                    future.complete(new HttpResult(response.code(),
+                            body == null ? "" : body.string()));
+                } catch (LlmCallException ex) {
+                    future.completeExceptionally(ex);
+                } catch (IOException ex) {
+                    completeFailure(future, ex, request.getCancel());
+                } catch (RuntimeException ex) {
+                    future.completeExceptionally(ex);
+                } finally {
+                    response.close();
+                    unbind(request.getCancel());
+                }
+            }
+        });
+        cancelCallWithFuture(future, call);
+        return future;
+    }
+
+    @Override
+    public CompletableFuture<Void> executeStreamingAsync(final HttpRequest request,
+                                                         final StreamListener listener) {
+        final CompletableFuture<Void> future = new CompletableFuture<Void>();
+        final Call call = buildCall(request);
+        call.enqueue(new Callback() {
+            @Override
+            public void onFailure(Call ignored, IOException ex) {
+                unbind(request.getCancel());
+                completeFailure(future, ex, request.getCancel());
+            }
+
+            @Override
+            public void onResponse(Call ignored, Response response) {
+                try {
+                    if (future.isCancelled()) {
+                        return;
+                    }
+                    ensureSuccessful(response);
+                    ResponseBody body = response.body();
+                    if (body == null) {
+                        throw new LlmCallException("响应无法解析");
+                    }
+                    BufferedSource source = body.source();
+                    String line;
+                    while ((line = source.readUtf8Line()) != null) {
+                        if (request.getCancel() != null && request.getCancel().isCancelled()) {
+                            throw new LlmCallException("调用已取消");
+                        }
+                        listener.onLine(line);
+                    }
+                    future.complete(null);
+                } catch (LlmCallException ex) {
+                    future.completeExceptionally(ex);
+                } catch (IOException ex) {
+                    completeFailure(future, ex, request.getCancel());
+                } catch (RuntimeException ex) {
+                    future.completeExceptionally(ex);
+                } finally {
+                    response.close();
+                    unbind(request.getCancel());
+                }
+            }
+        });
+        cancelCallWithFuture(future, call);
+        return future;
+    }
+
+    /**
+     * 调用方取消 future 时同步取消底层 Call，避免连接继续挂着。
+     */
+    private static void cancelCallWithFuture(final CompletableFuture<?> future, final Call call) {
+        future.whenComplete((value, error) -> {
+            if (future.isCancelled()) {
+                call.cancel();
+            }
+        });
+    }
+
+    private static void completeFailure(CompletableFuture<?> future, IOException ex,
+                                        LlmCancelHandle cancel) {
+        if (cancel != null && cancel.isCancelled()) {
+            future.completeExceptionally(new LlmCallException("调用已取消", ex));
+            return;
+        }
+        if (future.isCancelled()) {
+            future.completeExceptionally(new CancellationException("调用已取消"));
+            return;
+        }
+        future.completeExceptionally(new LlmCallException("模型请求失败", ex));
     }
 
     private Call buildCall(HttpRequest request) {

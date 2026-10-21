@@ -76,6 +76,42 @@ public class Jdk8HttpExecutorTest {
                 .hasMessageContaining("boom");
     }
 
+    @Test
+    public void asyncReadsFullBody() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("{\"ok\":true}"));
+
+        HttpResult result = executor.executeAsync(request("/v1/chat/completions")).get(5, java.util.concurrent.TimeUnit.SECONDS);
+
+        assertThat(result.getStatus()).isEqualTo(200);
+        assertThat(result.getBody()).isEqualTo("{\"ok\":true}");
+    }
+
+    @Test
+    public void asyncStreamingReadsLineByLine() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setBody("data: a\n\ndata: b\n\n"));
+        final List<String> lines = new ArrayList<String>();
+
+        executor.executeStreamingAsync(request("/v1/chat/completions"), new StreamListener() {
+            @Override
+            public void onLine(String line) {
+                lines.add(line);
+            }
+        }).get(5, java.util.concurrent.TimeUnit.SECONDS);
+
+        assertThat(lines).contains("data: a", "data: b");
+    }
+
+    @Test
+    public void asyncNonSuccessFailsWithBodySnippet() {
+        server.enqueue(new MockResponse().setResponseCode(500).setBody("boom"));
+
+        assertThatThrownBy(() -> executor.executeAsync(request("/v1/chat/completions"))
+                .get(5, java.util.concurrent.TimeUnit.SECONDS))
+                .hasCauseInstanceOf(LlmCallException.class)
+                .hasMessageContaining("500");
+    }
+
     private HttpRequest request(String path) {
         return new HttpRequest(server.url(path).toString(),
                 Collections.singletonMap("Content-Type", "application/json"), "{}",

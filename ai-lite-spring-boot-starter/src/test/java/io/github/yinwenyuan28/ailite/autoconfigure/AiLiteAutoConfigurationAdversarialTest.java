@@ -141,6 +141,16 @@ public class AiLiteAutoConfigurationAdversarialTest {
     }
 
     @Test
+    public void coroutineExecutorModeIsHonoured() {
+        runner("ai-lite.executor.mode=coroutines").run(context -> {
+            assertThat(context.getStartupFailure()).isNull();
+            assertThat(context).hasSingleBean(ExecutorProvider.class);
+            assertThat(context.getBean(ExecutorProvider.class).getClass().getName())
+                    .isEqualTo("io.github.yinwenyuan28.ailite.executor.coroutines.CoroutineExecutorProvider");
+        });
+    }
+
+    @Test
     public void directExecutorModeIsHonoured() {
         runner("ai-lite.executor.mode=direct").run(context -> {
             assertThat(context).hasSingleBean(ExecutorProvider.class);
