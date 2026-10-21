@@ -176,10 +176,14 @@ LlmCall next = call.withMessages(newMessages);
 | `LlmMessage.system(text)` | 系统提示 | ⭐ |
 | `LlmMessage.user(text)` | 纯文本用户消息 | ⭐ |
 | `LlmMessage.user(text, images)` | 图文用户消息 |  |
-| `LlmMessage.assistant(text, toolCalls)` | 助手消息；工具循环内部使用，也可手工构造历史 |  |
-| `LlmMessage.toolResult(toolCallId, text)` | 工具结果；`toolCallId` 必须对应助手的工具调用 |
-| `LlmMessage.other(text)` | 其他角色；出站前折叠成用户文本 |
-| `LlmMessage.other(text, images)` | 其他角色 + 图片 |
+| `LlmMessage.assistant(text, toolCalls)` | 助手消息，不含推理 |  |
+| `LlmMessage.assistant(text, thinkingText, toolCalls)` | 助手消息，正文和推理分开 |  |
+| `LlmMessage.assistant(text, thinkingText, thinkingSignature, toolCalls)` | 助手消息，带 Anthropic 推理签名 |  |
+| `LlmMessage.toolResult(toolCallId, text)` | 工具结果；`toolCallId` 必须对应助手的工具调用 |  |
+| `LlmMessage.other(text)` | 其他角色；出站前折叠成用户文本 |  |
+| `LlmMessage.other(text, images)` | 其他角色 + 图片 |  |
+
+`LlmMessage` 的读取方法：`getText()`（可见正文）、`getThinkingText()`（推理原文）、`getThinkingSignature()`（推理签名，可为 null）、`getToolCalls()`、`getToolCallId()`、`getImages()`。
 
 图片：
 
@@ -196,8 +200,10 @@ LlmMessage message = LlmMessage.user("描述这张图", Collections.singletonLis
 
 | 字段 | 说明 |
 | --- | --- |
-| `getContent()` | 可见正文；有推理时，内置传输层会把 `thinking + "\n\n" + content` 拼在这里 |
+| `getContent()` | 可见正文，不含推理 |
 | `getThinkingText()` | 推理原文；不支持推理的模型为 `null` |
+| `getThinkingSignature()` | 推理签名；Anthropic 回传 thinking block 时需要，其他协议通常为 `null` |
+| `getRawContent()` | 调试/兼容：按 `thinking + "\n\n" + content` 拼接后的文本 |
 | `getStopReason()` | `LlmStopReason` |
 | `getUsage()` | `LlmUsage`（输入/输出/总 token） |
 | `getProvider()`、`getModelId()`、`getThinkingLevel()` | 实际生效的模型信息 |
@@ -205,7 +211,7 @@ LlmMessage message = LlmMessage.user("描述这张图", Collections.singletonLis
 | `getRounds()` | 实际完成的轮数 |
 | `getToolCalls()` | 最后一轮返回的工具调用；没有则为空列表 |
 
-`getContent()` 的约定：内置传输层会把推理文本和正文按 `thinking + "\n\n" + content` 拼在 `content` 里；`getThinkingText()` 单独给出推理原文。需要纯可见正文时，用 `LlmTexts.splice` 的同一规则自行剥离，或使用 `AgentSessionMessage.fromResult(...)` / `AgentSession` 的落盘消息（已经剥分）。
+`getContent()` 和 `getThinkingText()` 是独立的两个字段：正文不再包含推理前缀。需要旧行为时用 `getRawContent()`。
 
 相关值对象：
 
@@ -221,7 +227,7 @@ LlmMessage message = LlmMessage.user("描述这张图", Collections.singletonLis
 | `fold(List<LlmMessage>)` | 出站前折叠：所有 system 合并成一条放最前，`OTHER` 转成 user，其余保持顺序 |
 | `validate(List<LlmMessage>, boolean acceptsImage)` | 校验消息；模型不接受图片时拒绝图片消息 |
 
-直接使用 `LlmGateway` 时一般不需要调用 `fold`/`validate`（网关内部会做）；需要从 `content` 中剥出可见正文时用 `splice` 的同一规则。
+直接使用 `LlmGateway` 时一般不需要调用 `fold`/`validate`（网关内部会做）；`splice` 现在主要用于调试或还原旧版拼接文本。
 
 ### 3.6 ⭐ `LlmTool`
 
@@ -468,7 +474,7 @@ AgentSession saved = result.getSession();
 | `version` | 乐观锁版本；成功 `save` 后存储侧为 `version + 1` |
 | `updatedAt` | 更新时间 |
 | `toLlmMessages()` | 转成网关消息；默认丢弃 `thinkingText` 和消息 id |
-| `toLlmMessages(includeThinking)` | 调试时保留思考文本 |
+| `toLlmMessages(includeThinking)` | true 时把 `thinkingText` / `thinkingSignature` 放进独立字段，不拼回正文 |
 | `messagesToLlm(source, includeThinking)` | 静态版本 |
 | `copyOf(session)` | 浅拷贝消息列表的副本 |
 
@@ -480,10 +486,13 @@ AgentSession saved = result.getSession();
 | --- | --- |
 | `system(text)` | 系统消息 |
 | `user(text)` | 用户消息 |
-| `assistant(text, thinkingText, toolCalls)` | 助手消息 |
+| `assistant(text, thinkingText, toolCalls)` | 助手消息，正文和推理分开 |
+| `assistant(text, thinkingText, thinkingSignature, toolCalls)` | 助手消息，带推理签名 |
 | `toolResult(toolCallId, text)` | 工具结果 |
-| `fromResult(thinkingText, hookedContent, toolCalls)` | 从一轮结果构造助手消息，自动剥分思考前缀 |
+| `fromResult(thinkingText, hookedContent, toolCalls)` | 从一轮结果构造助手消息 |
+| `fromResult(thinkingText, thinkingSignature, hookedContent, toolCalls)` | 从一轮结果构造助手消息，保留签名 |
 | `of(id, role, text, thinkingText, toolCalls, toolCallId)` | 指定 id，反序列化/测试用 |
+| `of(id, role, text, thinkingText, thinkingSignature, toolCalls, toolCallId)` | 指定 id 和签名 |
 
 | 方法 | 说明 |
 | --- | --- |
@@ -491,6 +500,7 @@ AgentSession saved = result.getSession();
 | `getRole()` | `LlmRole` |
 | `getText()` | 可见正文 |
 | `getThinkingText()` | 推理文本，可为 `null` |
+| `getThinkingSignature()` | 推理签名，可为 `null` |
 | `getToolCalls()` | 工具调用列表 |
 | `getToolCallId()` | 工具结果对应的调用 id |
 | `splicedText()` | 调试用：把思考文本和正文拼回 `thinking + "\n\n" + text` |
@@ -1115,6 +1125,7 @@ public final class MyTransport implements LlmTransport {
 ## 15. 相关文档
 
 - [配置参考](configuration.md)：所有 `ai-lite.*` 字段。
+- [Agent Loop 发给 LLM 的上下文](llm-context.md)：每轮请求组成、thinking 字段与协议差异。
 - [用户级线程实现](user-level-concurrency.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
 - [QPS 基准](../benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
 - [README](../README.md)：模块列表和快速开始。

@@ -26,7 +26,7 @@ JDK 8 没有虚拟线程，但等待模型响应的大部分时间并不需要�
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 396 个测试用例通过（Redis 不可用时 18 个 Redis 集成用例跳过），包含针对空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等场景的对抗性测试。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 404 个测试用例通过（Redis 不可用时 18 个 Redis 集成用例跳过），包含针对空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等场景的对抗性测试。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
 
 ## 环境要求
 
@@ -178,6 +178,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 ## 文档
 
 - [上层调用 API 使用指南](docs/api-usage.md)：网关、编排、会话、提示词、执行器与扩展点。
+- [Agent Loop 发给 LLM 的上下文](docs/llm-context.md)：每轮请求组成、thinking 字段和协议差异。
 - [配置参考](docs/configuration.md)：所有 `ai-lite.*` 字段。
 - [用户级线程实现](docs/user-level-concurrency.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
 - [QPS 基准](benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
