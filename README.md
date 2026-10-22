@@ -28,7 +28,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用、显式重试和自动装配都已落地。当前 636 个测试用例、0 失败（JDK 8 全量构建运行 613 个；Redis 可用时额外运行 18 个集成用例；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用、显式重试、Workflow 顺序执行和自动装配都已落地。当前 669 个测试用例、0 失败（JDK 8 全量构建运行 646 个；Redis 可用时额外运行 18 个集成用例；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态、Workflow 取消/失败定位等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
 
 ## 环境要求
 
@@ -242,6 +242,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 
 ## 文档
 
+- [单次调用与 HTTP 客户端使用指南](docs/single-call-http-usage.md)：依赖引入、配置、单次调用、取消/重试、传输选择与自定义 HTTP 实现。
 - [上层调用 API 使用指南](docs/api-usage.md)：网关、编排、会话、提示词、执行器与扩展点。
 - [单次模型调用入口](docs/entry-points.md)：同步/异步/协程入口的返回、阻塞、取消矩阵与 L1–L4 契约。
 - [重试边界](docs/retry.md)：显式重试入口、429/5xx/超时/取消分类，以及异步重试的调度与取消。

@@ -371,22 +371,46 @@ future.thenAccept(r -> System.out.println(r.getContent()));
 | 方法 | 说明 | 常用 |
 | --- | --- | --- |
 | `one(LlmCall)` | 单次调用 | ⭐ |
+| `one(LlmCall, LlmCancelHandle)` | 单次调用 + 取消 |  |
 | `oneByStream(...)` | 流式单次调用 |  |
 | `toolLoop(call, tools, maxRounds)` | 工具循环 | ⭐ |
+| `toolLoop(call, tools, maxRounds, cancel)` | 工具循环 + 取消 |  |
 | `toolLoop(call, tools)` | 默认 8 轮 |  |
 | `toolLoopByStream(...)` | 流式工具循环 |  |
 | `run(List<?> steps)` | 按顺序执行步骤，返回每步结果 | ⭐ |
+| `run(List<?> steps, LlmCancelHandle)` | 顺序执行 + 整体取消 | ⭐ |
 | `execute(Object step)` | 执行单个步骤 |  |
+| `execute(Object step, LlmCancelHandle)` | 执行单个步骤 + 取消 |  |
 | `Workflow.oneStep(call)` | 构造单次调用步骤 | ⭐ |
+| `Workflow.oneStep(call, cancel)` | 带默认取消句柄的单次步骤 |  |
 | `Workflow.toolLoopStep(call, tools, maxRounds)` | 构造工具循环步骤 | ⭐ |
+| `Workflow.toolLoopStep(call, tools, maxRounds, cancel)` | 带默认取消句柄的工具步骤 |  |
 
 ```java
-List<LlmResult> results = workflow.run(Arrays.asList(
-        Workflow.oneStep(extractCall),
-        Workflow.toolLoopStep(enrichCall, tools, 4)));
+LlmCancelHandle cancel = new LlmCancelHandle();
+
+try {
+    List<LlmResult> results = workflow.run(Arrays.asList(
+            Workflow.oneStep(extractCall),
+            Workflow.toolLoopStep(enrichCall, tools, 4)), cancel);
+} catch (WorkflowCancelledException ex) {
+    // ex.getStepIndex() 从 0 开始；ex.getCompletedResults() 是已完成步骤的不可变快照
+} catch (WorkflowStepException ex) {
+    // ex.getStepIndex() / ex.getCause() / ex.getCompletedResults()
+}
 ```
 
-`execute` 只接受实现了 `Workflow.Step` 的对象；传入 `AgentLoop` 会抛 `LlmCallException`。
+执行契约：
+
+- **先校验、后请求**：步骤列表先做不可变快照和整表结构校验（null / 非 `Step` / `AgentLoop`）；任何非法元素都在第一步请求前失败，结构错误优先于预取消。
+- **空列表**：直接返回不可变空列表，不检查取消。
+- **取消**：进入 `run` 前已取消 → 零请求、`stepIndex=0`；步骤间取消 → 不再执行下一步；某步返回 `ABORTED` → 视为取消，即使没有传句柄。
+- **失败**：步骤抛出 `RuntimeException` 包装为 `WorkflowStepException`，保留 cause；`Error` 原样抛出。自定义 `Step` 返回 `null` 也按失败处理。
+- **返回值**：`run` 的结果列表和异常里的已完成结果都是不可变快照；流式步骤的部分输出不会进入已完成结果。
+- **句柄**：同一次 `run` 内顺序复用同一个尚未 abort 的句柄；一旦 abort 即停止。并发 `run` 必须各用各的句柄。
+- **边界**：`Workflow` 不自动重试、不并行、不做步骤间数据流；当前只有同步版本，异步 `runAsync` 尚未提供。
+
+`execute` 只接受实现了 `Workflow.Step` 的对象；传入 `AgentLoop` 会抛 `LlmCallException`。自定义 `Step` 只需实现旧的 `execute(LlmGateway)`；新增的 `execute(LlmGateway, LlmCancelHandle)` 是 default 方法，忽略句柄时只保证步骤边界 L2。
 
 ### 4.2 ⭐ `AgentLoop`
 

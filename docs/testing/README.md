@@ -55,6 +55,8 @@
 | `LlmGatewayAsyncRetryTest` | core | 42 | 异步重试主路径、分类、deadline、取消竞态、调度线程、零延迟、监听器异常 |
 | `LlmGatewayAsyncRetryParityTest` | core | 6 | 同步 vs 异步的次数/终态/suppressed/记录数一致性 |
 | `AsyncRetryAssemblyTest` | starter | 7 | `aiLiteRetryScheduler` 默认 Bean、同名覆盖、多调度器无歧义、旧构造器兼容、关闭语义 |
+| `LlmGatewayToolLoopRecordTest` | core | 9 | 工具循环每轮记录、终态记录不被 TOOL_USE 吞掉、工具异常/null、工具后取消 |
+| `WorkflowTest` / `WorkflowHardeningTest` | core | 31 | 顺序执行、预校验、取消、失败定位、不可变结果、并发与快照 |
 | `LlmCoroutinesRetryTest` | executor-coroutines | 12 | suspend 重试、`delay()` 退避、`withTimeout`/`job.cancel`、deadline、记录、与异步版 parity |
 | `Utf8LineBufferTest` | core | 8 | CRLF 跨 chunk、多字节字符逐字节切分、空行、末尾无换行、单行上限 |
 | `JettyHttpExecutorTest` | http-jetty | 11 | 同步/异步/原始行、非 2xx、预取消、流中取消、提前 EOF、close |

@@ -1,6 +1,6 @@
 # 夯实 Workflow 顺序执行器
 
-**状态（2026-10-21）：原则已按审查 1 修正；审查 2 已完成（25 条缺陷），计划已按缺陷表补充。** 审查结论与补充决策见第 10 节。
+**状态（2026-10-22）：已按 Phase 0–5 实现并回归通过。** 审查结论与补充决策见第 10 节，执行记录见第 11 节。同步版本已落地；异步 `runAsync` 留作后续，不在本轮范围。
 
 一句话总纲：
 
@@ -348,3 +348,40 @@ Workflow 夯实完成后，同样的“预校验 / 取消分层 / 失败可定�
 - 预校验消息必须保留“步骤”“Agent loop”等现有断言依赖的子串。
 
 **审查 2 结论**：计划已覆盖全部 P0 和 P1；P2 中与网关记录/工具异常相关的内容放入 Phase 0，其余按上述决策文档化。可以进入实现，但建议先做 Phase 0 的网关修复，再改 Workflow。
+
+---
+
+## 11. 执行记录（2026-10-22）
+
+### Phase 0：网关前置
+
+- 新增 `LlmGateway.toolLoop(call, tools, maxRounds, cancel)`（4 参，避免和 `Integer` 重载二义性）。
+- 同步工具执行补 `try/catch`：异常包装为 `LlmCallException("工具执行失败", cause)` 并写 ERROR 记录；`null` 结果按空列表处理；结果元素为 null 时写空字符串。
+- 工具执行后取消补 ABORTED 记录（同步/异步）。
+- 异步工具循环记录改为“每轮一条”：
+  - `TOOL_USE` 轮次用普通 `record`，不再被全局 `recorded` 标志吞掉；
+  - 终态用 `terminalRecorded` CAS 保护，避免完成与取消竞态重复写；
+  - `MAX_ROUNDS`、`STOP`、`ERROR`、`ABORTED` 都会落终态记录。
+- 记录语义统一为：每轮一条；usage 为该逻辑调用截至当前的累计值，latency 为当轮耗时。同步/异步一致。
+- 工具结果处理回调增加 `try/catch`，避免回调内 NPE 导致 future 永不完成。
+
+### Phase 1–4：Workflow
+
+- `run` 先做列表快照和整表结构校验，再执行；空列表返回不可变空列表；结构错误优先于预取消。
+- 新增 `run(steps, cancel)`、`execute(step, cancel)`、`one(call, cancel)`、`toolLoop(..., cancel)`。
+- `Step` 新增 default `execute(gateway, cancel)`，旧自定义 Step 无需修改。
+- 新增 `WorkflowCancelledException`（`Kind.CANCELLED`）与 `WorkflowStepException`，携带 `stepIndex`、不可变 `completedResults`、原始 cause；异常消息不复制 cause 内容。
+- `ABORTED` 具有权威性：即使没有取消句柄，也终止后续步骤并抛取消异常。
+- 结果列表、已完成结果快照均不可变；`Error` 不包装。
+- `oneStep` / `toolLoopStep` 在工厂期拒绝 null call，并对 `LlmCall` / 工具列表做快照；`LlmCall.copy()` 支持超时快照。
+- 工厂的 `cancel` 参数作为默认句柄：`run` / `execute` 传入外层句柄时以外层为准。
+
+### Phase 5：测试与文档
+
+- 新增 `WorkflowHardeningTest`（24 条）与 `LlmGatewayToolLoopRecordTest`（9 条）；现有 7 条 WorkflowTest 不改断言通过。
+- 更新 `docs/api-usage.md` §4.1、`docs/testing/README.md`、README 测试统计。
+
+### 后续
+
+- 异步 `runAsync` 不在本轮；实现时应复用 `oneWithRetryAsync` 的调度/取消模型，但 Workflow 自身仍不内置重试。
+- 编排层重试仍是独立决策：需要先定义步骤级/整链级、工具副作用和请求数语义。
