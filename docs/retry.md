@@ -13,7 +13,7 @@
   HTTP 客户端回调线程只做 O(1) 判断。
 - **`OkHttpExecutor` 关闭了 OkHttp 的连接重试**（`retryOnConnectionFailure(false)`），避免和上层策略叠加。
 - **`oneWithRetry` / `oneWithRetryAsync` 只重试瞬时错误。** 400/401/404/解析/配置/取消不重试。
-- **编排层的重试另立计划。** `AgentLoop` 每轮、`AgentSessionLoop` 整体、`Workflow` 步骤的重试不在本文范围内；它们需要时显式调用重试入口。
+- **编排层的重试另立计划。** `AgentLoop` 每轮、`AgentSessionLoop` 整体、`Workflow` 整链的重试不在本文范围内。Workflow 只提供显式的异步步骤重试入口 `Workflow.oneStepWithRetryAsync(call, policy)`；它重试的是该步骤，不是整个 `runAsync`。
 
 ---
 

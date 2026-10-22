@@ -368,6 +368,12 @@ future.thenAccept(r -> System.out.println(r.getContent()));
 
 `Workflow` 是"单次调用 + 简单工具循环"的组合，不允许把 `AgentLoop` 当成步骤。
 
+步骤类型显式区分：
+
+- `SyncStep`：同步执行，会阻塞调用线程；`run` 只接受它。
+- `AsyncStep`：返回 `CompletableFuture`；`runAsync` 只接受它。
+- 同步步骤要在异步流程里复用时，必须显式 `Workflow.adapt(SyncStep)`；它会占用 `io()` 线程。
+
 | 方法 | 说明 | 常用 |
 | --- | --- | --- |
 | `one(LlmCall)` | 单次调用 | ⭐ |
@@ -377,18 +383,27 @@ future.thenAccept(r -> System.out.println(r.getContent()));
 | `toolLoop(call, tools, maxRounds, cancel)` | 工具循环 + 取消 |  |
 | `toolLoop(call, tools)` | 默认 8 轮 |  |
 | `toolLoopByStream(...)` | 流式工具循环 |  |
-| `run(List<?> steps)` | 按顺序执行步骤，返回每步结果 | ⭐ |
-| `run(List<?> steps, LlmCancelHandle)` | 顺序执行 + 整体取消 | ⭐ |
-| `execute(Object step)` | 执行单个步骤 |  |
-| `execute(Object step, LlmCancelHandle)` | 执行单个步骤 + 取消 |  |
-| `Workflow.oneStep(call)` | 构造单次调用步骤 | ⭐ |
-| `Workflow.oneStep(call, cancel)` | 带默认取消句柄的单次步骤 |  |
-| `Workflow.toolLoopStep(call, tools, maxRounds)` | 构造工具循环步骤 | ⭐ |
-| `Workflow.toolLoopStep(call, tools, maxRounds, cancel)` | 带默认取消句柄的工具步骤 |  |
+| `run(List<?> steps)` | 同步顺序执行步骤 | ⭐ |
+| `run(List<?> steps, LlmCancelHandle)` | 同步顺序执行 + 整体取消 | ⭐ |
+| `runAsync(List<? extends AsyncStep>)` | 异步顺序执行，等待不占调用线程 | ⭐ |
+| `runAsync(List<? extends AsyncStep>, LlmCancelHandle)` | 异步顺序执行 + 整体取消 | ⭐ |
+| `execute(Object step)` | 执行单个同步步骤 |  |
+| `execute(Object step, LlmCancelHandle)` | 执行单个同步步骤 + 取消 |  |
+| `executeAsync(AsyncStep step)` | 执行单个异步步骤 |  |
+| `executeAsync(AsyncStep step, LlmCancelHandle)` | 执行单个异步步骤 + 取消 |  |
+| `Workflow.oneStep(call)` | 构造同步单次调用步骤 | ⭐ |
+| `Workflow.oneStep(call, cancel)` | 带默认取消句柄的同步单次步骤 |  |
+| `Workflow.toolLoopStep(call, tools, maxRounds)` | 构造同步工具循环步骤 | ⭐ |
+| `Workflow.toolLoopStep(call, tools, maxRounds, cancel)` | 带默认取消句柄的同步工具步骤 |  |
+| `Workflow.oneStepAsync(call)` | 构造异步单次调用步骤 | ⭐ |
+| `Workflow.toolLoopStepAsync(call, tools, maxRounds)` | 构造异步工具循环步骤 | ⭐ |
+| `Workflow.oneStepWithRetryAsync(call, policy)` | 带显式重试的异步单次步骤 |  |
+| `Workflow.adapt(SyncStep)` | 把同步步骤显式适配为异步步骤 |  |
 
 ```java
 LlmCancelHandle cancel = new LlmCancelHandle();
 
+// 同步
 try {
     List<LlmResult> results = workflow.run(Arrays.asList(
             Workflow.oneStep(extractCall),
@@ -398,19 +413,27 @@ try {
 } catch (WorkflowStepException ex) {
     // ex.getStepIndex() / ex.getCause() / ex.getCompletedResults()
 }
+
+// 异步
+CompletableFuture<List<LlmResult>> future = workflow.runAsync(Arrays.asList(
+        Workflow.oneStepAsync(extractCall),
+        Workflow.toolLoopStepAsync(enrichCall, tools, 4),
+        Workflow.oneStepWithRetryAsync(summarizeCall, RetryPolicy.defaults())), cancel);
 ```
 
 执行契约：
 
-- **先校验、后请求**：步骤列表先做不可变快照和整表结构校验（null / 非 `Step` / `AgentLoop`）；任何非法元素都在第一步请求前失败，结构错误优先于预取消。
+- **先校验、后请求**：步骤列表先做不可变快照和整表结构校验（null / 非 `SyncStep` / `AgentLoop`）；任何非法元素都在第一步请求前失败，结构错误优先于预取消。
 - **空列表**：直接返回不可变空列表，不检查取消。
-- **取消**：进入 `run` 前已取消 → 零请求、`stepIndex=0`；步骤间取消 → 不再执行下一步；某步返回 `ABORTED` → 视为取消，即使没有传句柄。
-- **失败**：步骤抛出 `RuntimeException` 包装为 `WorkflowStepException`，保留 cause；`Error` 原样抛出。自定义 `Step` 返回 `null` 也按失败处理。
-- **返回值**：`run` 的结果列表和异常里的已完成结果都是不可变快照；流式步骤的部分输出不会进入已完成结果。
-- **句柄**：同一次 `run` 内顺序复用同一个尚未 abort 的句柄；一旦 abort 即停止。并发 `run` 必须各用各的句柄。
-- **边界**：`Workflow` 不自动重试、不并行、不做步骤间数据流；当前只有同步版本，异步 `runAsync` 尚未提供。
+- **同步取消**：进入 `run` 前已取消 → 零请求、`stepIndex=0`；步骤间取消 → 不再执行下一步；某步返回 `ABORTED` → 视为取消，即使没有传句柄。
+- **异步取消**：每一步使用独立句柄；调用方句柄只作为取消整个 run 的转发器。预取消返回失败 future；步骤间取消不发下一步；`future.cancel(true)` 取消当前步骤 future 和句柄。
+- **失败**：同步步骤抛出 `RuntimeException` 包装为 `WorkflowStepException`，保留 cause；异步步骤的 future 异常同样包装；`Error` 原样传播。自定义步骤返回 `null`（同步结果或异步 future/result）按失败处理。
+- **返回值**：`run` / `runAsync` 的结果列表和异常里的已完成结果都是不可变快照；流式步骤的部分输出不会进入已完成结果；`ABORTED` 结果会进入已完成结果。
+- **同步句柄**：同一次 `run` 内顺序复用同一个尚未 abort 的句柄；一旦 abort 即停止。并发 `run` 必须各用各的句柄。
+- **异步句柄**：每次 `runAsync` 使用独立的调用方句柄；每步内部 fresh 句柄，避免传输层晚到 `unbind` 清空下一步的 abort 绑定。
+- **边界**：`Workflow` 不自动重试、不并行、不做步骤间数据流。异步版是“非阻塞顺序执行”，不是并行执行器；重试只通过 `oneStepWithRetryAsync` 显式选择。
 
-`execute` 只接受实现了 `Workflow.Step` 的对象；传入 `AgentLoop` 会抛 `LlmCallException`。自定义 `Step` 只需实现旧的 `execute(LlmGateway)`；新增的 `execute(LlmGateway, LlmCancelHandle)` 是 default 方法，忽略句柄时只保证步骤边界 L2。
+`execute` 只接受实现了 `SyncStep` 的对象；`executeAsync` 只接受 `AsyncStep`。传入 `AgentLoop` 会抛 `LlmCallException`。自定义同步步骤只需实现 `syncStep` 的 `execute(LlmGateway)`；`execute(LlmGateway, LlmCancelHandle)` 是 default 方法，忽略句柄时只保证步骤边界 L2。
 
 ### 4.2 ⭐ `AgentLoop`
 

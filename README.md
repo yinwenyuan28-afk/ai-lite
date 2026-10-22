@@ -28,7 +28,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用、显式重试、Workflow 顺序执行和自动装配都已落地。当前 669 个测试用例、0 失败（JDK 8 全量构建运行 646 个；Redis 可用时额外运行 18 个集成用例；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态、Workflow 取消/失败定位等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用、显式重试、Workflow 同步/异步顺序执行和自动装配都已落地。当前 700 个测试用例、0 失败（JDK 8 全量构建运行 677 个；Redis 可用时额外运行 18 个集成用例；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态、Workflow 取消/失败定位与蹦床推进等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
 
 ## 环境要求
 
@@ -251,6 +251,8 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [夯实单次模型调用入口](docs/夯实单次模型调用入口-plan.md)：单次模型调用入口的 parity、L1/L2 取消、异常与重试边界。
 - [夯实 oneWithRetry](docs/夯实oneWithRetry-plan.md)：单次模型调用的显式重试、错误分类、退避与取消。
 - [夯实 Workflow 顺序执行器](docs/夯实Workflow顺序执行器-plan.md)：顺序执行器的原则、预校验、取消、失败定位与边界契约。
+- [夯实 Workflow 异步执行器](docs/夯实Workflow异步执行器-plan.md)：`SyncStep` / `AsyncStep`、`runAsync`、蹦床推进、取消与显式重试步骤。
+- [Workflow 异步执行器使用指南](docs/Workflow异步执行器使用指南.md)：业务侧的类型选择、`runAsync`、取消、重试、自定义步骤与 Spring MVC 集成。
 - [夯实 AgentLoop 一次性执行](docs/夯实AgentLoop一次性执行-plan.md)：一次性 Agent 循环的终态、钩子、取消、工具语义与行业对照。
 - [Agent Loop 发给 LLM 的上下文](docs/llm-context.md)：每轮请求组成、thinking 字段和协议差异。
 - [配置参考](docs/configuration.md)：所有 `ai-lite.*` 字段。

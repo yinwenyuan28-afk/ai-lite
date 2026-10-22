@@ -383,5 +383,5 @@ Workflow 夯实完成后，同样的“预校验 / 取消分层 / 失败可定�
 
 ### 后续
 
-- 异步 `runAsync` 不在本轮；实现时应复用 `oneWithRetryAsync` 的调度/取消模型，但 Workflow 自身仍不内置重试。
+- 异步 `runAsync` 见 [夯实 Workflow 异步执行器](夯实Workflow异步执行器-plan.md)；实现时复用 `oneWithRetryAsync` 的调度/取消模型，但 Workflow 自身仍不内置重试。
 - 编排层重试仍是独立决策：需要先定义步骤级/整链级、工具副作用和请求数语义。
