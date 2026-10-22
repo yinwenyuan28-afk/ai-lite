@@ -44,6 +44,10 @@ flowchart LR
     PROMPT[ai-lite-prompt<br/>提示词中心]
     PROMPTJDBC[ai-lite-prompt-jdbc]
     HTTPOK[ai-lite-http-okhttp]
+    HTTPJETTY[ai-lite-http-jetty]
+    HTTPWEB[ai-lite-http-webclient]
+    HTTPKTOR[ai-lite-http-ktor-cio]
+    VHTTP21[ai-lite-http-okhttp-jdk21<br/>JDK 21 profile]
     HTTPJDK[ai-lite-http-jdk8]
     REDIS[ai-lite-session-redis]
     SESSIONJDBC[ai-lite-session-jdbc]
@@ -57,6 +61,10 @@ flowchart LR
     PROMPTJDBC --> PROMPT
     PROMPTJDBC --> CORE
     HTTPOK --> CORE
+    HTTPJETTY --> CORE
+    HTTPWEB --> CORE
+    HTTPKTOR --> CORE
+    VHTTP21 --> HTTPOK
     HTTPJDK --> CORE
     REDIS --> CORE
     SESSIONJDBC --> CORE
@@ -609,7 +617,7 @@ JDBC 自动装配在 `JdbcTemplateAutoConfiguration` 之后、`AiLiteSessionAuto
 
 ## 13. 测试策略
 
-当前全量 503 个用例（Redis 不可用时其中 1 个集成测试类跳过），覆盖：
+当前全量 570 个用例（Redis 不可用时其中 1 个集成测试类跳过），覆盖：
 
 - 网关同步/异步/流式、取消、错误包装、工具循环。
 - AgentLoop 的生命周期顺序、拒绝/停止共识、多轮工具、取消、回调异常出口。

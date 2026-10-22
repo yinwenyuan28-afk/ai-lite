@@ -1,6 +1,6 @@
 # 夯实 HTTP 传输并发（B/C 双路径）
 
-**状态（2026-10-22）：Phase 0/1/2 已实现。** 配置选择、`okhttp-virtual`（JDK 21）、`ai-lite-http-jetty` 及对应测试已落地；WebClient/Ktor 为可选模块，尚未实现，选择时按设计 fail-fast。本计划只改 HTTP 传输层与 Starter 装配，不改 `LlmGateway`、`Workflow`、`AgentLoop`、`AgentSessionLoop` 的公开 API。
+**状态（2026-10-22）：Phase 0–5 已实现，Phase 6 文档已补齐。** 配置选择、`okhttp-virtual`（JDK 21）、`ai-lite-http-jetty`、`ai-lite-http-webclient`、`ai-lite-http-ktor-cio` 及对应测试、并发基准均已落地。本计划只改 HTTP 传输层与 Starter 装配，不改 `LlmGateway`、`Workflow`、`AgentLoop`、`AgentSessionLoop` 的公开 API。
 
 一句话总纲：
 
@@ -505,13 +505,17 @@ C3 可选     ktor-cio（Kotlin 用户/高并发流式；覆盖 Kotlin/coroutine
 | --- | --- |
 | Phase 0 | `AiLiteConfig.Http`（transport/dispatcher/jetty/ktor）；Starter 全反射装配；`HttpTransportReporter` 启动日志、覆盖提示、不适用配置 WARN；未知值/缺模块 fail-fast |
 | Phase 1 | `ai-lite-http-okhttp-jdk21`；`VirtualThreadOkHttpFactory`；虚拟线程回调、流式、取消测试（JDK 25 运行通过） |
-| Phase 2 | `ai-lite-http-jetty`；`JettyHttpExecutor` + `Utf8LineBuffer`；同步/异步/流式/CRLF/UTF-8/提前 EOF/非 2xx/预取消/流中取消/close 测试 |
+| Phase 2 | `ai-lite-http-jetty`；`JettyHttpExecutor` + core `Utf8LineBuffer`；同步/异步/流式/CRLF/UTF-8/提前 EOF/非 2xx/预取消/流中取消/close 测试 |
+| Phase 3 | `ai-lite-http-webclient`；按 WebFlux 5.1 API 编译；DataBuffer 原始行、`ReactorResourceFactory` 独立连接资源、取消/错误体/close 测试 |
+| Phase 4 | `ai-lite-http-ktor-cio`；Ktor 2.3.13 + Kotlin 1.9.25；`readUTF8LineTo` 原始行、engine `requestTimeout=0`、Job 取消、错误分类测试 |
+| Phase 5 | `benchmark/http-transport-benchmark`；Jetty fake LLM server；100/500/1000 并发、非流式/流式、六种传输的吞吐/延迟/线程数 |
 
 验证：
 
-- JDK 8 + Boot 2.1.10：全量 535 个测试通过。
-- JDK 8 + Boot 2.7.18：Jetty、Starter 及相关模块测试通过。
+- JDK 8 + Boot 2.1.10：全量 570 个测试通过。
+- JDK 8 + Boot 2.7.18：WebClient、Jetty、Starter 及相关模块测试通过，同一份字节码可用。
 - JDK 25：`ai-lite-http-okhttp-jdk21` 3 个用例通过（`Thread.isVirtual()`、流式回调、取消）。
+- 基准：六种传输 100/500/1000 并发全部 0 错误（JDK8 的 `stream/1000` 在独立 JVM 运行以避开端口累积）。
 
 ### 10.2 踩坑与修复
 
@@ -521,9 +525,12 @@ C3 可选     ktor-cio（Kotlin 用户/高并发流式；覆盖 Kotlin/coroutine
 4. **`onContent` 的 `ByteBuffer` 只在回调内有效**：必须同步复制字节，不能把 buffer 引用交给后续线程。
 5. **提前 EOF 不能当正常结束**：Jetty 的 EofException 按 `Kind.TRANSPORT` 失败；取消优先按 `Kind.CANCELLED`。
 6. **connect timeout 是客户端级**：按 connect timeout 缓存客户端，上限 16 组，避免异常配置无限创建 selector/线程池。
+7. **JDK8 每次请求 `disconnect()` 会杀掉 keep-alive**：基准高并发时出现端口耗尽；改为正常完成只关流，取消/异常才 disconnect。
+8. **OkHttp 默认只保留 5 个空闲连接**：调大 `dispatcher.max-requests` 后连接池没跟上，虚拟线程高并发会反复建连；连接池大小已与 `max-requests` 对齐。
+9. **JDK `HttpServer` 不适合做高并发 fake server**：会主动断连产生 `EOFException`；基准改用 Jetty Server。
+10. **WebClient 线程名是 `webflux-http-nio-*`**：线程统计和排查时不要只找 `reactor-http`。
 
-### 10.3 未完成
+### 10.3 仍待推进
 
-- Phase 3/4：`webclient`、`ktor-cio` 可选模块；当前选择会 fail-fast。
-- Phase 5：并发基准（fake LLM server，100/500/1000 并发）。
-- 回调执行策略：独立计划 [夯实回调执行策略](夯实回调执行策略-plan.md)，尚未实施。
+- 回调执行策略：独立计划 [夯实回调执行策略](夯实回调执行策略-plan.md)，尚未实施；当前用户回调和 Agent 钩子仍可能在传输/工具线程上执行。
+- 基准是开发机上的相对比较，不是受控容量测试；生产容量需要按真实供应商、网络和 CPU 复测。

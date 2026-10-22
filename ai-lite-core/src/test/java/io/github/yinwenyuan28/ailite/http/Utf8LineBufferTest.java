@@ -1,4 +1,4 @@
-package io.github.yinwenyuan28.ailite.http.jetty;
+package io.github.yinwenyuan28.ailite.http;
 
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import org.junit.Test;

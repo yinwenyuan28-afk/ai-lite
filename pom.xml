@@ -57,6 +57,8 @@
         <module>ai-lite-prompt-jdbc</module>
         <module>ai-lite-http-okhttp</module>
         <module>ai-lite-http-jetty</module>
+        <module>ai-lite-http-webclient</module>
+        <module>ai-lite-http-ktor-cio</module>
         <module>ai-lite-http-jdk8</module>
         <module>ai-lite-session-redis</module>
         <module>ai-lite-session-jdbc</module>
@@ -105,6 +107,16 @@
             <dependency>
                 <groupId>io.github.yinwenyuan28-afk</groupId>
                 <artifactId>ai-lite-http-jetty</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-http-webclient</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-http-ktor-cio</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

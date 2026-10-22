@@ -3,10 +3,12 @@ package io.github.yinwenyuan28.ailite.http.okhttp;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
+import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
 import okhttp3.OkHttpClient;
 
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 按 {@code ai-lite.http.*} 构造 OkHttp 客户端。
@@ -44,10 +46,14 @@ public final class OkHttpClientFactory {
         Dispatcher dispatcher = dispatcherExecutor == null
                 ? new Dispatcher()
                 : new Dispatcher(dispatcherExecutor);
-        dispatcher.setMaxRequests(maxRequests(config));
+        int maxRequests = maxRequests(config);
+        dispatcher.setMaxRequests(maxRequests);
         dispatcher.setMaxRequestsPerHost(maxRequestsPerHost(config));
         return new OkHttpClient.Builder()
                 .dispatcher(dispatcher)
+                // OkHttp 默认只保留 5 个空闲连接；调大 max-requests 时应同步扩大连接池，
+                // 否则高并发下会反复建连（虚拟线程场景尤其明显）。
+                .connectionPool(new ConnectionPool(maxRequests, 5, TimeUnit.MINUTES))
                 .retryOnConnectionFailure(false)
                 .build();
     }

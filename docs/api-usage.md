@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | 公开 API | `LlmGateway`、`RetryPolicy`、`LlmCall`、`LlmMessage`、`LlmResult`、`LlmTool`、`Workflow`、`AgentLoop`、`AgentLifecycle`、`AgentSessionLoop`、`PromptManager`、`RenderedPrompt` | 业务直接使用；尽量保持二进制兼容 |
 | 扩展 SPI | `LlmTransport`、`HttpExecutor`、`AsyncHttpExecutor`、`ExecutorProvider`、`ToolExecutor`、`LlmCallStore`、`AgentSessionStore`、`SessionCache`、`PromptStore` | 允许自定义实现；接口方法变更会慎重 |
-| 可选模块 | `ai-lite-executor-coroutines`、`ai-lite-executor-jdk21`、`ai-lite-session-redis`、`ai-lite-session-jdbc`、`ai-lite-store-jdbc`、`ai-lite-prompt-jdbc` | 按需引入，不引入不影响核心 |
+| 可选模块 | `ai-lite-executor-coroutines`、`ai-lite-executor-jdk21`、`ai-lite-http-jetty`、`ai-lite-http-webclient`、`ai-lite-http-ktor-cio`、`ai-lite-http-jdk8`、`ai-lite-session-redis`、`ai-lite-session-jdbc`、`ai-lite-store-jdbc`、`ai-lite-prompt-jdbc` | 按需引入，不引入不影响核心 |
 | 内部实现 | `TransportSupport`、`AgentSessionStoreSupport`、`AsyncLlmCallLogger`、各协议的私有状态类 | 不保证兼容，不要直接依赖 |
 
 持久化值以 `wire()` 为准（如 `LlmStopReason.wire()`），不要依赖枚举名。

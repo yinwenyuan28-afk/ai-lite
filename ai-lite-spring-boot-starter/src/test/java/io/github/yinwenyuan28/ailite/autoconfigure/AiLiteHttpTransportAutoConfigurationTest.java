@@ -72,13 +72,34 @@ public class AiLiteHttpTransportAutoConfigurationTest {
     }
 
     @Test
-    public void missingTransportModuleFailsWithActionableMessage() {
+    public void selectsWebClient() {
         runner("ai-lite.http.transport=webclient").run(context -> {
-            assertThat(context.getStartupFailure()).isNotNull();
-            assertThat(messages(context.getStartupFailure()))
-                    .contains("ai-lite-http-webclient")
-                    .contains("HttpExecutor");
+            assertThat(context).hasSingleBean(HttpExecutor.class);
+            assertThat(context.getBean(HttpExecutor.class).getClass().getName())
+                    .isEqualTo("io.github.yinwenyuan28.ailite.http.webclient.WebClientHttpExecutor");
         });
+    }
+
+    @Test
+    public void selectsKtorCio() {
+        runner("ai-lite.http.transport=ktor-cio").run(context -> {
+            assertThat(context).hasSingleBean(HttpExecutor.class);
+            assertThat(context.getBean(HttpExecutor.class).getClass().getName())
+                    .isEqualTo("io.github.yinwenyuan28.ailite.http.ktor.KtorCioHttpExecutor");
+        });
+    }
+
+    @Test
+    public void missingTransportModuleFailsWithActionableMessage() {
+        runner("ai-lite.http.transport=webclient")
+                .withClassLoader(new FilteredClassLoader(
+                        "io.github.yinwenyuan28.ailite.http.webclient"))
+                .run(context -> {
+                    assertThat(context.getStartupFailure()).isNotNull();
+                    assertThat(messages(context.getStartupFailure()))
+                            .contains("ai-lite-http-webclient")
+                            .contains("HttpExecutor");
+                });
     }
 
     @Test

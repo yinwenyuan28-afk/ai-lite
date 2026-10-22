@@ -1,4 +1,4 @@
-package io.github.yinwenyuan28.ailite.http.jetty;
+package io.github.yinwenyuan28.ailite.http;
 
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 
@@ -10,13 +10,14 @@ import java.util.List;
 /**
  * 把任意切分的字节流还原成 UTF-8 文本行。
  *
- * <p>Jetty 的 {@code onContent} 回调只保证“一段字节”，不保证按行、也不保证
- * 不切断多字节字符。这里先按字节寻找 {@code \n}/{@code \r}/{@code \r\n}，
- * 只对完整的一行做 UTF-8 解码；跨 chunk 的多字节字符和 CRLF 都能正确处理。</p>
+ * <p>异步 HTTP 客户端只保证“一段字节”，不保证按行、也不保证不切断多字节字符。
+ * 这里先按字节寻找 {@code \n}/{@code \r}/{@code \r\n}，只对完整的一行做 UTF-8
+ * 解码；跨 chunk 的多字节字符和 CRLF 都能正确处理。</p>
  *
- * <p>每个流一个实例，不做并发保护；回调线程串行调用即可。</p>
+ * <p>每个流一个实例，不做并发保护；回调线程串行调用即可。单行超过上限时抛
+ * {@link LlmCallException}，避免恶意或损坏响应把内存打满。</p>
  */
-final class Utf8LineBuffer {
+public final class Utf8LineBuffer {
 
     private static final Charset UTF_8 = Charset.forName("UTF-8");
 
@@ -25,7 +26,10 @@ final class Utf8LineBuffer {
     /** 上一个字节是 CR；紧随其后的 LF 属于同一个 CRLF，不再产生空行。 */
     private boolean skipNextLf;
 
-    Utf8LineBuffer(int maxLineBytes) {
+    /**
+     * @param maxLineBytes 单行字节上限
+     */
+    public Utf8LineBuffer(int maxLineBytes) {
         this.maxLineBytes = maxLineBytes;
     }
 
@@ -35,7 +39,7 @@ final class Utf8LineBuffer {
      * @param bytes 原始字节
      * @return 完整行，按出现顺序
      */
-    List<String> accept(byte[] bytes) {
+    public List<String> accept(byte[] bytes) {
         List<String> lines = new ArrayList<String>();
         if (bytes == null) {
             return lines;
@@ -70,7 +74,7 @@ final class Utf8LineBuffer {
      *
      * @return 最后一行；没有残留内容时返回 null
      */
-    String flush() {
+    public String flush() {
         skipNextLf = false;
         if (line.size() == 0) {
             return null;

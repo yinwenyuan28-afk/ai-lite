@@ -710,6 +710,19 @@ ai-lite:
 - `jetty` 的 connect timeout 是客户端级配置，实现按 connect timeout 缓存客户端；请尽量统一供应商的超时配置。
 - 选择未引入的模块会启动失败，不会静默退回 OkHttp。
 
+本机 1000 并发非流式的实测对比（同一 fake LLM、30ms 延迟）：
+
+| transport | req/s | transport 线程 |
+| --- | ---: | ---: |
+| `jetty` | 10182 | 201 |
+| `okhttp` | 7238 | 754 |
+| `okhttp-virtual` | 6897 | 虚拟线程（不计入平台线程） |
+| `webclient` | 4929 | 16 |
+| `ktor-cio` | 1328 | 130 |
+| `jdk8` | 581 | 990 |
+
+完整矩阵、延迟分位和方法见 [HTTP 传输并发基准](../benchmark/http-transport-benchmark/README.md)。数字是开发机上的相对比较，不是生产容量承诺。
+
 ### 10.3 流式调用的线程占用
 
 非流式异步请求在等待响应时不占调用线程；OkHttp 的流式 SSE 在响应到达后会占一个 Dispatcher 线程读取事件，直到流结束。长流很多时，`maxRequests` 要相应放大，或者改用 Jetty 这类 NIO 传输，把大量长连接压到少量 selector 线程上。

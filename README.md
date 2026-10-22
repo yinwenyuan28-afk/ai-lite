@@ -27,7 +27,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 538 个测试用例、0 失败（JDK 8 构建运行 535 个；JDK 21+ 额外运行 3 个虚拟线程 HTTP 用例）；Redis 不可用时 1 个 Redis 集成测试类整体跳过（可用时该类 18 个用例运行）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 573 个测试用例、0 失败（JDK 8 构建运行 570 个；JDK 21+ 额外运行 3 个虚拟线程 HTTP 用例）；Redis 不可用时 1 个 Redis 集成测试类整体跳过（可用时该类 18 个用例运行）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
 
 ## 环境要求
 
@@ -37,6 +37,8 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 - 虚拟线程执行器需要 JDK 21+（独立模块，可选）
 - NIO 传输需要 `ai-lite-http-jetty`（跨 Boot 2.1/2.7，可选）
 - 虚拟线程 HTTP 传输需要 JDK 21+ 和 `ai-lite-http-okhttp-jdk21`（可选）
+- 响应式传输需要 `ai-lite-http-webclient` + `spring-webflux`（可选）
+- Ktor CIO 传输需要 `ai-lite-http-ktor-cio`（Kotlin 项目，可选）
 
 ## 模块
 
@@ -48,6 +50,8 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 | `ai-lite-http-okhttp` | 默认 HTTP 实现（OkHttp 4.12，调用线程异步；底层仍占 Dispatcher 线程） |
 | `ai-lite-http-okhttp-jdk21` | OkHttp 虚拟线程 Dispatcher（JDK 21 才编译，可选） |
 | `ai-lite-http-jetty` | Jetty 9.4 NIO 传输（跨 Boot 2.1/2.7，可选） |
+| `ai-lite-http-webclient` | Spring WebClient 5.1 API 响应式传输（可选） |
+| `ai-lite-http-ktor-cio` | Ktor 2.3 CIO 传输（Kotlin，可选） |
 | `ai-lite-http-jdk8` | 零依赖 HTTP 实现（HttpURLConnection） |
 | `ai-lite-session-redis` | Redis 会话缓存 |
 | `ai-lite-session-jdbc` | JDBC 会话存储 |
@@ -152,9 +156,20 @@ ai-lite:
     <artifactId>ai-lite-http-jetty</artifactId>
     <version>0.1.0-SNAPSHOT</version>
 </dependency>
+<!-- 或者： -->
+<dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-http-webclient</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+<dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-http-ktor-cio</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
 ```
 
-选择未引入的模块或未知值会在启动时失败，并给出缺少的依赖或允许值。完整字段、兼容矩阵和线程模型见 [配置参考](docs/configuration.md) 第 4 节。
+选择未引入的模块或未知值会在启动时失败，并给出缺少的依赖或允许值。完整字段、兼容矩阵和线程模型见 [配置参考](docs/configuration.md) 第 4 节；六种传输的实测对比见 [HTTP 传输并发基准](benchmark/http-transport-benchmark/README.md)。
 
 ### 5. 提示词中心
 
@@ -225,6 +240,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [夯实回调执行策略](docs/夯实回调执行策略-plan.md)：用户回调与 Agent 钩子的串行执行、队列/取消和 afterRun 终态。
 - [编排层异步对抗性测试设计](docs/testing/README.md)：103 个竞态/异常用例，按 AgentLoop、会话层、网关拆分。
 - [QPS 基准](benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
+- [HTTP 传输并发基准](benchmark/http-transport-benchmark/README.md)：六种 HTTP 传输在 100/500/1000 并发下的吞吐、延迟与线程数。
 
 ## 构建
 

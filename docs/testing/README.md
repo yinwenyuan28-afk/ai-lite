@@ -47,6 +47,13 @@
 | 三个 transport test（图片分片） | http-okhttp | 6 | OpenAI `image_url`、Responses `input_image`、Anthropic base64 source、流式与合并 |
 | `RetryPolicyTest` / `LlmGatewayRetryTest` | core | 26 | 显式重试、瞬时错误分类、退避、总 deadline、取消感知、每次尝试独立记录 |
 | `LlmCoroutinesRetryTest` | executor-coroutines | 10 | suspend 重试、`delay()` 退避、`withTimeout`/`job.cancel`、deadline、记录 |
+| `Utf8LineBufferTest` | core | 8 | CRLF 跨 chunk、多字节字符逐字节切分、空行、末尾无换行、单行上限 |
+| `JettyHttpExecutorTest` | http-jetty | 11 | 同步/异步/原始行、非 2xx、预取消、流中取消、提前 EOF、close |
+| `WebClientHttpExecutorTest` | http-webclient | 11 | 同 Jetty，另覆盖 DataBuffer 原始行与 Reactor 取消 |
+| `KtorCioHttpExecutorTest` | http-ktor-cio | 11 | 同 Jetty，另覆盖 `readUTF8LineTo`、Job 取消、Socket 提前断开 |
+| `VirtualThreadOkHttpFactoryTest` | http-okhttp-jdk21 | 3 | 异步/流式回调运行在虚拟线程、取消（JDK 21+） |
+| `OkHttpClientFactoryTest` | http-okhttp | 3 | 默认 64/5、显式配置、非法值 |
+| `AiLiteHttpTransportAutoConfigurationTest` | starter | 10 | 六种 transport、缺模块/未知值 fail-fast、自定义 Bean 覆盖 |
 
 已修复：`one(call, cancel)` 缺失、回调内 NPE 导致 future 挂起、`future.cancel` 漏记调用记录、`LlmCancelHandle` 非幂等、图片参数未收口（空 MIME/data、非 base64 data URL、MIME 大小写误拒）。**L1 的传输差异**（JDK 8 正文读取阶段可能等到读超时）已写入 `docs/entry-points.md`，编排层（AgentLoop / SessionLoop）的 P0 仍按本文档后续实现。
 

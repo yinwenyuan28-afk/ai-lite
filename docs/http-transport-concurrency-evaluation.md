@@ -1,6 +1,6 @@
 # HTTP 传输并发模型评估
 
-**状态（2026-10-22）：背景评估，Phase 0/1/2 已落地。** Reactor Netty 1.0 不能用于 Boot 2.1；最终选型为 **Jetty 9.4 作为 C 主路径**，WebClient 与 Ktor CIO 作为可选路径。已实现 `ai-lite.http.transport` 配置选择、`okhttp-virtual`（JDK 21）和 `ai-lite-http-jetty`；WebClient/Ktor 模块仍为可选、尚未实现，选择时会 fail-fast。具体配置键、模块设计与验收见 [夯实 HTTP 传输并发（B/C 双路径）](夯实HTTP传输并发-plan.md)。本文保留问题分析和基准判据。
+**状态（2026-10-22）：背景评估，Phase 0–5 已落地。** Reactor Netty 1.0 不能用于 Boot 2.1；最终选型为 **Jetty 9.4 作为 C 主路径**，WebClient 与 Ktor CIO 作为可选路径。已实现 `ai-lite.http.transport` 配置选择、`okhttp-virtual`（JDK 21）、`ai-lite-http-jetty`、`ai-lite-http-webclient`、`ai-lite-http-ktor-cio` 和并发基准。具体配置键、模块设计与验收见 [夯实 HTTP 传输并发（B/C 双路径）](夯实HTTP传输并发-plan.md)，实测数据见 [HTTP 传输并发基准](../benchmark/http-transport-benchmark/README.md)。本文保留问题分析和基准判据。
 
 ---
 

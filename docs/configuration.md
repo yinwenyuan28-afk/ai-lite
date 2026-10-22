@@ -250,6 +250,50 @@ ai-lite:
 > 不使用 proxy auth/Basic auth，并强制 `Accept-Encoding: identity` 避免 SSE 被 gzip 缓冲。
 > 更多背景与风险见 [夯实 HTTP 传输并发](夯实HTTP传输并发-plan.md)。
 
+WebClient（真实响应式栈，适合已经使用 WebFlux 的项目）：
+
+```xml
+<dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-http-webclient</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+```yaml
+ai-lite:
+  http:
+    transport: webclient
+```
+
+> 模块按 Spring WebFlux 5.1 API 编译，同一份字节码在 Boot 2.1/2.7 通过测试。
+> 会引入 `spring-webflux` 和 Reactor Netty；MVC 应用依赖体积约增加 6–8MB。
+> Boot 2.1 的 Reactor Netty 0.8 在连接重置时可能自动重试一次已发出的 POST，
+> 对重复计费敏感的场景请用 Jetty/OkHttp。
+
+Ktor CIO（Kotlin 项目，JDK 8 可用）：
+
+```xml
+<dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-http-ktor-cio</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+```yaml
+ai-lite:
+  http:
+    transport: ktor-cio
+    ktor:
+      max-connections: 1000
+      max-connections-per-route: 100
+```
+
+> Ktor 2.3.13 是 2.x 末版，已 EOL；3.x 需要 Kotlin 2.x，当前模块不兼容。
+> 模块要求 Kotlin 1.9.25 / coroutines 1.7.3，Boot 2.1/2.7 的默认 Kotlin 版本
+> 都需要显式覆盖。CIO selector 使用 `Dispatchers.IO`，IO 池饱和会影响读事件。
+
 用户回调与 Agent 钩子的线程策略不属于本节，见 [夯实回调执行策略](夯实回调执行策略-plan.md)。
 
 ## 5. 会话 `ai-lite.session`

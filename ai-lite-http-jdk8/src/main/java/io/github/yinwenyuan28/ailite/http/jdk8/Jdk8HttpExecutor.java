@@ -76,22 +76,24 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
         } catch (LlmCallException ex) {
             throw ex;
         } catch (IOException ex) {
+            disconnect(connection);
             throw wrap(ex, request.getCancel());
         } finally {
-            disconnect(connection, request.getCancel());
+            unbind(request.getCancel());
         }
     }
 
     @Override
     public void executeStreaming(HttpRequest request, StreamListener listener) {
         HttpURLConnection connection = null;
+        BufferedReader reader = null;
         try {
             connection = open(request);
             int status = connection.getResponseCode();
             if (status < 200 || status >= 300) {
                 throw error(connection, status);
             }
-            BufferedReader reader = new BufferedReader(
+            reader = new BufferedReader(
                     new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8));
             String line;
             while ((line = reader.readLine()) != null) {
@@ -104,9 +106,11 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
         } catch (LlmCallException ex) {
             throw ex;
         } catch (IOException ex) {
+            disconnect(connection);
             throw wrap(ex, request.getCancel());
         } finally {
-            disconnect(connection, request.getCancel());
+            closeQuietly(reader);
+            unbind(request.getCancel());
         }
     }
 
@@ -185,12 +189,29 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
         return new LlmCallException("模型请求失败", ex, LlmCallException.Kind.TRANSPORT);
     }
 
-    private static void disconnect(HttpURLConnection connection, LlmCancelHandle cancel) {
+    /**
+     * 正常完成时只解绑取消动作，不能 disconnect；否则会关闭底层 socket，
+     * HttpURLConnection 的 keep-alive 连接池永远无法复用。取消/异常路径才断开。
+     */
+    private static void unbind(LlmCancelHandle cancel) {
         if (cancel != null) {
             cancel.bindAbort(null);
         }
+    }
+
+    private static void disconnect(HttpURLConnection connection) {
         if (connection != null) {
             connection.disconnect();
+        }
+    }
+
+    private static void closeQuietly(java.io.Closeable closeable) {
+        if (closeable != null) {
+            try {
+                closeable.close();
+            } catch (IOException ignored) {
+                // 关闭失败不覆盖主流程异常。
+            }
         }
     }
 
