@@ -13,11 +13,13 @@ import io.github.yinwenyuan28.ailite.llm.LlmCallStore;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
 import io.github.yinwenyuan28.ailite.llm.LlmTransport;
 import io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.llm.RetryScheduler;
 import io.github.yinwenyuan28.ailite.llm.SequentialToolExecutor;
 import io.github.yinwenyuan28.ailite.llm.ToolExecutor;
 import io.github.yinwenyuan28.ailite.transport.AnthropicMessagesTransport;
 import io.github.yinwenyuan28.ailite.transport.OpenAiCompletionsTransport;
 import io.github.yinwenyuan28.ailite.transport.OpenAiResponsesTransport;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -29,6 +31,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * AI Lite 主自动装配。只做装配，不改变核心模块的行为。
@@ -140,12 +143,31 @@ public class AiLiteAutoConfiguration {
         return new SequentialToolExecutor();
     }
 
+    /**
+     * 异步重试专用调度器。
+     *
+     * <p>按 Bean 名覆盖：用户定义名为 {@code aiLiteRetryScheduler} 的 Bean 即可
+     * 替换默认实现。网关通过 {@code @Qualifier} 精确注入，因此用户同时定义其他
+     * {@link ScheduledExecutorService} 也不会产生歧义。默认线程是 daemon，
+     * 容器关闭时由 {@code shutdownNow} 回收。</p>
+     *
+     * @return 重试调度器
+     */
+    @Bean(name = RetryScheduler.BEAN_NAME, destroyMethod = "shutdownNow")
+    @ConditionalOnMissingBean(name = RetryScheduler.BEAN_NAME)
+    public ScheduledExecutorService aiLiteRetryScheduler() {
+        return RetryScheduler.create();
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public LlmGateway aiLiteGateway(ModelResolver resolver, List<LlmTransport> transports,
                                     LlmCallStore store, ExecutorProvider executor,
-                                    ToolExecutor toolExecutor) {
-        return new LlmGateway(resolver, transports, store, executor, toolExecutor);
+                                    ToolExecutor toolExecutor,
+                                    @Qualifier(RetryScheduler.BEAN_NAME)
+                                    ScheduledExecutorService retryScheduler) {
+        return new LlmGateway(resolver, transports, store, executor, toolExecutor,
+                retryScheduler);
     }
 
     @Bean

@@ -207,6 +207,53 @@ class LlmCoroutinesRetryTest {
         }
     }
 
+    @Test
+    fun `coroutine and async retry agree on attempts and terminal state`() {
+        runBlocking {
+            val coroutineTransport = transport()
+                .fail(transportError()).fail(httpError(503)).success("ok")
+            val asyncTransport = transport()
+                .fail(transportError()).fail(httpError(503)).success("ok")
+
+            val coroutineResult = LlmCoroutines.oneWithRetry(
+                gateway(coroutineTransport), call(), fastPolicy(3))
+            val asyncResult = gateway(asyncTransport).oneWithRetryAsync(call(), fastPolicy(3))
+                .get(5, TimeUnit.SECONDS)
+
+            assertThat(coroutineResult.content).isEqualTo(asyncResult.content)
+            assertThat(coroutineTransport.requests.size)
+                .isEqualTo(asyncTransport.requests.size)
+        }
+    }
+
+    @Test
+    fun `coroutine and async agree on exhausted error`() {
+        runBlocking {
+            val coroutineTransport = transport().fail(transportError()).fail(httpError(503))
+            val asyncTransport = transport().fail(transportError()).fail(httpError(503))
+
+            val coroutineError = try {
+                LlmCoroutines.oneWithRetry(gateway(coroutineTransport), call(), fastPolicy(2))
+                throw AssertionError("expected failure")
+            } catch (ex: LlmCallException) {
+                ex
+            }
+            val asyncError = try {
+                gateway(asyncTransport).oneWithRetryAsync(call(), fastPolicy(2))
+                    .get(5, TimeUnit.SECONDS)
+                throw AssertionError("expected failure")
+            } catch (ex: java.util.concurrent.ExecutionException) {
+                ex.cause as LlmCallException
+            }
+
+            assertThat(coroutineError.kind).isEqualTo(asyncError.kind)
+            assertThat(coroutineError.statusCode).isEqualTo(asyncError.statusCode)
+            assertThat(coroutineError.suppressed.size).isEqualTo(asyncError.suppressed.size)
+            assertThat(coroutineTransport.requests.size)
+                .isEqualTo(asyncTransport.requests.size)
+        }
+    }
+
     private fun transport(delayMs: Long = 0L): RetryTransport =
         RetryTransport(delayMs).also { transports.add(it) }
 

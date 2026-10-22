@@ -16,6 +16,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -40,8 +44,11 @@ public final class LlmGateway {
     private final AsyncLlmCallLogger logger;
     private final ExecutorProvider executor;
     private final ToolExecutor toolExecutor;
+    private final ScheduledExecutorService retryScheduler;
 
     /**
+     * 手工构造入口。异步重试使用进程级共享调度器，避免调用方额外管理生命周期。
+     *
      * @param resolver    配置解析器
      * @param transports  协议适配器列表，按 {@link LlmTransport#api()} 注册
      * @param store       调用记录存储
@@ -50,6 +57,20 @@ public final class LlmGateway {
      */
     public LlmGateway(ModelResolver resolver, List<LlmTransport> transports,
                       LlmCallStore store, ExecutorProvider executor, ToolExecutor toolExecutor) {
+        this(resolver, transports, store, executor, toolExecutor, RetryScheduler.shared());
+    }
+
+    /**
+     * @param resolver       配置解析器
+     * @param transports     协议适配器列表，按 {@link LlmTransport#api()} 注册
+     * @param store          调用记录存储
+     * @param executor       异步执行器
+     * @param toolExecutor   工具执行器
+     * @param retryScheduler 异步重试调度器；Starter 注入，手工构造可传共享实例
+     */
+    public LlmGateway(ModelResolver resolver, List<LlmTransport> transports,
+                      LlmCallStore store, ExecutorProvider executor, ToolExecutor toolExecutor,
+                      ScheduledExecutorService retryScheduler) {
         if (resolver == null) {
             throw new LlmCallException("ModelResolver 不能为空");
         }
@@ -68,6 +89,7 @@ public final class LlmGateway {
         this.executor = executor == null ? new DirectExecutorProvider() : executor;
         this.logger = new AsyncLlmCallLogger(this.executor, store);
         this.toolExecutor = toolExecutor == null ? new SequentialToolExecutor() : toolExecutor;
+        this.retryScheduler = retryScheduler == null ? RetryScheduler.shared() : retryScheduler;
     }
 
     /**
@@ -139,35 +161,33 @@ public final class LlmGateway {
         if (policy == null) {
             throw new LlmCallException("重试策略不能为空", null, LlmCallException.Kind.CONFIG);
         }
-        long started = System.currentTimeMillis();
+        long startNanos = System.nanoTime();
+        Long deadlineNanos = RetrySupport.deadlineNanos(startNanos, policy.getTotalDeadlineMs());
         List<LlmCallException> failures = new ArrayList<LlmCallException>();
         for (int attempt = 1; attempt <= policy.getMaxAttempts(); attempt++) {
             if (cancel != null && cancel.isCancelled()) {
                 return one(call, cancel);
             }
-            Long deadline = policy.getTotalDeadlineMs();
-            if (deadline != null
-                    && System.currentTimeMillis() - started >= deadline.longValue()) {
-                throw deadlineExceeded(failures);
+            if (RetrySupport.deadlineReached(deadlineNanos, System.nanoTime())) {
+                throw RetrySupport.deadlineFailure(failures);
             }
             try {
                 return one(call, cancel);
             } catch (LlmCallException ex) {
                 failures.add(ex);
                 if (!policy.shouldRetry(ex) || attempt >= policy.getMaxAttempts()) {
-                    throw withSuppressed(ex, failures);
+                    throw RetrySupport.withSuppressed(ex, failures);
                 }
                 if (cancel != null && cancel.isCancelled()) {
                     return one(call, cancel);
                 }
                 long delay = policy.delayMs(attempt);
-                if (deadline != null) {
-                    long remaining = deadline.longValue()
-                            - (System.currentTimeMillis() - started);
-                    if (remaining <= 0L) {
-                        throw deadlineExceeded(failures);
+                if (deadlineNanos != null) {
+                    long now = System.nanoTime();
+                    if (RetrySupport.deadlineReached(deadlineNanos, now)) {
+                        throw RetrySupport.deadlineFailure(failures);
                     }
-                    delay = Math.min(delay, remaining);
+                    delay = RetrySupport.clampDelayMs(delay, deadlineNanos, now);
                 }
                 policy.notifyRetry(attempt, delay, ex);
                 if (!sleepCancellable(delay, cancel)) {
@@ -175,7 +195,7 @@ public final class LlmGateway {
                 }
             }
         }
-        throw deadlineExceeded(failures);
+        throw RetrySupport.deadlineFailure(failures);
     }
 
     /**
@@ -201,37 +221,6 @@ public final class LlmGateway {
                         LlmCallException.Kind.TRANSPORT);
             }
         }
-    }
-
-    /**
-     * 把之前的失败挂到最终异常上，保留每次尝试的根因。
-     */
-    private static LlmCallException withSuppressed(LlmCallException last,
-                                                   List<LlmCallException> failures) {
-        for (int i = 0; i < failures.size() - 1; i++) {
-            LlmCallException failure = failures.get(i);
-            if (failure != last) {
-                last.addSuppressed(failure);
-            }
-        }
-        return last;
-    }
-
-    /**
-     * 总时限到期时抛出的异常；保留最后一次失败的分类和根因。
-     */
-    private static LlmCallException deadlineExceeded(List<LlmCallException> failures) {
-        if (failures.isEmpty()) {
-            return new LlmCallException("重试超过总时限", null,
-                    LlmCallException.Kind.TRANSPORT);
-        }
-        LlmCallException last = failures.get(failures.size() - 1);
-        LlmCallException ex = new LlmCallException("重试超过总时限", last,
-                last.getKind(), last.getStatusCode());
-        for (int i = 0; i < failures.size() - 1; i++) {
-            ex.addSuppressed(failures.get(i));
-        }
-        return ex;
     }
 
     /**
@@ -297,6 +286,49 @@ public final class LlmGateway {
      */
     public CompletableFuture<LlmResult> oneAsync(LlmCall call, LlmCancelHandle cancel) {
         return invokeAsync(call, null, null, MODE_ONE, false, null, cancel);
+    }
+
+    /**
+     * 非阻塞问一次，并按策略重试瞬时错误。
+     *
+     * <p>与同步 {@link #oneWithRetry(LlmCall, RetryPolicy)} 语义一致：每次尝试
+     * 独立校验、独立记录，只重试 {@link RetryPolicy} 认定的瞬时错误。区别在于
+     * 退避不占用调用线程，也不占用 HTTP 客户端线程：完成回调只做 O(1) 判断，
+     * 然后投递到 {@code ai-lite-retry-*} 调度器。</p>
+     *
+     * @param call   调用参数
+     * @param policy 重试策略
+     * @return 结果 future
+     */
+    public CompletableFuture<LlmResult> oneWithRetryAsync(LlmCall call, RetryPolicy policy) {
+        return oneWithRetryAsync(call, policy, null);
+    }
+
+    /**
+     * 非阻塞问一次，并按策略重试瞬时错误，同时支持外部取消。
+     *
+     * <p>取消契约与 {@link #oneAsync(LlmCall, LlmCancelHandle)} 一致：句柄取消后
+     * 不再发起新尝试，在途尝试由传输层协作中断，最终 future 正常完成一个
+     * {@link LlmStopReason#ABORTED} 结果；{@link CompletableFuture#cancel(boolean)}
+     * 保持 JDK cancelled 语义。参数/配置错误在返回 future 前同步抛出。</p>
+     *
+     * @param call   调用参数
+     * @param policy 重试策略
+     * @param cancel 取消句柄，可为 null
+     * @return 结果 future
+     */
+    public CompletableFuture<LlmResult> oneWithRetryAsync(LlmCall call, RetryPolicy policy,
+                                                          LlmCancelHandle cancel) {
+        if (policy == null) {
+            throw new LlmCallException("重试策略不能为空", null, LlmCallException.Kind.CONFIG);
+        }
+        if (cancel != null && cancel.isCancelled()) {
+            // 预取消走 oneAsync 的既有路径：零 HTTP，但保留一条 aborted 记录。
+            return oneAsync(call, cancel);
+        }
+        RetryRun run = new RetryRun(call, policy, cancel);
+        run.start();
+        return run.result;
     }
 
     /**
@@ -433,6 +465,377 @@ public final class LlmGateway {
         });
         run.next();
         return run.result;
+    }
+
+    /**
+     * 一次“带重试的异步调用”的状态机。
+     *
+     * <p>线程纪律：HTTP 客户端线程只负责判断和投递调度任务，绝不在 I/O 线程
+     * 上睡眠或递归发起下一次尝试；退避结束后的发起动作在
+     * {@code ai-lite-retry-*} 线程上执行。</p>
+     *
+     * <p>并发纪律：{@link #terminal} 只作为终态裁判，完成回调入口只读；
+     * 成功、不可重试、次数耗尽、deadline、取消这些收敛动作才 CAS 占有它。
+     * 其余可变状态统一由 {@code synchronized (this)} 保护。</p>
+     */
+    private final class RetryRun {
+
+        private final LlmCall call;
+        private final RetryPolicy policy;
+        private final LlmCancelHandle outerCancel;
+        private final CompletableFuture<LlmResult> result = new CompletableFuture<LlmResult>();
+        private final Long deadlineNanos;
+        private final List<LlmCallException> failures = new ArrayList<LlmCallException>();
+        private final AtomicBoolean terminal = new AtomicBoolean(false);
+
+        // 以下字段只在 synchronized (this) 内读写。
+        private int attemptsStarted;
+        private CompletableFuture<LlmResult> currentAttemptFuture;
+        private LlmCancelHandle currentAttemptCancel;
+        private ScheduledFuture<?> scheduledRetry;
+        private boolean cancelRequested;
+
+        private RetryRun(LlmCall call, RetryPolicy policy, LlmCancelHandle outerCancel) {
+            this.call = call;
+            this.policy = policy;
+            this.outerCancel = outerCancel;
+            this.deadlineNanos = RetrySupport.deadlineNanos(
+                    System.nanoTime(), policy.getTotalDeadlineMs());
+        }
+
+        /**
+         * 绑定外层取消、注册 future 取消回调，然后发起第一次尝试。
+         * 第一次尝试的校验异常按 {@code oneAsync} 契约同步抛出。
+         */
+        private void start() {
+            if (outerCancel != null) {
+                // 只绑定一次；每次尝试用自己的新句柄，避免覆盖这个代理。
+                outerCancel.bindAbort(this::cancelFromOuter);
+            }
+            result.whenComplete((value, error) -> {
+                if (result.isCancelled()) {
+                    // CompletableFuture 没有 onCancel 回调，只能在这里收口。
+                    abandonFromFuture();
+                }
+            });
+            try {
+                startAttempt();
+            } catch (RuntimeException ex) {
+                unbindOuter();
+                throw ex;
+            } catch (Error ex) {
+                unbindOuter();
+                throw ex;
+            }
+        }
+
+        /**
+         * 发起一次尝试。首轮在调用线程执行；后续轮次只从调度线程调用。
+         */
+        private void startAttempt() {
+            LlmCallException deadlineFailure = null;
+            synchronized (this) {
+                if (terminal.get() || cancelRequested || result.isCancelled()) {
+                    return;
+                }
+                if (RetrySupport.deadlineReached(deadlineNanos, System.nanoTime())) {
+                    if (claimTerminalLocked()) {
+                        deadlineFailure = RetrySupport.deadlineFailure(failures);
+                    }
+                } else {
+                    attemptsStarted++;
+                    LlmCancelHandle attemptCancel = new LlmCancelHandle();
+                    currentAttemptCancel = attemptCancel;
+                    // 先赋值再注册回调：oneAsync 可能同步完成，回调不能看到旧引用。
+                    CompletableFuture<LlmResult> attemptFuture = oneAsync(call, attemptCancel);
+                    currentAttemptFuture = attemptFuture;
+                    attemptFuture.whenComplete(this::onAttemptComplete);
+                }
+            }
+            if (deadlineFailure != null) {
+                result.completeExceptionally(deadlineFailure);
+            }
+        }
+
+        /**
+         * 单次尝试完成。这里可能运行在 OkHttp/Jetty/Netty/Ktor 的回调线程上，
+         * 因此只做判断和投递，不睡眠、不发起同步请求。
+         */
+        private void onAttemptComplete(LlmResult value, Throwable error) {
+            LlmResult valueOut = null;
+            LlmCallException failureOut = null;
+            long retryDelayMs = -1L;
+            LlmCallException retryCause = null;
+            int retryFailedAttempt = -1;
+            boolean abortedOut = false;
+
+            synchronized (this) {
+                currentAttemptFuture = null;
+                currentAttemptCancel = null;
+
+                // 终态已由别的线程收敛；完成回调只读，不能反过来占有 terminal。
+                if (terminal.get() || result.isCancelled()) {
+                    return;
+                }
+                if (cancelRequested) {
+                    // 取消优先于正常完成/失败；oneAsync 会自己留下 aborted 记录。
+                    abortedOut = claimTerminalLocked();
+                } else if (error == null && value != null
+                        && value.getStopReason() == LlmStopReason.ABORTED) {
+                    if (claimTerminalLocked()) {
+                        valueOut = value;
+                    }
+                } else {
+                    Throwable cause = error == null ? null : unwrap(error);
+                    boolean retryable = false;
+                    LlmCallException failure;
+                    if (cause instanceof LlmCallException) {
+                        failure = (LlmCallException) cause;
+                        retryable = policy.shouldRetry(failure);
+                    } else if (cause != null) {
+                        // SPI 违约或未知异常：包装后按不可重试处理，避免永久挂起。
+                        failure = new LlmCallException("模型调用失败", cause);
+                    } else if (value == null) {
+                        failure = new LlmCallException("协议适配器返回了空结果");
+                    } else {
+                        failure = null;
+                    }
+
+                    if (failure == null) {
+                        if (claimTerminalLocked()) {
+                            valueOut = value;
+                        }
+                    } else {
+                        failures.add(failure);
+                        if (!retryable || attemptsStarted >= policy.getMaxAttempts()) {
+                            if (claimTerminalLocked()) {
+                                failureOut = RetrySupport.withSuppressed(failure, failures);
+                            }
+                        } else {
+                            long now = System.nanoTime();
+                            if (RetrySupport.deadlineReached(deadlineNanos, now)) {
+                                if (claimTerminalLocked()) {
+                                    failureOut = RetrySupport.deadlineFailure(failures);
+                                }
+                            } else {
+                                // delay 只算一次，监听器与真实调度使用同一个值。
+                                retryDelayMs = RetrySupport.clampDelayMs(
+                                        policy.delayMs(attemptsStarted), deadlineNanos, now);
+                                retryCause = failure;
+                                retryFailedAttempt = attemptsStarted;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (abortedOut) {
+                result.complete(abortedResult());
+            } else if (valueOut != null) {
+                result.complete(valueOut);
+            } else if (failureOut != null) {
+                result.completeExceptionally(failureOut);
+            } else if (retryDelayMs >= 0L) {
+                scheduleRetry(retryDelayMs, retryCause, retryFailedAttempt);
+            }
+        }
+
+        /**
+         * 把下一次尝试投递到专用调度器。零延迟也必须走这里，避免同步完成后
+         * 形成深递归。
+         */
+        private void scheduleRetry(final long delayMs, final LlmCallException failure,
+                                   final int failedAttempt) {
+            ScheduledFuture<?> scheduled;
+            try {
+                scheduled = retryScheduler.schedule(new Runnable() {
+                    @Override
+                    public void run() {
+                        runScheduledAttempt(delayMs, failure, failedAttempt);
+                    }
+                }, delayMs, TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException ex) {
+                convergeFailure(new LlmCallException("重试调度被拒绝", ex,
+                        LlmCallException.Kind.TRANSPORT));
+                return;
+            } catch (RuntimeException ex) {
+                convergeFailure(new LlmCallException("重试调度失败", ex,
+                        LlmCallException.Kind.TRANSPORT));
+                return;
+            }
+
+            boolean cancelNow = false;
+            synchronized (this) {
+                if (terminal.get() || cancelRequested || result.isCancelled()) {
+                    cancelNow = true;
+                } else {
+                    scheduledRetry = scheduled;
+                }
+            }
+            if (cancelNow) {
+                scheduled.cancel(false);
+            }
+        }
+
+        /**
+         * 调度线程入口：检查状态、通知监听器、发起下一次尝试。
+         */
+        private void runScheduledAttempt(long delayMs, LlmCallException failedError,
+                                         int failedAttempt) {
+            LlmCallException failureOut = null;
+            synchronized (this) {
+                scheduledRetry = null;
+                if (terminal.get() || cancelRequested || result.isCancelled()) {
+                    return;
+                }
+                if (RetrySupport.deadlineReached(deadlineNanos, System.nanoTime())) {
+                    if (claimTerminalLocked()) {
+                        failureOut = RetrySupport.deadlineFailure(failures);
+                    }
+                }
+            }
+            if (failureOut != null) {
+                result.completeExceptionally(failureOut);
+                return;
+            }
+
+            try {
+                policy.notifyRetry(failedAttempt, delayMs, failedError);
+            } catch (Throwable listenerFailure) {
+                // 监听器失败不能改变重试行为，也不能杀死调度 worker。
+                log.warn("重试监听器异常，继续重试: {}", listenerFailure.toString());
+            }
+
+            try {
+                startAttempt();
+            } catch (Throwable ex) {
+                convergeFailure(wrapFailure(ex));
+            }
+        }
+
+        /**
+         * 外层句柄取消。取消优先于在途结果，最终 future 正常完成 ABORTED。
+         */
+        private void cancelFromOuter() {
+            LlmCancelHandle attemptCancel;
+            ScheduledFuture<?> scheduled;
+            boolean completeAborted = false;
+
+            synchronized (this) {
+                if (terminal.get() || cancelRequested) {
+                    return;
+                }
+                cancelRequested = true;
+                scheduled = scheduledRetry;
+                scheduledRetry = null;
+                attemptCancel = currentAttemptCancel;
+                boolean inFlight = currentAttemptFuture != null;
+                currentAttemptFuture = null;
+                currentAttemptCancel = null;
+                if (!inFlight && claimTerminalLocked()) {
+                    completeAborted = true;
+                }
+            }
+
+            if (scheduled != null) {
+                scheduled.cancel(false);
+            }
+            if (attemptCancel != null) {
+                // 不要 cancel(true) 在途 future：oneAsync 需要自己的取消路径来写记录。
+                attemptCancel.cancel();
+            }
+            if (completeAborted) {
+                result.complete(abortedResult());
+            }
+        }
+
+        /**
+         * future.cancel(true)：JDK 取消语义，只清理，不再 complete 结果。
+         */
+        private void abandonFromFuture() {
+            LlmCancelHandle attemptCancel;
+            ScheduledFuture<?> scheduled;
+
+            synchronized (this) {
+                cancelRequested = true;
+                terminal.set(true);
+                scheduled = scheduledRetry;
+                scheduledRetry = null;
+                attemptCancel = currentAttemptCancel;
+                currentAttemptFuture = null;
+                currentAttemptCancel = null;
+                unbindOuter();
+            }
+
+            if (scheduled != null) {
+                scheduled.cancel(false);
+            }
+            if (attemptCancel != null) {
+                attemptCancel.cancel();
+            }
+        }
+
+        /**
+         * 非取消路径的失败收敛入口，用于调度器拒绝、后续尝试同步抛异常等。
+         */
+        private void convergeFailure(LlmCallException failure) {
+            boolean won;
+            synchronized (this) {
+                won = claimTerminalLocked();
+            }
+            if (won) {
+                result.completeExceptionally(failure);
+            }
+        }
+
+        /**
+         * 在锁内占有终态并释放引用。调用方负责在锁外完成 future，
+         * 避免用户回调在状态锁内执行。
+         */
+        private boolean claimTerminalLocked() {
+            if (!terminal.compareAndSet(false, true)) {
+                return false;
+            }
+            if (scheduledRetry != null) {
+                scheduledRetry.cancel(false);
+                scheduledRetry = null;
+            }
+            currentAttemptFuture = null;
+            currentAttemptCancel = null;
+            unbindOuter();
+            return true;
+        }
+
+        private void unbindOuter() {
+            if (outerCancel != null) {
+                outerCancel.bindAbort(null);
+            }
+        }
+
+        /**
+         * 取消时使用的规范结果，字段与 {@code oneAsync} 的 ABORTED 结果一致。
+         */
+        private LlmResult abortedResult() {
+            ResolvedModel model = null;
+            try {
+                model = resolve(call);
+            } catch (RuntimeException ignored) {
+                // 配置在这一刻失效也不能让取消路径挂起；退化为空模型信息。
+            }
+            return new LlmResult("", null, null, LlmStopReason.ABORTED, LlmUsage.zero(),
+                    model == null ? null : model.getProvider(),
+                    model == null ? null : model.getModelId(),
+                    model == null ? null : model.getThinkingLevel(),
+                    0L, 0, null);
+        }
+
+        private LlmCallException wrapFailure(Throwable error) {
+            Throwable cause = unwrap(error);
+            if (cause instanceof LlmCallException) {
+                return (LlmCallException) cause;
+            }
+            return new LlmCallException("模型调用失败", cause);
+        }
     }
 
     /**

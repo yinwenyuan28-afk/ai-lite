@@ -7,6 +7,7 @@ import io.github.yinwenyuan28.ailite.llm.LlmGateway
 import io.github.yinwenyuan28.ailite.llm.LlmResult
 import io.github.yinwenyuan28.ailite.llm.LlmTool
 import io.github.yinwenyuan28.ailite.llm.RetryPolicy
+import io.github.yinwenyuan28.ailite.llm.RetrySupport
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.future.await
 import java.util.concurrent.CompletableFuture
@@ -51,65 +52,40 @@ object LlmCoroutines {
     suspend fun oneWithRetry(gateway: LlmGateway, call: LlmCall,
                              policy: RetryPolicy,
                              cancel: LlmCancelHandle? = null): LlmResult {
-        val started = System.currentTimeMillis()
+        val startNanos = System.nanoTime()
+        val deadlineNanos = RetrySupport.deadlineNanos(startNanos, policy.totalDeadlineMs)
         val failures = ArrayList<LlmCallException>()
         var attempt = 1
         while (true) {
             if (cancel?.isCancelled == true) {
                 return gateway.oneAsync(call, cancel).await()
             }
-            val deadline = policy.totalDeadlineMs
-            if (deadline != null
-                && System.currentTimeMillis() - started >= deadline) {
-                throw deadlineExceeded(failures)
+            if (RetrySupport.deadlineReached(deadlineNanos, System.nanoTime())) {
+                throw RetrySupport.deadlineFailure(failures)
             }
             try {
                 return gateway.oneAsync(call, cancel).await()
             } catch (ex: LlmCallException) {
                 failures.add(ex)
                 if (!policy.shouldRetry(ex) || attempt >= policy.maxAttempts) {
-                    throw withSuppressed(ex, failures)
+                    throw RetrySupport.withSuppressed(ex, failures)
                 }
                 if (cancel?.isCancelled == true) {
                     return gateway.oneAsync(call, cancel).await()
                 }
                 var wait = policy.delayMs(attempt)
-                if (deadline != null) {
-                    val remaining = deadline - (System.currentTimeMillis() - started)
-                    if (remaining <= 0L) {
-                        throw deadlineExceeded(failures)
+                if (deadlineNanos != null) {
+                    val now = System.nanoTime()
+                    if (RetrySupport.deadlineReached(deadlineNanos, now)) {
+                        throw RetrySupport.deadlineFailure(failures)
                     }
-                    wait = minOf(wait, remaining)
+                    wait = RetrySupport.clampDelayMs(wait, deadlineNanos, now)
                 }
                 policy.notifyRetry(attempt, wait, ex)
                 delay(wait)
                 attempt++
             }
         }
-    }
-
-    private fun withSuppressed(last: LlmCallException,
-                               failures: List<LlmCallException>): LlmCallException {
-        for (i in 0 until failures.size - 1) {
-            val failure = failures[i]
-            if (failure !== last) {
-                last.addSuppressed(failure)
-            }
-        }
-        return last
-    }
-
-    private fun deadlineExceeded(failures: List<LlmCallException>): LlmCallException {
-        if (failures.isEmpty()) {
-            return LlmCallException("重试超过总时限", null,
-                LlmCallException.Kind.TRANSPORT)
-        }
-        val last = failures[failures.size - 1]
-        val ex = LlmCallException("重试超过总时限", last, last.kind, last.statusCode)
-        for (i in 0 until failures.size - 1) {
-            ex.addSuppressed(failures[i])
-        }
-        return ex
     }
 
     /**
