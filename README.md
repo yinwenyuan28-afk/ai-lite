@@ -16,6 +16,7 @@ AI Lite 是面向 **Spring Boot 2.x / JDK 8** 存量系统的 AI 接入层，提
 JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**；传输层占不占线程取决于所选 HTTP 客户端。
 
 - 单次模型调用入口：`gateway.one`（同步）、`gateway.oneAsync`（future）、`LlmCoroutines.one`（suspend）、`LlmCoroutines.oneAsync`（Java 别名）。
+- 显式重试：`gateway.oneWithRetry`（同步）、`gateway.oneWithRetryAsync`（future）、`LlmCoroutines.oneWithRetry`（suspend）。异步版的退避在专用 `ai-lite-retry-*` 调度器上，不占 HTTP 客户端线程。
 - 网关还提供 `roundAsync` / `toolLoopAsync`，返回 `CompletableFuture`。
 - OkHttp 适配器用 `enqueue` **让调用线程不阻塞**；实际 socket I/O 和响应解析仍在 OkHttp Dispatcher 线程上执行，每个在途请求占一个 Dispatcher 线程，流式请求会占到流结束。
 - `ai-lite-executor-coroutines` 提供 Kotlin 协程调度器和 suspend 桥接，挂起点不占载体线程。
@@ -27,7 +28,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 573 个测试用例、0 失败（JDK 8 构建运行 570 个；JDK 21+ 额外运行 3 个虚拟线程 HTTP 用例）；Redis 不可用时 1 个 Redis 集成测试类整体跳过（可用时该类 18 个用例运行）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用、显式重试和自动装配都已落地。当前 636 个测试用例、0 失败（JDK 8 全量构建运行 613 个；Redis 可用时额外运行 18 个集成用例；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
 
 ## 环境要求
 
@@ -133,6 +134,23 @@ future.thenAccept(result -> System.out.println(result.getContent()));
 
 `toolLoopAsync` 与 `roundAsync` 的语义和阻塞版本一致。取消时创建 `LlmCancelHandle` 并传给 `oneByStreamAsync` / `toolLoopByStreamAsync`，或者直接取消返回的 future。
 
+需要重试瞬时错误时，用同一份 `RetryPolicy` 选择同步或异步入口：
+
+```java
+RetryPolicy policy = RetryPolicy.builder()
+        .maxAttempts(3)
+        .initialBackoffMs(200)
+        .maxBackoffMs(2000)
+        .totalDeadlineMs(10000L)
+        .build();
+
+CompletableFuture<LlmResult> future = gateway.oneWithRetryAsync(call, policy, cancel);
+```
+
+异步版每次尝试独立新建取消句柄，外层句柄只代理“终止整个重试”；退避任务投递到
+`ai-lite-retry-*`，HTTP 客户端回调线程只做判断，不 sleep。调度器 Bean 名为
+`aiLiteRetryScheduler`，可用同名 Bean 覆盖。
+
 ### 4.1 选择 HTTP 传输
 
 默认 `okhttp`，现有应用无需改配置。需要减少传输层平台线程时，显式选择 B/C 路径：
@@ -225,8 +243,9 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 ## 文档
 
 - [上层调用 API 使用指南](docs/api-usage.md)：网关、编排、会话、提示词、执行器与扩展点。
-- [单次模型调用入口](docs/entry-points.md)：四个入口的返回、阻塞、取消矩阵与 L1–L4 契约。
-- [重试边界](docs/retry.md)：网关不做自动重试，以及对 429/5xx/超时/取消的分类建议。
+- [单次模型调用入口](docs/entry-points.md)：同步/异步/协程入口的返回、阻塞、取消矩阵与 L1–L4 契约。
+- [重试边界](docs/retry.md)：显式重试入口、429/5xx/超时/取消分类，以及异步重试的调度与取消。
+- [异步重试测试用例](docs/testing/oneWithRetryAsync-test-cases.md)：55 条验收清单与对应测试类。
 - [架构说明](docs/architecture.md)：模块拓扑、调用链、线程与取消模型、扩展点与设计取舍。
 - [夯实单次模型调用入口](docs/夯实单次模型调用入口-plan.md)：单次模型调用入口的 parity、L1/L2 取消、异常与重试边界。
 - [夯实 oneWithRetry](docs/夯实oneWithRetry-plan.md)：单次模型调用的显式重试、错误分类、退避与取消。

@@ -94,6 +94,7 @@ public class ChatService {
 | 流式对话 | ⭐ `gateway.oneByStream(...)` |
 | 工具循环 | ⭐ `gateway.toolLoop(call, tools, maxRounds)` |
 | 单次模型调用入口（异步） | ⭐ `gateway.oneAsync(call)` |
+| 非阻塞调用 + 显式重试 | `gateway.oneWithRetryAsync(call, policy, cancel?)` |
 | 高并发工具循环 | ⭐ `gateway.toolLoopAsync(call, tools, maxRounds)` |
 | Agent + 生命周期 | ⭐ `agentLoop.run(...)` / `agentLoop.runAsync(...)` |
 | 多步骤编排 | ⭐ `workflow.run(Arrays.asList(Workflow.oneStep(...), ...))` |
@@ -127,6 +128,8 @@ public class ChatService {
 | `oneByStream(LlmCall, Consumer<String>, LlmCancelHandle)` | 同一次调用，边生成边回调增量文本 | `LlmResult` | ⭐ |
 | `oneAsync(LlmCall)` | 非阻塞单次调用，等待响应时不占调用线程 | `CompletableFuture<LlmResult>` | ⭐ |
 | `oneAsync(LlmCall, LlmCancelHandle)` | 非阻塞 + 外部取消句柄 | `CompletableFuture<LlmResult>` |  |
+| `oneWithRetryAsync(LlmCall, RetryPolicy)` | 非阻塞 + 显式重试；退避在 `ai-lite-retry-*` | `CompletableFuture<LlmResult>` |  |
+| `oneWithRetryAsync(LlmCall, RetryPolicy, LlmCancelHandle)` | 同上 + 外部取消句柄 | `CompletableFuture<LlmResult>` |  |
 | `oneByStreamAsync(LlmCall, Consumer<String>, LlmCancelHandle)` | 非阻塞 + 流式回调 | `CompletableFuture<LlmResult>` |  |
 
 语义：
@@ -137,7 +140,10 @@ public class ChatService {
 - 调用参数（biz-id 登记、模型解析、超时、取消）的校验与错误语义见 3.10，这一档不额外放宽。
 - 所有入口都保证 L2（取消后不再推进）；L1（在途请求中止）取决于传输层：OkHttp 全阶段有效，JDK 8 `HttpURLConnection` 在正文读取阶段可能等到读超时。同步入口必须传 `LlmCancelHandle` 才具备在途取消；`one(call)` 只受超时约束。
 - `oneAsync` 只释放调用线程；OkHttp 传输仍在 Dispatcher 线程执行 I/O、读 body 和解析，每个在途请求占一个线程，流式请求占至流结束。协程/虚拟线程不改变这一点。
-- 网关默认不做自动重试；需要重试时显式使用 `gateway.oneWithRetry(call, policy, cancel?)`，它只覆盖同步非流式调用，且每次尝试独立写一条调用记录。完整矩阵见 [单次模型调用入口](entry-points.md) 与 [重试边界](retry.md)。
+- 网关默认不做自动重试；需要重试时显式使用 `gateway.oneWithRetry(call, policy, cancel?)`
+  或 `gateway.oneWithRetryAsync(call, policy, cancel?)`。两者都只覆盖非流式调用，
+  每次尝试独立写一条调用记录；异步版的退避与下一次尝试都在 `ai-lite-retry-*` 线程上，
+  HTTP 客户端线程不 sleep。完整矩阵见 [单次模型调用入口](entry-points.md) 与 [重试边界](retry.md)。
 
 #### 3.1.2 工具与多轮方法
 
@@ -768,7 +774,7 @@ runBlocking(provider.dispatcher()) {
 }
 ```
 
-`LlmCoroutines.one` 是单次模型调用入口的 Kotlin suspend 形式；`LlmCoroutines.oneAsync` 是同一个入口的 Java future 别名。`LlmCoroutines.oneWithRetry` 是 suspend 版显式重试，与 Java 的 `gateway.oneWithRetry` 共用 `RetryPolicy`。
+`LlmCoroutines.one` 是单次模型调用入口的 Kotlin suspend 形式；`LlmCoroutines.oneAsync` 是同一个入口的 Java future 别名。`LlmCoroutines.oneWithRetry` 是 suspend 版显式重试，与 Java 的 `gateway.oneWithRetry` / `gateway.oneWithRetryAsync` 共用 `RetryPolicy`、`RetrySupport` 的 deadline 与异常聚合规则。
 
 | API | 说明 |
 | --- | --- |
@@ -780,6 +786,7 @@ runBlocking(provider.dispatcher()) {
 | `LlmCoroutines.round(gateway, call, tools, cancel?)` | 单轮工具声明 |
 | `LlmCoroutines.toolLoop(gateway, call, tools, maxRounds?, cancel?)` | 工具循环 |
 | `LlmCoroutines.oneAsync(gateway, call, cancel?)` | 单次模型调用入口的 Java 别名，等价于 `gateway.oneAsync` |
+| `gateway.oneWithRetryAsync(call, policy, cancel?)` | Java 非阻塞显式重试；退避走 `ai-lite-retry-*`，不占 HTTP 线程 |
 
 Java 不能直接调用 `suspend` 函数；Java 用 `gateway.oneAsync(...)` 或 `LlmCoroutines.oneAsync(...)`。
 

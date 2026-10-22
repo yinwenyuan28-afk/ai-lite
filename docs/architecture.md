@@ -249,8 +249,13 @@ sequenceDiagram
 | --- | --- | --- |
 | 请求线程 | Tomcat / Jetty | 进入 Controller，调用 `*Async` 后释放 |
 | ai-lite io 线程 | `PlatformExecutorProvider` / 虚拟线程 / 协程调度器 | 会话加载、落盘、工具执行、阻塞 SDK |
-| HTTP 回调线程 | OkHttp Dispatcher | 完成 future，触发网关/AgentLoop 回调 |
+| HTTP 回调线程 | OkHttp Dispatcher / Jetty / Netty / Ktor | 完成 future，触发网关/AgentLoop 回调 |
 | 协程载体线程 | `CoroutineExecutorProvider` 固定池 | 运行 `suspend` 续体 |
+| ai-lite 重试线程 | `RetryScheduler` 固定 2 个 daemon 线程 | `oneWithRetryAsync` 的退避结束、监听器回调、发起下一次尝试 |
+
+`oneWithRetryAsync` 的完成回调运行在 HTTP 回调线程上，只做 O(1) 分类和
+`scheduler.schedule`；真正的下一次尝试在 `ai-lite-retry-*` 上发起。因此 I/O 线程
+不会因为退避而睡眠，重试也不会掉进 `ExecutorProvider.io()`。
 
 异步链路的线程跳转是设计的一部分，不是偶然结果。排查问题时先确认代码运行在哪个线程上。
 

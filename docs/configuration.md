@@ -296,6 +296,33 @@ ai-lite:
 
 用户回调与 Agent 钩子的线程策略不属于本节，见 [夯实回调执行策略](夯实回调执行策略-plan.md)。
 
+### 4.2 异步重试调度器
+
+`oneWithRetryAsync` 需要一个 `ScheduledExecutorService`。Starter 默认提供名为
+`aiLiteRetryScheduler` 的 Bean：2 个 daemon 线程、线程名 `ai-lite-retry-*`、
+开启 `removeOnCancelPolicy`，容器关闭时 `shutdownNow`。
+
+没有独立的 `ai-lite.retry.*` 配置项。需要调整线程数或线程名时，提供同名 Bean 覆盖：
+
+```java
+@Bean(name = "aiLiteRetryScheduler", destroyMethod = "shutdownNow")
+public ScheduledExecutorService retryScheduler() {
+    ScheduledThreadPoolExecutor executor =
+            new ScheduledThreadPoolExecutor(4, r -> {
+                Thread t = new Thread(r, "my-retry-" + counter.incrementAndGet());
+                t.setDaemon(true);
+                return t;
+            });
+    executor.setRemoveOnCancelPolicy(true);
+    return executor;
+}
+```
+
+网关按 `@Qualifier("aiLiteRetryScheduler")` 注入，所以用户同时定义其他
+`ScheduledExecutorService` 不会产生歧义。手工构造 `LlmGateway` 时：
+5 参构造器使用进程级共享 daemon 调度器，6 参构造器可传入自己的调度器；
+网关不会关闭注入的调度器。
+
 ## 5. 会话 `ai-lite.session`
 
 ```yaml

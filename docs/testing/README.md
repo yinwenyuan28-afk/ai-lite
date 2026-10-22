@@ -11,6 +11,12 @@
 | [async-adversarial-gateway.md](async-adversarial-gateway.md) | 传输层 future、流式、工具循环、日志与执行器 | 35 | 6 | 18 | 11 |
 | **合计** | | **103** | **29** | **58** | **16** |
 
+## HTTP 传输与重试
+
+| 文档 | 范围 | 用例数 |
+| --- | --- | ---: |
+| [oneWithRetryAsync-test-cases.md](oneWithRetryAsync-test-cases.md) | 异步重试状态机、取消竞态、调度器、deadline、装配与 parity | 55（已实现） |
+
 ## 统一约定
 
 - 所有异步断言必须带超时：`get(5, TimeUnit.SECONDS)`、`CompletableFuture.orTimeout` 或 `CountDownLatch.await(timeout)`。
@@ -46,7 +52,10 @@
 | `LlmImageTest` | core | 6 | data URL 前缀剥离、裸 base64 去空白、非 base64 data URL 保留待校验 |
 | 三个 transport test（图片分片） | http-okhttp | 6 | OpenAI `image_url`、Responses `input_image`、Anthropic base64 source、流式与合并 |
 | `RetryPolicyTest` / `LlmGatewayRetryTest` | core | 26 | 显式重试、瞬时错误分类、退避、总 deadline、取消感知、每次尝试独立记录 |
-| `LlmCoroutinesRetryTest` | executor-coroutines | 10 | suspend 重试、`delay()` 退避、`withTimeout`/`job.cancel`、deadline、记录 |
+| `LlmGatewayAsyncRetryTest` | core | 42 | 异步重试主路径、分类、deadline、取消竞态、调度线程、零延迟、监听器异常 |
+| `LlmGatewayAsyncRetryParityTest` | core | 6 | 同步 vs 异步的次数/终态/suppressed/记录数一致性 |
+| `AsyncRetryAssemblyTest` | starter | 7 | `aiLiteRetryScheduler` 默认 Bean、同名覆盖、多调度器无歧义、旧构造器兼容、关闭语义 |
+| `LlmCoroutinesRetryTest` | executor-coroutines | 12 | suspend 重试、`delay()` 退避、`withTimeout`/`job.cancel`、deadline、记录、与异步版 parity |
 | `Utf8LineBufferTest` | core | 8 | CRLF 跨 chunk、多字节字符逐字节切分、空行、末尾无换行、单行上限 |
 | `JettyHttpExecutorTest` | http-jetty | 11 | 同步/异步/原始行、非 2xx、预取消、流中取消、提前 EOF、close |
 | `WebClientHttpExecutorTest` | http-webclient | 11 | 同 Jetty，另覆盖 DataBuffer 原始行与 Reactor 取消 |

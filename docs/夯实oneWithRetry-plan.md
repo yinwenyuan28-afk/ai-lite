@@ -1,6 +1,6 @@
 # 夯实 oneWithRetry
 
-**状态（2026-10-22）：Java 同步版与 Kotlin suspend 版已实现；`oneWithRetryAsync` 设计已补充（第 9 节，待实施）。** 本计划只改单次模型调用入口，**不涉及编排层**：不改 `Workflow`、`AgentLoop`、`AgentSessionLoop`，也不新增工具/步骤级重试。
+**状态（2026-10-22）：同步版、Kotlin suspend 版、异步版 `oneWithRetryAsync` 均已实现；55 个异步测试用例已落成 JUnit/Kotlin 测试。** 本计划只改单次模型调用入口，**不涉及编排层**：不改 `Workflow`、`AgentLoop`、`AgentSessionLoop`，也不新增工具/步骤级重试。
 
 一句话总纲：
 
@@ -36,7 +36,7 @@ oneWithRetry
 
 - `Workflow`、`AgentLoop`、`AgentSessionLoop` 的任何改动。
 - 工具重试、步骤重试、整轮编排重试。
-- Java 异步 `oneWithRetryAsync`：同步/Kotlin 轮次不做；异步版设计见第 9 节，待实施。
+- Java 异步 `oneWithRetryAsync`：原计划不在首轮范围；第 9 节已单独设计并实施。
 - 用户回调与 Agent 钩子的线程归属：见独立的 [夯实回调执行策略](夯实回调执行策略-plan.md)。
 - 流式重试、协程流式重试。
 - `Retry-After` 响应头支持；本轮只用指数退避。
@@ -69,7 +69,7 @@ oneWithRetry
 - 同步/协程：同一个 `LlmCancelHandle` 贯穿所有尝试；每个尝试前检查。
 - 异步：外层 handle 只做代理，每次尝试使用新的 `LlmCancelHandle`（句柄一次性）；外层取消时取消当前尝试和已排期的退避任务。
 - 退避等待可被取消打断，不能 `Thread.sleep(2s)` 后再发现取消；异步用调度器延迟，不占工作线程。
-- 总 deadline 覆盖所有尝试和退避；超时后不再发起新尝试。
+- 总 deadline 覆盖所有尝试和退避；超时后不再发起新尝试，但不打断已在途的 HTTP 请求。
 
 ### R5 `one` 的语义不变
 
@@ -105,7 +105,10 @@ Integer getStatusCode(); // 可空
 | 连接/读超时、连接重置 | `TRANSPORT` | null |
 | 非 2xx | `HTTP` | 实际状态码 |
 | JSON/SSE 解析失败 | `PARSE` | null |
-| 调用取消 | `CANCELLED` | null |
+| 调用取消（传输层内部异常） | `CANCELLED` | null |
+
+> 逻辑入口的 `LlmCancelHandle.cancel()` 不是抛 `CANCELLED` 异常，而是让 future/结果
+> 正常收敛为 `ABORTED`；`CANCELLED` 只用于传输层内部的取消异常路径。
 
 兼容性：旧调用方只看到 `LlmCallException`，新字段是附加信息；旧构造器行为不变。
 
@@ -164,7 +167,7 @@ LlmCoroutines.oneWithRetry(gateway, call, policy, cancel?)
 - 用 `delay(delayMs)` 做退避；`Job.cancel()` / `withTimeout` 会直接打断退避。
 - 协程取消会取消底层 `CompletableFuture`，网关再把取消转成 HTTP abort。
 - `CancellationException` 不捕获、不重试；只捕获 `LlmCallException`。
-- 不新增 `oneWithRetryAsync`：Java 异步重试需要调度器和额外的取消链，另立计划。
+- 首轮不新增 `oneWithRetryAsync`；后续在第 9 节单独设计调度器与取消链并已实现。
 
 ---
 
@@ -287,7 +290,7 @@ LlmCoroutines.oneWithRetry(gateway, call, policy, cancel?)
 
 ---
 
-## 9. 异步版 `oneWithRetryAsync`（待实施）
+## 9. 异步版 `oneWithRetryAsync`（已实施）
 
 ### 9.1 对“剩余次数 + 完成回调提交固定线程池”的评审
 
@@ -374,22 +377,32 @@ RetryState
   ├─ CompletableFuture<LlmResult> result
   ├─ LlmCancelHandle outerCancel          // 可空
   ├─ int attemptsStarted                  // 已发起的尝试数
-  ├─ long deadlineNanos                   // 0 表示无总 deadline
+  ├─ long startNanos                      // 计算总 deadline 的起点
+  ├─ Long deadlineNanos                   // null 表示无总 deadline；0 表示立即过期
   ├─ CompletableFuture<LlmResult> currentAttemptFuture
   ├─ LlmCancelHandle currentAttemptCancel // 每次尝试新建
   ├─ ScheduledFuture<?> scheduledRetry
-  ├─ Throwable lastFailure
-  ├─ List<Throwable> suppressed
+  ├─ LlmCallException lastFailure
+  ├─ List<LlmCallException> suppressed
+  ├─ boolean cancelRequested              // 取消已请求，禁止新尝试
   └─ AtomicBoolean terminal
 ```
 
 关键约束：
 
-- `terminal` 用 CAS 保证成功、失败、取消只发生一次。
-- `attemptsStarted` 在**发起请求前**递增；`RetryPolicy.maxAttempts` 含第一次。
-- `currentAttemptFuture` / `currentAttemptCancel` / `scheduledRetry` 允许为 null；
-  所有读取都在状态锁或原子引用下完成。
-- 终态后清空 `scheduledRetry`、`currentAttemptFuture` 引用，避免无谓持有。
+- `terminal` 只作为**终态裁判**：完成回调入口只读；只有成功、不可重试、次数耗尽、
+  deadline、取消这些收敛动作才 `compareAndSet(false, true)` 占有它。
+  **不能在完成回调入口就 CAS 占有 terminal**，否则第一次失败后所有重试都会被丢弃。
+- 所有状态变更（`attemptsStarted`、三个引用、`suppressed`、`lastFailure`、终态）
+  统一在 `synchronized (state)` 临界区内完成；`terminal` 只提供无锁快路径读取。
+  不要用 CAS 和锁分别保护同一份状态。
+- `attemptsStarted` 在**发起请求前**、同一临界区内递增；`RetryPolicy.maxAttempts` 含第一次。
+- `currentAttemptFuture` / `currentAttemptCancel` / `scheduledRetry` 允许为 null，
+  但发布顺序固定：**先赋值，再注册回调，再放开锁**。
+- 终态后清空 `scheduledRetry`、`currentAttemptFuture`、`currentAttemptCancel` 引用，
+  并 `outerCancel.bindAbort(null)`，避免无谓持有 `LlmCall`（可能含大图 base64）。
+- `deadlineNanos` 用 `Long` 而不是 `0` 哨兵：`RetryPolicy.totalDeadlineMs=0` 是合法的
+  “立即过期”，必须与“未设置 deadline”区分。
 
 ---
 
@@ -400,23 +413,25 @@ RetryState
   └─ oneWithRetryAsync
        ├─ 参数/取消预检查
        ├─ 创建 RetryState
+       ├─ 注册 outer future 的 whenComplete（检测 isCancelled）
        ├─ startAttempt()                         // 第一次直接发起
        └─ 返回 outer future
 
 HTTP 客户端线程（OkHttp/Jetty/Netty/Ktor）
   └─ currentAttemptFuture.whenComplete
-       ├─ terminal CAS 失败 → 丢弃
-       ├─ 成功 → outer future.complete
-       ├─ 取消 → outer future 取消/CANCELLED
-       ├─ 不可重试/次数耗尽/deadline → outer future 失败
+       ├─ terminal 已为 true → 丢弃（只读，不占有）
+       ├─ cancelRequested 或 result.stopReason=ABORTED → outer ABORTED
+       ├─ 异常先 unwrap CompletionException
+       ├─ 成功 → 占 terminal，outer future.complete
+       ├─ 不可重试/次数耗尽/deadline → 占 terminal，outer future 失败
        └─ 需要重试 → scheduler.schedule(startAttempt, delay)
                       ↑ 只做 O(1) 判断，不 sleep
 
 ai-lite-retry-<n> 调度线程
-  └─ startAttempt
-       ├─ 再检查 terminal / cancel / deadline
-       ├─ policy.notifyRetry(...)
-       ├─ 新建 currentAttemptCancel
+  └─ startAttempt（整体 try/catch Throwable）
+       ├─ 锁内再检查 terminal / cancel / deadline
+       ├─ 锁内：新建 handle → 赋值 → oneAsync → 赋值 future → 注册回调
+       ├─ policy.notifyRetry(...)（轻量；异常只记日志）
        ├─ oneAsync(call, currentAttemptCancel)
        └─ 立即返回；不等待响应
 ```
@@ -425,10 +440,14 @@ ai-lite-retry-<n> 调度线程
 
 - I/O 线程永不 `sleep`、永不等待调度器、永不递归发起同步完成的下一轮。
 - 调度线程只做短任务；`oneAsync` 的同步校验和 `enqueue` 必须快速返回。
+- `startAttempt` 必须整体 `try/catch (Throwable)`：后续尝试的同步校验异常、
+  `RejectedExecutionException`、监听器 `Error` 都不能让 outer future 永久挂起。
 - 若自定义 transport 的 `completeAsync` 是阻塞实现，会占住调度线程；文档明确要求
   异步 transport 遵守非阻塞契约。
-- `future.cancel`、handle 取消、退避任务、完成回调可能在四个不同线程同时发生，
-  全部通过 `terminal` CAS 和同步块收敛。
+- 自定义 `RetryPolicy.retryable(Predicate)` 可能在 I/O 线程执行；文档要求谓词必须
+  无阻塞、无 I/O；默认谓词是字段判断。
+- `future.cancel`、handle 取消、退避任务、完成回调可能在四个不同线程同时发生；
+  状态字段统一由 `synchronized(state)` 保护，`terminal` 只在真正收敛终态时 CAS。
 
 ---
 
@@ -446,61 +465,178 @@ scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
 - 任务很短，1 个通常够用；
 - `RetryPolicy.notifyRetry` 是用户监听器，可能做轻量日志/指标；2 个可以避免一个
   慢监听器完全阻塞所有重试。若监听器阻塞严重，属于用户代码问题，文档提示。
+- 2 个不是并发上限：任务只做“检查 + 发起 `oneAsync`”，不会等待 HTTP 响应。
 
 生命周期：
 
-- Starter 提供 `@Bean(name = "aiLiteRetryScheduler", destroyMethod = "shutdownNow")`，
-  `@ConditionalOnMissingBean(name = "aiLiteRetryScheduler")`。
+- Starter 提供：
+
+```java
+@Bean(name = "aiLiteRetryScheduler", destroyMethod = "shutdownNow")
+@ConditionalOnMissingBean(name = "aiLiteRetryScheduler")
+public ScheduledExecutorService aiLiteRetryScheduler() { ... }
+```
+
+- `aiLiteGateway` 的构造器参数必须加 `@Qualifier("aiLiteRetryScheduler")`。
+  只按类型注入会在用户同时定义另一个 `ScheduledExecutorService` 时产生
+  `NoUniqueBeanDefinitionException`；Bean 名 `aiLiteRetryScheduler` 是覆盖契约。
 - `LlmGateway` 增加构造器重载接收 `ScheduledExecutorService`；旧构造器保留，
-  内部使用一个静态共享守护调度器（首次使用时创建），避免破坏手工构造的调用方。
+  内部通过 lazy holder 使用一个静态共享守护调度器（只创建一次），避免破坏手工构造。
 - 自定义 Bean 优先；不要在 `close()` 里关闭用户提供的调度器。
+- 静态共享调度器的线程必须是 daemon，并有 `ai-lite-retry-` 命名计数；它不随单个
+  Gateway 关闭，JVM 退出时自然结束。
 - 取消的任务通过 `removeOnCancelPolicy` 从延迟队列移除，避免长退避任务堆积。
 
 不新增 `ai-lite.retry.*` 配置；第一版固定 2 个线程。需要更大并发或自定义线程名的
-用户直接提供自己的 `ScheduledExecutorService` Bean。
+用户直接提供名为 `aiLiteRetryScheduler` 的 Bean。
+
+> `ScheduledThreadPoolExecutor` 的延迟队列本身无界。每条待重试任务持有
+> `RetryState` → `LlmCall` → messages（可能含大图 base64）。`removeOnCancelPolicy`
+> 只移除已取消任务；正常排队的任务仍会占内存。文档要求 `maxBackoffMs` 有界，
+> 并提示高并发长退避场景的内存成本。
 
 ---
 
 ### 9.6 取消与终态
 
-`LlmCancelHandle` 是一次性的：第一次取消后进入终态，不能复用于下一次尝试。因此：
+`LlmCancelHandle` 是一次性的：第一次取消后进入终态，不能复用于下一次尝试。
 
-- 外层用户 handle 只作为**代理**：
-  - `outerCancel.bindAbort(state::cancelFromOuter)`；
-  - 每次尝试创建新的 `currentAttemptCancel`，并把 `outerCancel` 的状态转发给它；
-  - 如果 `outerCancel` 已取消，不再发起任何尝试。
-- `currentAttemptFuture` 是 `oneAsync` 返回的 future；取消它时，网关现有的
-  `future.cancel` 逻辑会 cancel 当前 handle 并补一条 `aborted` 记录。
-- `cancelFromOuter` / `future.cancel` 要做：
-  1. `terminal.compareAndSet(false, true)`；失败直接返回；
-  2. `scheduledRetry.cancel(false)`；
-  3. `currentAttemptFuture.cancel(true)`；
-  4. `currentAttemptCancel.cancel()`（幂等）；
-  5. 外层未取消时，用 `Kind.CANCELLED` 完成 outer future。
-- `future.cancel(true)` 本身已经把 outer future 置为 cancelled；此时只清理内部资源，
-  不要再 `completeExceptionally`，保持 JDK 的 cancelled 语义。
-- 预取消：outer handle 已取消 → 直接返回一个异常完成的 future（`CANCELLED`），
-  零请求。
-- 完成回调在取消之后到达：`terminal` 已为 true，直接丢弃；不能覆盖结果。
+**外层 handle 只绑定一次：**
+
+```java
+outerCancel.bindAbort(state::cancelFromOuter);
+```
+
+- 不要每次尝试重新 `bindAbort`。`LlmCancelHandle` 只有一个 abort 槽，反复绑定会
+  覆盖 `state::cancelFromOuter`，导致外层取消只取消当前尝试、不占终态、不取消退避任务。
+- 每次尝试新建 `currentAttemptCancel`；它只由 `cancelFromOuter` 主动 `cancel()`，
+  绝不反向绑定到 outer handle。
+- 终态时 `outerCancel.bindAbort(null)`，解除对 `RetryState`（含 messages/图片）的引用。
+
+**取消终态必须与 `oneAsync` 一致：**
+
+- `outerCancel.cancel()` → outer future **正常完成，结果为 `ABORTED`**，不是
+  `LlmCallException(Kind.CANCELLED)`。这与 `oneAsync`、同步 `oneWithRetry`、
+  `LlmCoroutines.oneWithRetry` 的既有契约一致。
+- `future.cancel(true)` → 保持 JDK cancelled 语义：outer future 是 cancelled，
+  内部只清理，不再 `completeExceptionally`。
+
+**取消路径：**
+
+```text
+cancelFromOuter:
+  synchronized (state):
+      标记 cancelRequested = true
+      复制并清空 scheduledRetry / currentAttemptFuture / currentAttemptCancel
+      if 没有在途尝试:
+          占 terminal
+  scheduledRetry.cancel(false)
+  if 有在途尝试:
+      currentAttemptCancel.cancel()          // 协作取消，oneAsync 会收敛为 ABORTED
+      // 不 cancel(true) currentAttemptFuture；让 oneAsync 自己完成 ABORTED
+  else:
+      outer future 以规范 ABORTED 结果完成    // 零 HTTP；不新增调用记录
+
+future.cancel(true):
+  外层 future 已经是 cancelled
+  cancelRequested = true
+  scheduledRetry.cancel(false)
+  currentAttemptCancel.cancel()
+  不再 completeExceptionally；在外尝试完成后丢弃结果
+```
+
+`CompletableFuture` 没有 onCancel 回调，必须在返回前显式注册：
+
+```java
+result.whenComplete((value, error) -> {
+    if (result.isCancelled()) {
+        state.cancelFromOuterFuture();   // 只清理，不再 complete
+    }
+});
+```
+
+与现有 `LlmGateway.invokeAsync` 的 `run.result.whenComplete` 处理方式一致。
+
+**发布顺序（防取消漏网）：**
+
+`startAttempt` 必须在同一临界区完成：
+
+```text
+synchronized (state) {
+    再检查 terminal / cancelRequested / deadline
+    创建 currentAttemptCancel
+    currentAttemptCancel = newHandle           // 先赋值
+    currentAttemptFuture = oneAsync(...)       // 先赋值
+    currentAttemptFuture.whenComplete(...)     // 再注册回调
+    scheduledRetry = scheduler.schedule(...)   // 锁内调用并立即赋值
+}
+```
+
+`scheduler.schedule` 返回前，延迟 0 的任务不能执行（它需要同一把锁）；取消线程在
+锁内复制三个引用，出锁后再调用 `cancel`，避免在锁内执行用户代码/阻塞操作。
+
+**预取消与记录：**
+
+- 预取消（outer handle 已取消）：直接调用 `oneAsync(call, outerCancel)`。它不会发
+  HTTP，但会按现有 `oneAsync` 语义返回 `ABORTED` 并写一条 aborted 记录。
+- 退避中取消：没有新的在途尝试，不再补“从未发生的尝试”记录；前一次失败记录已经
+  存在。这一点与同步版略有差异，parity 测试只比较尝试次数/最终终态，不比较记录总数。
+- `future.cancel(true)` 是硬取消，不补合成记录；若当前有在途尝试，由 `oneAsync`
+  自己的取消路径决定是否记录 aborted。
+- 完成回调在取消之后到达：`cancelRequested`/`terminal` 已置位，直接丢弃，不能覆盖结果。
+- **`oneAsync` 的取消是正常完成 `ABORTED`，不是异常**。完成回调必须先判断
+  `cancelRequested || result.getStopReason() == ABORTED`，再进入“成功”分支；
+  否则会把一次取消误判为成功并停止重试。
+- 取消是协作式的：不会强制 `complete` outer future。在途 transport 不响应 abort 时，
+  与 `oneAsync` 一样等其回调或超时；L2（取消后不再推进）仍由 `cancelRequested`
+  阻止新尝试保证。若未来要“取消立即完成”，需要额外定义记录与资源清理，属于独立增强。
+
+**完成回调的异常归一化：**
+
+- `whenComplete` 的错误可能是 `CompletionException` 包装；先 unwrap。
+- 只有 `LlmCallException` 才交给 `RetryPolicy.shouldRetry`；其他 `Throwable` 包装成
+  `LlmCallException("模型调用失败", cause)` 并按不可重试处理，避免 `ClassCastException`
+  或 future 永久不完成。
 
 ---
 
 ### 9.7 退避、deadline 与错误
 
-- `delay = policy.delayMs(attemptsStarted)`（含 jitter）。
-- 若 `deadlineNanos > 0`：
+- `delay = policy.delayMs(attemptsStarted)`（含 jitter），**只计算一次**，随调度任务
+  一起传递；`notifyRetry` 上报的 delay 必须与真实调度一致，不能在调度线程重新计算。
+- `deadlineNanos`：
+  - `null` 表示没有总 deadline；
+  - 非 null 时，`RetryPolicy.totalDeadlineMs=0` 表示“立即过期”，不是“无限”。
+    `startNanos + totalDeadlineMs` 用 `System.nanoTime()`；0 也要正确比较。
+- 每次准备重试：
   - `remaining = deadlineNanos - now`；
   - `remaining <= 0` → 立即以 deadline 错误收敛，不再发起；
-  - `delay > remaining` → 不再等待完整 delay，直接以 deadline 错误收敛；
+  - `delay > remaining` → 与同步版保持一致，将 delay clamp 到 `remaining`，
+    到点后由 deadline 检查收敛；不要静默超出总 deadline；
   - 否则按 `delay` 调度。
-- `RetryPolicy.shouldRetry(error)` 只看结构化 `Kind`/`statusCode`；
+- **deadline 只阻止新尝试，不打断在途请求**。在途请求仍受 `connectTimeoutMs` /
+  `readTimeoutMs` 约束；验收标准不能写成“deadline 覆盖在途请求”。若未来要打断，
+  需要额外调度 deadline 取消任务，并定义终态（属于可选增强，不在本计划）。
+- deadline 异常复用同步版 `deadlineExceeded(failures)` 的组装方式：保留最后一次
+  失败的 `Kind`/`statusCode` 和根因，之前的失败挂 suppressed。不要新增未定义的
+  `Kind.DEADLINE`（会破坏兼容性）。
+- `RetryPolicy.shouldRetry(error)` 只对 unwrap 后的 `LlmCallException` 调用；
   `CANCELLED`、`PARSE`、`CONFIG`、4xx 不可重试。
 - 每次尝试失败：
-  - 若不是最后一次：把当前错误加入 `suppressed`，继续；
-  - 若是最后一次/不可重试：`lastFailure` 作为主异常，之前错误 `addSuppressed`。
-- `policy.notifyRetry` 在调度线程、发起下一次请求之前调用；监听器抛异常只记录，
-  不改变重试决策，也不让 outer future 以监听器异常失败。
+  - 若不是最后一次：把当前 `LlmCallException` 加入 `suppressed`，继续；
+  - 若是最后一次/不可重试：`lastFailure` 作为主异常，之前错误 `addSuppressed`；
+  - suppressed 的挂接必须在占 terminal 之前完成，避免取消线程与失败回调同时收敛时
+    丢失异常链。
+- `policy.notifyRetry` 在调度线程、发起下一次请求之前调用：
+  - 监听器必须轻量、无阻塞；慢监听器会占住 2 个全局调度线程之一。
+  - `RetryPolicy.notifyRetry` 目前静默吞 `RuntimeException`、不捕 `Error`；
+    实现侧用 `try/catch (Throwable)` 包住调度任务并记日志，不能让监听器的 `Error`
+    杀死 worker 或让 outer future 挂起。
 - 每次尝试都由 `oneAsync` 独立写一条 `LlmCallRecord`；重试会重复计费，文档继续强调。
+- `LlmCallRecord` 没有 attempt 序号，`roundNo` 每次仍是 1；重试记录只能按时间窗口/
+  顺序/`bizId` 聚合，文档要提醒不要按 `roundNo` 去重。
+- `policy == null`：在方法入口同步抛 `LlmCallException(Kind.CONFIG)`，与同步版顺序一致
+  （先于预取消检查）。
 
 ---
 
@@ -519,6 +655,19 @@ scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
 - 之后所有尝试，包括 `delay=0`，一律通过 `scheduler.schedule(..., 0, MILLISECONDS)`
   进入调度线程；
 - 调度任务本身不再递归，只发起一次 `oneAsync` 后返回。
+- **必须先赋值，再注册回调**：
+
+```java
+currentAttemptFuture = oneAsync(call, currentAttemptCancel);
+currentAttemptFuture.whenComplete(this::onAttemptComplete);
+```
+
+如果写成 `currentAttemptFuture = oneAsync(...).whenComplete(...)`，当 `oneAsync`
+返回已完成的 future 时，回调会在赋值前执行；取消线程可能读到旧的 null，或终态清理
+后引用又被赋值“复活”。赋值和注册都必须在 `synchronized (state)` 内完成。
+- 后续尝试的 `oneAsync` 同步抛异常（参数/配置错误）或 `scheduler.schedule` 抛
+  `RejectedExecutionException` 时，整体 `try/catch (Throwable)` 收敛 outer future；
+  不能让调度任务异常终止而 future 永久不完成。
 
 ---
 
@@ -531,54 +680,65 @@ CompletableFuture<LlmResult> oneWithRetryAsync(LlmCall call, RetryPolicy policy,
                                                LlmCancelHandle cancel);
 ```
 
-- 参数/配置/模型解析错误：与 `oneAsync` 一致，在返回 future 前**同步抛出**。
+- `policy == null`、参数/配置/模型解析错误：与 `oneAsync` 一致，在返回 future 前
+  **同步抛出**；`policy == null` 抛 `LlmCallException(Kind.CONFIG)`，且先于预取消检查。
 - 传输/HTTP/解析错误：future 异常完成；是否重试由 `RetryPolicy` 决定。
 - 成功：future 正常完成，值与 `oneAsync` 一致。
-- 取消：handle 取消 → `LlmCallException(Kind.CANCELLED)`；`future.cancel(true)` →
-  JDK cancelled 语义。
+- 取消：
+  - `outerCancel.cancel()` → future **正常完成，结果 `ABORTED`**，与 `oneAsync` 一致；
+  - `future.cancel(true)` → JDK cancelled 语义，内部清理但不再完成异常；
+  - 预取消 → 零 HTTP，返回规范 `ABORTED`；
+  - 退避中取消 → 不再发起新尝试，前一次失败记录保留，不补“未发生尝试”的记录。
+- 首次尝试的校验错误同步抛出；第 2 次及以后在调度线程发生的同步校验错误，只能通过
+  outer future 异常完成（无法再同步抛给调用方）。
 - 流式、工具、多轮不在本 API 范围内。
 
 ---
 
 ### 9.10 测试矩阵
 
-| 类别 | 用例 | 断言 |
-| --- | --- | --- |
-| 成功 | 第一次成功 | 只发 1 次，无重试，future 正常完成 |
-| 重试 | 瞬时错误后成功 | 发 2 次，第 2 次成功，记录 2 条 |
-| 分类 | 400/401/404/PARSE/CONFIG | 不重试，立即失败 |
-| 次数 | 每次 500，`maxAttempts=3` | 发 3 次，最后一次为主异常，前两次 suppressed |
-| deadline | 退避超过剩余 deadline | 不再发新请求，deadline 错误 |
-| 退避 | 200/400/800ms + jitter | 调度延迟在范围内，监听器按序调用 |
-| 线程 | 重试任务线程名 | 以 `ai-lite-retry-` 开头；HTTP 线程不 sleep |
-| 零延迟 | 同步完成 fake transport | 不栈溢出，仍按调度器推进 |
-| 预取消 | handle 已取消 | 零请求，future `CANCELLED` |
-| 尝试中取消 | 第一请求在途时 handle.cancel | 当前尝试取消，1 条 aborted 记录，无第二次 |
-| 退避中取消 | 已 schedule、未开始 | scheduledRetry 被取消，无第二次请求 |
-| future 取消 | 尝试中/退避中 `future.cancel(true)` | 内部 future/handle/scheduledRetry 全取消，future 为 cancelled |
-| 竞态 | 完成与取消同时到达 | terminal 只生效一次，无重复完成/重复请求 |
-| 记录 | 每次尝试 | 每次一条 `LlmCallRecord`，取消的那次为 aborted |
-| 监听器 | notifyRetry 抛异常 | 不影响重试，日志记录 |
-| 泄漏 | 所有终态 | scheduledRetry 已取消/移除，RetryState 可回收 |
+详细用例（数据、线程、竞态、记录数、断言）见
+[docs/testing/oneWithRetryAsync-test-cases.md](testing/oneWithRetryAsync-test-cases.md)。
+本表只保留分组总览。
 
-线程断言建议：
+| 分组 | 用例数 | 覆盖 |
+| --- | ---: | --- |
+| 基本结果 | 3 | 第一次成功、瞬时错误后成功、`maxAttempts=1` |
+| 错误分类 | 5 | 400/401/404、`PARSE`、`CONFIG`、`CANCELLED`、`ABORTED` 不重试 |
+| 次数与 suppressed | 3 | 次数耗尽、主异常、前几次 suppressed、每次独立记录 |
+| deadline | 4 | 未设置、`0ms`、退避超过剩余时间、在途请求不被 deadline 打断 |
+| 退避 | 4 | 200/400/800ms、jitter 范围、delay 只计算一次、监听器收到同一 delay |
+| 线程 | 3 | 第 1 次在调用线程；后续在 `ai-lite-retry-`；I/O 线程不 sleep |
+| 取消 | 8 | 预取消、尝试中 handle 取消、退避中取消、future 取消、重复取消、完成/取消竞态、ABORTED 契约 |
+| 同步完成 | 2 | 立即 `complete` 不递归、零延迟仍经调度器 |
+| 记录/监听器 | 4 | 每次尝试一条记录、取消记录、监听器异常/`Error`、监听器阻塞不拖垮状态机 |
+| 装配/资源 | 5 | 自定义 scheduler Bean、另一个 `ScheduledExecutorService` 不歧义、调度器关闭、队列无残留、代理解绑 |
+| parity | 2 | 与同步 `oneWithRetry` 的次数/最终终态一致；与 `oneAsync` 的取消终态一致 |
 
-- 用一个会阻塞的 fake transport 或可控 `CompletableFuture`，在 `whenComplete` 里记录
-  当前线程名；断言重试启动线程是 `ai-lite-retry-`。
-- 用 `ScheduledThreadPoolExecutor.getQueue().size()` 在终态后断言没有残留任务。
-- 与同步 `oneWithRetry` 做 parity：相同错误序列、相同次数、相同最终异常。
+线程断言修正：
+
+- `whenComplete` 跑在**完成 future 的线程**，不是重试启动线程。线程名断言应放在
+  fake transport 的 `completeAsync(request)` 入口：记录每次调用的线程名，
+  第 2 次及以后应为 `ai-lite-retry-*`。
+- 队列断言必须使用测试注入的独立 `ScheduledThreadPoolExecutor`，不能读静态共享
+  调度器或 Spring Bean，否则会被其他测试的任务污染。
+- 取消竞态用 `CountDownLatch` 控制“完成回调已进入/取消已发生”的交错，重复跑
+  100 次，断言请求次数、终态、记录数不随交错变化。
 
 ---
 
 ### 9.11 验收标准
 
-- `oneWithRetryAsync` 不占用 HTTP 客户端线程做退避/重试决策。
+- `oneWithRetryAsync` 不占用 HTTP 客户端线程做退避；I/O 线程只做常量时间判断。
 - 所有重试启动都经过 `ai-lite-retry-` 调度器；包括零延迟。
-- 每次尝试使用新的 `LlmCancelHandle`；外层 handle 只代理取消。
-- `handle.cancel`、`future.cancel(true)`、退避中取消都能停止后续尝试。
-- terminal 只发生一次；成功后不再有请求，失败后不再有请求。
-- deadline 覆盖所有尝试和退避；超时后不再发起。
-- 每次尝试独立记录；重试耗尽保留 suppressed。
+- 每次尝试使用新的 `LlmCancelHandle`；外层 handle 只绑定一次 `state::cancelFromOuter`。
+- `handle.cancel` → `ABORTED`；`future.cancel(true)` → JDK cancelled；
+  两者都能停止后续尝试。
+- `terminal` 只在真正的终态收敛时占有；成功/失败/取消只发生一次。
+- deadline 到期后不再发起新尝试；**在途请求仍受 transport 超时约束**。
+- 每次尝试独立记录；重试耗尽保留 suppressed；退避中取消不补“未发生尝试”的记录。
+- 调度器 Bean 名为 `aiLiteRetryScheduler`，Gateway 用 `@Qualifier` 注入；
+  自定义 Bean 可覆盖，且不会与用户其他 `ScheduledExecutorService` 冲突。
 - 不修改 `oneAsync`、流式入口和编排层。
 - JDK 8 下测试通过；JDK 21/25 下虚拟线程传输可用。
 
@@ -588,20 +748,25 @@ CompletableFuture<LlmResult> oneWithRetryAsync(LlmCall call, RetryPolicy policy,
 
 | 风险 | 说明 | 对策 |
 | --- | --- | --- |
-| 取消竞态 | 完成、取消、调度任务同时发生 | `terminal` CAS + 同步状态锁；测试覆盖 |
-| 调度任务泄漏 | 长退避后取消 | `removeOnCancelPolicy`；终态清空引用 |
-| 监听器阻塞 | 用户 `notifyRetry` 做重活 | 2 个调度线程；文档要求轻量；不放入 `io()` |
+| 取消竞态 | 完成、取消、调度任务同时发生 | `synchronized(state)` 管状态；`terminal` 只在终态 CAS；竞态测试重复 100 次 |
+| 发布竞态 | 取消读到 null 的当前尝试/调度任务 | 锁内“先赋值再注册回调”；延迟 0 任务必须等锁释放 |
+| 调度任务泄漏 | 长退避后取消 | `removeOnCancelPolicy`；终态清空引用；队列断言 |
+| 监听器阻塞/Error | `notifyRetry` 做重活或抛 `Error` | 2 个调度线程；`catch (Throwable)`；文档要求轻量 |
+| 用户 `retryable` 谓词阻塞 | 自定义谓词在 I/O 线程执行 | 文档要求无阻塞；默认谓词只做字段/cause 判断 |
 | 自定义 transport 阻塞 | `completeAsync` 实际阻塞 | 文档要求异步契约；阻塞 transport 会占调度线程 |
 | 重复计费 | 每次尝试真实请求 | 文档明确；调用记录可审计 |
+| 无界延迟队列 | 每条待重试任务持有 messages（可能含大图） | `maxBackoffMs` 有界；文档提示内存成本 |
 | 最终完成线程 | outer future 可能由 HTTP 线程完成，用户 `thenAccept` 可能在 I/O 线程 | 属于回调执行策略范围，见独立计划 |
-| 与协程版漂移 | 三套重试逻辑 | 抽共享 `RetrySupport` 判定；测试做 parity |
+| 同步/协程/异步漂移 | 三套重试逻辑 | 只抽 `RetrySupport` 纯函数（delay/deadline/shouldRetry/suppressed）；测试做 parity |
 
 ---
 
 ### 9.13 实施阶段
 
-- **Phase A（core）**：抽 `RetryState` / `RetrySupport`（次数、delay、deadline、suppressed 判定），
-  同步与协程版改为复用，保持行为不变。
+- **Phase A（core）**：只抽 `RetrySupport` **纯函数**（delay、deadline 判断、
+  `shouldRetry` 归一化、suppressed 组装），同步与协程版改为复用这些纯函数，
+  **不改它们的控制流**。`RetryState` 含 future/handle/scheduledRetry，只服务异步版，
+  不强行塞给同步/协程。
 - **Phase B（调度器）**：`ScheduledThreadPoolExecutor` 工具与 Starter Bean；
   `LlmGateway` 构造器注入；旧构造器兼容。
 - **Phase C（API）**：实现 `oneWithRetryAsync` 两个重载、取消代理、状态机。
@@ -610,3 +775,23 @@ CompletableFuture<LlmResult> oneWithRetryAsync(LlmCall call, RetryPolicy policy,
   `docs/configuration.md`（如有新 Bean 配置）、README。
 
 建议顺序：A → B → C → D → E。A 是纯重构，先确保同步/协程测试全绿，再动异步状态机。
+
+---
+
+### 9.14 执行记录（2026-10-22）
+
+Phase A–E 已完成：
+
+| 阶段 | 落地内容 |
+| --- | --- |
+| A | `RetrySupport`：deadline 纳秒换算、剩余时间、退避裁剪（向上取整防止早到）、suppressed 组装、deadline 异常。同步 `oneWithRetry` 与 `LlmCoroutines.oneWithRetry` 改为复用，控制流不变。 |
+| B | `RetryScheduler`：2 个 daemon 线程、`ai-lite-retry-*`、`removeOnCancelPolicy`、共享实例。Starter 新增 `aiLiteRetryScheduler` Bean；`LlmGateway` 新增 6 参构造器并保留 5 参兼容；`aiLiteGateway` 用 `@Qualifier` 注入。 |
+| C | `LlmGateway.oneWithRetryAsync` 两个重载与 `RetryRun` 状态机：终态 CAS、锁内发布、每尝试新 handle、外层取消代理、future 取消清理、零延迟调度、deadline 裁剪、异常归一化。 |
+| D | `LlmGatewayAsyncRetryTest`（42）、`LlmGatewayAsyncRetryParityTest`（6）、`AsyncRetryAssemblyTest`（7）、Kotlin parity（2）。 |
+| E | `docs/retry.md`、`entry-points.md`、`api-usage.md`、`configuration.md`、README、测试文档。 |
+
+实现中的两个细节：
+
+1. **退避裁剪向上取整**：`remainingNanos` 截断成毫秒会让调度早到不足 1ms，deadline 检查尚未过期，从而多打一次请求。`clampDelayMs` 改为向上取整，宁可晚到由 deadline 收敛。
+2. **监听器在调度线程执行**：`notifyRetry` 在 `ai-lite-retry-*` 上调用，而不是 I/O 回调线程；
+   因此 `delay` 随调度任务一起传递，避免二次计算导致监听值与真实调度不一致。
