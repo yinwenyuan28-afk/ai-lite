@@ -110,6 +110,131 @@ public final class LlmGateway {
     }
 
     /**
+     * 问一次，并按策略重试瞬时错误。
+     *
+     * <p>{@link #one(LlmCall, LlmCancelHandle)} 仍然只尝试一次；本方法在它外面循环。
+     * 每次尝试都是一次完整的单次调用，独立校验、独立写调用记录。只重试
+     * {@link RetryPolicy#defaultRetryable} 认定的瞬时错误；取消和不可重试错误立即返回/抛出。</p>
+     *
+     * @param call   调用参数
+     * @param policy 重试策略
+     * @return 调用结果
+     */
+    public LlmResult oneWithRetry(LlmCall call, RetryPolicy policy) {
+        return oneWithRetry(call, policy, null);
+    }
+
+    /**
+     * 问一次，并按策略重试瞬时错误，同时支持外部取消。
+     *
+     * <p>同一个取消句柄贯穿所有尝试；退避等待可被取消打断。取消后不再发起新的
+     * HTTP 请求，返回规范的 {@code ABORTED} 结果。</p>
+     *
+     * @param call   调用参数
+     * @param policy 重试策略
+     * @param cancel 取消句柄，可为 null
+     * @return 调用结果
+     */
+    public LlmResult oneWithRetry(LlmCall call, RetryPolicy policy, LlmCancelHandle cancel) {
+        if (policy == null) {
+            throw new LlmCallException("重试策略不能为空", null, LlmCallException.Kind.CONFIG);
+        }
+        long started = System.currentTimeMillis();
+        List<LlmCallException> failures = new ArrayList<LlmCallException>();
+        for (int attempt = 1; attempt <= policy.getMaxAttempts(); attempt++) {
+            if (cancel != null && cancel.isCancelled()) {
+                return one(call, cancel);
+            }
+            Long deadline = policy.getTotalDeadlineMs();
+            if (deadline != null
+                    && System.currentTimeMillis() - started >= deadline.longValue()) {
+                throw deadlineExceeded(failures);
+            }
+            try {
+                return one(call, cancel);
+            } catch (LlmCallException ex) {
+                failures.add(ex);
+                if (!policy.shouldRetry(ex) || attempt >= policy.getMaxAttempts()) {
+                    throw withSuppressed(ex, failures);
+                }
+                if (cancel != null && cancel.isCancelled()) {
+                    return one(call, cancel);
+                }
+                long delay = policy.delayMs(attempt);
+                if (deadline != null) {
+                    long remaining = deadline.longValue()
+                            - (System.currentTimeMillis() - started);
+                    if (remaining <= 0L) {
+                        throw deadlineExceeded(failures);
+                    }
+                    delay = Math.min(delay, remaining);
+                }
+                policy.notifyRetry(attempt, delay, ex);
+                if (!sleepCancellable(delay, cancel)) {
+                    return one(call, cancel);
+                }
+            }
+        }
+        throw deadlineExceeded(failures);
+    }
+
+    /**
+     * 分片睡眠，保证取消或总时限不会等到整段退避结束。
+     *
+     * @return true 表示正常睡完；false 表示被取消
+     */
+    private static boolean sleepCancellable(long delayMs, LlmCancelHandle cancel) {
+        long end = System.currentTimeMillis() + Math.max(0L, delayMs);
+        while (true) {
+            if (cancel != null && cancel.isCancelled()) {
+                return false;
+            }
+            long remaining = end - System.currentTimeMillis();
+            if (remaining <= 0L) {
+                return true;
+            }
+            try {
+                Thread.sleep(Math.min(remaining, 50L));
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new LlmCallException("重试等待被中断", ex,
+                        LlmCallException.Kind.TRANSPORT);
+            }
+        }
+    }
+
+    /**
+     * 把之前的失败挂到最终异常上，保留每次尝试的根因。
+     */
+    private static LlmCallException withSuppressed(LlmCallException last,
+                                                   List<LlmCallException> failures) {
+        for (int i = 0; i < failures.size() - 1; i++) {
+            LlmCallException failure = failures.get(i);
+            if (failure != last) {
+                last.addSuppressed(failure);
+            }
+        }
+        return last;
+    }
+
+    /**
+     * 总时限到期时抛出的异常；保留最后一次失败的分类和根因。
+     */
+    private static LlmCallException deadlineExceeded(List<LlmCallException> failures) {
+        if (failures.isEmpty()) {
+            return new LlmCallException("重试超过总时限", null,
+                    LlmCallException.Kind.TRANSPORT);
+        }
+        LlmCallException last = failures.get(failures.size() - 1);
+        LlmCallException ex = new LlmCallException("重试超过总时限", last,
+                last.getKind(), last.getStatusCode());
+        for (int i = 0; i < failures.size() - 1; i++) {
+            ex.addSuppressed(failures.get(i));
+        }
+        return ex;
+    }
+
+    /**
      * 问一次，边生成边回调。
      *
      * @param call    调用参数

@@ -21,6 +21,18 @@ runBlocking(provider.dispatcher()) {
 }
 ```
 
+需要重试瞬时错误时：
+
+```kotlin
+val policy = RetryPolicy.builder()
+        .maxAttempts(3)
+        .initialBackoffMs(200)
+        .maxBackoffMs(2000)
+        .build()
+
+val result = LlmCoroutines.oneWithRetry(gateway, call, policy, cancel)
+```
+
 ### Java
 
 ```java
@@ -30,6 +42,8 @@ CompletableFuture<LlmResult> future = gateway.oneAsync(call);
 ```
 
 `LlmCoroutines.one` 是**单次模型调用入口**的 Kotlin suspend 形式；`LlmCoroutines.oneAsync` 是同一个入口的 Java future 别名，等价于 `gateway.oneAsync`。
+
+`LlmCoroutines.oneWithRetry` 是 suspend 版显式重试：内部用 `await()` 发起尝试、`delay()` 退避，退避期间不占载体线程，`Job.cancel()` / `withTimeout` 可以直接打断。它与 Java 的 `gateway.oneWithRetry` 共用同一个 `RetryPolicy`。
 
 ## 边界
 

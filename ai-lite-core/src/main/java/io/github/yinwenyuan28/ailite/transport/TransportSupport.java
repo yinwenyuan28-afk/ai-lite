@@ -40,7 +40,8 @@ final class TransportSupport {
     static String joinUrl(String baseUrl, String path) {
         String base = Strings.trimToNull(baseUrl);
         if (base == null) {
-            throw new LlmCallException("模型地址未配置");
+            throw new LlmCallException("模型地址未配置", null,
+                    LlmCallException.Kind.CONFIG);
         }
         while (base.endsWith("/")) {
             base = base.substring(0, base.length() - 1);
@@ -98,13 +99,15 @@ final class TransportSupport {
         try {
             JsonNode node = AiLiteJson.readTree(json);
             if (node == null) {
-                throw new LlmCallException("模型响应无法解析");
+                throw new LlmCallException("模型响应无法解析", null,
+                        LlmCallException.Kind.PARSE);
             }
             return node;
         } catch (LlmCallException ex) {
             throw ex;
         } catch (RuntimeException ex) {
-            throw new LlmCallException("模型响应无法解析", ex);
+            throw new LlmCallException("模型响应无法解析", ex,
+                    LlmCallException.Kind.PARSE);
         }
     }
 

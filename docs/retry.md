@@ -6,10 +6,11 @@
 
 ## 1. 结论
 
-- **`LlmGateway` 不做自动重试。** 每一轮模型请求只调用一次 transport，失败就结束这一轮。
+- **`LlmGateway.one` 不做自动重试。** 一次调用只调用一次 transport，失败就结束。
+- **单次入口提供显式重试：`oneWithRetry(call, policy, cancel?)`。** 默认关闭，调用方显式选择；只覆盖同步非流式模型调用。
 - **`OkHttpExecutor` 关闭了 OkHttp 的连接重试**（`retryOnConnectionFailure(false)`），避免和上层策略叠加。
-- **重试属于调用方策略。** 需要重试时，在单次入口外面包一层 `RetryPolicy`，而不是修改网关。
-- **编排层的重试另立计划。** `AgentLoop` 每轮、`AgentSessionLoop` 整体、`Workflow` 步骤的重试不在本文范围内。
+- **`oneWithRetry` 只重试瞬时错误。** 400/401/404/解析/配置/取消不重试。
+- **编排层的重试另立计划。** `AgentLoop` 每轮、`AgentSessionLoop` 整体、`Workflow` 步骤的重试不在本文范围内；它们需要时显式调用 `oneWithRetry`。
 
 ---
 
@@ -21,10 +22,12 @@
 | --- | --- |
 | transport 抛 `LlmCallException` | 同步入口直接抛；异步入口 future 异常完成 |
 | transport 抛其他 `RuntimeException` | 包装成 `LlmCallException("模型调用失败", cause)` |
-| HTTP 5xx / 429 | transport 抛 `LlmCallException`，网关不重试 |
-| 连接或读取超时 | transport 抛 `LlmCallException`，网关不重试 |
+| HTTP 5xx / 429 | transport 抛 `LlmCallException`，`one` 不重试；`oneWithRetry` 可重试 |
+| 连接或读取超时 | transport 抛 `LlmCallException(TRANSPORT)`，`one` 不重试 |
 | 调用被取消 | 返回 `ABORTED`，**绝不重试** |
 | 流式中途断开 | 已经产生的增量保留，本轮以异常结束，不自动续传 |
+
+`LlmCallException` 现在带 `Kind` 和 `statusCode`：`HTTP`、`TRANSPORT`、`PARSE`、`CANCELLED`、`CONFIG`、`UNKNOWN`。重试判定只看结构化字段，不解析错误消息。
 
 `Attempt` 只是 usage / latency 累加器，不承担重试。调用记录里每一轮只对应一次实际请求。
 
@@ -32,9 +35,45 @@
 
 ## 3. 推荐的重试结构
 
+### 3.1 优先使用内置的 `oneWithRetry`
+
+```java
+RetryPolicy policy = RetryPolicy.builder()
+        .maxAttempts(3)                  // 含第一次
+        .initialBackoffMs(200)
+        .multiplier(2.0)
+        .maxBackoffMs(2000)
+        .jitter(true)
+        .totalDeadlineMs(10000L)         // 可空
+        .build();
+
+LlmResult result = gateway.oneWithRetry(call, policy, cancel);
+```
+
+Kotlin 协程使用 suspend 版：
+
+```kotlin
+val result = LlmCoroutines.oneWithRetry(gateway, call, policy, cancel)
+```
+
+它用 `await()` 发起尝试、`delay()` 退避，退避期间不占载体线程；`Job.cancel()` / `withTimeout` 会直接打断退避并取消底层请求。它与 Java 版共用同一个 `RetryPolicy`。
+
+```text
+oneWithRetry
+  ├─ attempt 1 → one(call, cancel)
+  ├─ attempt 2 → one(call, cancel)
+  └─ attempt N → one(call, cancel)
+```
+
+每次尝试都是一次完整的单次调用，独立写一条 `LlmCallRecord`；取消后不再发新请求；退避等待可被取消打断。
+
+### 3.2 自定义策略
+
+需要接入自己的重试框架时，仍可以在 `one` / `oneAsync` 外面包一层：
+
 ```text
 业务调用方
-  └─ RetryPolicy（次数、退避、分类、总 deadline）
+  └─ 自定义 RetryPolicy（次数、退避、分类、总 deadline）
        └─ LlmGateway.oneAsync(call, cancel)
             └─ 每次尝试是一条独立的 LlmCallRecord
 ```

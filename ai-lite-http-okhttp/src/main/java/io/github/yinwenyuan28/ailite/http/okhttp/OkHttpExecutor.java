@@ -33,22 +33,34 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
     private final OkHttpClient shared;
+    /** true 表示 Dispatcher 线程池由本执行器创建，close 时才允许关闭。 */
+    private final boolean ownsDispatcher;
 
     /**
      * 创建默认执行器。关闭连接重试，避免和网关自己的重试策略叠加。
      */
     public OkHttpExecutor() {
-        this(new OkHttpClient.Builder().retryOnConnectionFailure(false).build());
+        this(new OkHttpClient.Builder().retryOnConnectionFailure(false).build(), true);
     }
 
     /**
      * @param shared 共享客户端；调用方负责其连接池配置
      */
     public OkHttpExecutor(OkHttpClient shared) {
+        this(shared, true);
+    }
+
+    /**
+     * @param shared          客户端
+     * @param ownsDispatcher  true 时 close 会关闭 Dispatcher 线程池；用户传入的客户端传 false
+     */
+    public OkHttpExecutor(OkHttpClient shared, boolean ownsDispatcher) {
         if (shared == null) {
-            throw new LlmCallException("OkHttpClient 不能为空");
+            throw new LlmCallException("OkHttpClient 不能为空", null,
+                    LlmCallException.Kind.CONFIG);
         }
         this.shared = shared;
+        this.ownsDispatcher = ownsDispatcher;
     }
 
     @Override
@@ -81,13 +93,15 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
                 ensureSuccessful(response);
                 ResponseBody body = response.body();
                 if (body == null) {
-                    throw new LlmCallException("响应无法解析");
+                    throw new LlmCallException("响应无法解析", null,
+                            LlmCallException.Kind.PARSE);
                 }
                 BufferedSource source = body.source();
                 String line;
                 while ((line = source.readUtf8Line()) != null) {
                     if (request.getCancel() != null && request.getCancel().isCancelled()) {
-                        throw new LlmCallException("调用已取消");
+                        throw new LlmCallException("调用已取消", null,
+                                LlmCallException.Kind.CANCELLED);
                     }
                     listener.onLine(line);
                 }
@@ -161,13 +175,15 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
                     ensureSuccessful(response);
                     ResponseBody body = response.body();
                     if (body == null) {
-                        throw new LlmCallException("响应无法解析");
+                        throw new LlmCallException("响应无法解析", null,
+                                LlmCallException.Kind.PARSE);
                     }
                     BufferedSource source = body.source();
                     String line;
                     while ((line = source.readUtf8Line()) != null) {
                         if (request.getCancel() != null && request.getCancel().isCancelled()) {
-                            throw new LlmCallException("调用已取消");
+                            throw new LlmCallException("调用已取消", null,
+                                    LlmCallException.Kind.CANCELLED);
                         }
                         listener.onLine(line);
                     }
@@ -202,14 +218,16 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
     private static void completeFailure(CompletableFuture<?> future, IOException ex,
                                         LlmCancelHandle cancel) {
         if (cancel != null && cancel.isCancelled()) {
-            future.completeExceptionally(new LlmCallException("调用已取消", ex));
+            future.completeExceptionally(new LlmCallException("调用已取消", ex,
+                    LlmCallException.Kind.CANCELLED));
             return;
         }
         if (future.isCancelled()) {
             future.completeExceptionally(new CancellationException("调用已取消"));
             return;
         }
-        future.completeExceptionally(new LlmCallException("模型请求失败", ex));
+        future.completeExceptionally(new LlmCallException("模型请求失败", ex,
+                LlmCallException.Kind.TRANSPORT));
     }
 
     private Call buildCall(HttpRequest request) {
@@ -234,7 +252,8 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
         }
         ResponseBody body = response.body();
         String text = body == null ? "" : body.string();
-        throw new LlmCallException("模型请求失败，状态码：" + response.code() + brief(text));
+        throw new LlmCallException("模型请求失败，状态码：" + response.code() + brief(text),
+                null, LlmCallException.Kind.HTTP, Integer.valueOf(response.code()));
     }
 
     private static String brief(String text) {
@@ -250,9 +269,9 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
 
     private static LlmCallException wrap(IOException ex, LlmCancelHandle cancel) {
         if (cancel != null && cancel.isCancelled()) {
-            return new LlmCallException("调用已取消", ex);
+            return new LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED);
         }
-        return new LlmCallException("模型请求失败", ex);
+        return new LlmCallException("模型请求失败", ex, LlmCallException.Kind.TRANSPORT);
     }
 
     private static void bind(LlmCancelHandle cancel, final Call call) {
@@ -278,7 +297,9 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
 
     @Override
     public void close() {
-        shared.dispatcher().executorService().shutdown();
-        shared.connectionPool().evictAll();
+        if (ownsDispatcher) {
+            shared.dispatcher().executorService().shutdown();
+            shared.connectionPool().evictAll();
+        }
     }
 }

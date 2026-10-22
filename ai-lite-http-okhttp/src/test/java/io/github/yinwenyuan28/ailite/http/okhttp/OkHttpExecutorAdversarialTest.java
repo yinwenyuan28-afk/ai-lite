@@ -272,6 +272,32 @@ public class OkHttpExecutorAdversarialTest {
         assertThat(future.isCancelled()).isTrue();
     }
 
+    @Test
+    public void httpErrorCarriesKindAndStatus() {
+        server.enqueue(new MockResponse().setResponseCode(503).setBody("down"));
+
+        assertThatThrownBy(() -> http.execute(request(5000, null)))
+                .isInstanceOf(LlmCallException.class)
+                .satisfies(ex -> {
+                    LlmCallException error = (LlmCallException) ex;
+                    assertThat(error.getKind())
+                            .isEqualTo(LlmCallException.Kind.HTTP);
+                    assertThat(error.getStatusCode()).isEqualTo(Integer.valueOf(503));
+                });
+    }
+
+    @Test
+    public void readTimeoutCarriesTransportKind() {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setBody("late")
+                .setBodyDelay(2, TimeUnit.SECONDS));
+
+        assertThatThrownBy(() -> http.execute(request(150, null)))
+                .isInstanceOf(LlmCallException.class)
+                .satisfies(ex -> assertThat(((LlmCallException) ex).getKind())
+                        .isEqualTo(LlmCallException.Kind.TRANSPORT));
+    }
+
     private HttpRequest request(int readTimeoutMs, LlmCancelHandle cancel) {
         return new HttpRequest(server.url("/chat").toString(), Collections.<String, String>emptyMap(),
                 "{\"hello\":1}", 2000, readTimeoutMs, cancel);

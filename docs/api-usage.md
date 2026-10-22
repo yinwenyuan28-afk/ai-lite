@@ -12,7 +12,7 @@
 
 | 类别 | 包/类型 | 约定 |
 | --- | --- | --- |
-| 公开 API | `LlmGateway`、`LlmCall`、`LlmMessage`、`LlmResult`、`LlmTool`、`Workflow`、`AgentLoop`、`AgentLifecycle`、`AgentSessionLoop`、`PromptManager`、`RenderedPrompt` | 业务直接使用；尽量保持二进制兼容 |
+| 公开 API | `LlmGateway`、`RetryPolicy`、`LlmCall`、`LlmMessage`、`LlmResult`、`LlmTool`、`Workflow`、`AgentLoop`、`AgentLifecycle`、`AgentSessionLoop`、`PromptManager`、`RenderedPrompt` | 业务直接使用；尽量保持二进制兼容 |
 | 扩展 SPI | `LlmTransport`、`HttpExecutor`、`AsyncHttpExecutor`、`ExecutorProvider`、`ToolExecutor`、`LlmCallStore`、`AgentSessionStore`、`SessionCache`、`PromptStore` | 允许自定义实现；接口方法变更会慎重 |
 | 可选模块 | `ai-lite-executor-coroutines`、`ai-lite-executor-jdk21`、`ai-lite-session-redis`、`ai-lite-session-jdbc`、`ai-lite-store-jdbc`、`ai-lite-prompt-jdbc` | 按需引入，不引入不影响核心 |
 | 内部实现 | `TransportSupport`、`AgentSessionStoreSupport`、`AsyncLlmCallLogger`、各协议的私有状态类 | 不保证兼容，不要直接依赖 |
@@ -122,6 +122,8 @@ public class ChatService {
 | --- | --- | --- | --- |
 | `one(LlmCall)` | 单次调用，不带工具，阻塞当前线程直到返回 | `LlmResult` | ⭐ |
 | `one(LlmCall, LlmCancelHandle)` | 同步 + 外部取消句柄，在途请求可被其他线程中止 | `LlmResult` |  |
+| `oneWithRetry(LlmCall, RetryPolicy)` | 同步单次调用 + 显式重试瞬时错误 | `LlmResult` |  |
+| `oneWithRetry(LlmCall, RetryPolicy, LlmCancelHandle)` | 同上 + 取消感知退避 | `LlmResult` |  |
 | `oneByStream(LlmCall, Consumer<String>, LlmCancelHandle)` | 同一次调用，边生成边回调增量文本 | `LlmResult` | ⭐ |
 | `oneAsync(LlmCall)` | 非阻塞单次调用，等待响应时不占调用线程 | `CompletableFuture<LlmResult>` | ⭐ |
 | `oneAsync(LlmCall, LlmCancelHandle)` | 非阻塞 + 外部取消句柄 | `CompletableFuture<LlmResult>` |  |
@@ -134,7 +136,8 @@ public class ChatService {
 - 这是上层所有编排的落点：`Workflow.oneStep`、`AgentLoop` 的普通轮次、`AgentSessionLoop` 的续聊，最终都汇到这一档（带工具的轮次走 `round`）。
 - 调用参数（biz-id 登记、模型解析、超时、取消）的校验与错误语义见 3.10，这一档不额外放宽。
 - 所有入口都保证 L2（取消后不再推进）；L1（在途请求中止）取决于传输层：OkHttp 全阶段有效，JDK 8 `HttpURLConnection` 在正文读取阶段可能等到读超时。同步入口必须传 `LlmCancelHandle` 才具备在途取消；`one(call)` 只受超时约束。
-- 网关不做自动重试，重试策略由调用方包在入口外面。完整矩阵见 [单次模型调用入口](entry-points.md) 与 [重试边界](retry.md)。
+- `oneAsync` 只释放调用线程；OkHttp 传输仍在 Dispatcher 线程执行 I/O、读 body 和解析，每个在途请求占一个线程，流式请求占至流结束。协程/虚拟线程不改变这一点。
+- 网关默认不做自动重试；需要重试时显式使用 `gateway.oneWithRetry(call, policy, cancel?)`，它只覆盖同步非流式调用，且每次尝试独立写一条调用记录。完整矩阵见 [单次模型调用入口](entry-points.md) 与 [重试边界](retry.md)。
 
 #### 3.1.2 工具与多轮方法
 
@@ -765,7 +768,7 @@ runBlocking(provider.dispatcher()) {
 }
 ```
 
-`LlmCoroutines.one` 是单次模型调用入口的 Kotlin suspend 形式；`LlmCoroutines.oneAsync` 是同一个入口的 Java future 别名。
+`LlmCoroutines.one` 是单次模型调用入口的 Kotlin suspend 形式；`LlmCoroutines.oneAsync` 是同一个入口的 Java future 别名。`LlmCoroutines.oneWithRetry` 是 suspend 版显式重试，与 Java 的 `gateway.oneWithRetry` 共用 `RetryPolicy`。
 
 | API | 说明 |
 | --- | --- |
@@ -773,6 +776,7 @@ runBlocking(provider.dispatcher()) {
 | `CoroutineExecutorProvider.io()` | 同一个池的阻塞视图 |
 | `CoroutineExecutorProvider.close()` | 关闭载体池 |
 | `LlmCoroutines.one(gateway, call, cancel?)` | 单次模型调用入口（suspend） |
+| `LlmCoroutines.oneWithRetry(gateway, call, policy, cancel?)` | 单次入口 + 显式重试（suspend，`delay()` 退避不占载体） |
 | `LlmCoroutines.round(gateway, call, tools, cancel?)` | 单轮工具声明 |
 | `LlmCoroutines.toolLoop(gateway, call, tools, maxRounds?, cancel?)` | 工具循环 |
 | `LlmCoroutines.oneAsync(gateway, call, cancel?)` | 单次模型调用入口的 Java 别名，等价于 `gateway.oneAsync` |
@@ -1111,7 +1115,7 @@ public final class MyTransport implements LlmTransport {
 
     @Override
     public CompletableFuture<LlmCompletion> completeAsync(LlmRequest request) {
-        // 建议用真正的非阻塞 I/O；不要默认落到 ForkJoinPool
+        // 建议使用异步回调式客户端；如果底层仍是阻塞 I/O，请明确它占哪类线程，不要默认落到 ForkJoinPool
         return myAsyncClient.call(request);
     }
 }

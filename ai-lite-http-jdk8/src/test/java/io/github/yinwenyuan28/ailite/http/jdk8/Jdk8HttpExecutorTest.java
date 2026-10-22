@@ -136,6 +136,20 @@ public class Jdk8HttpExecutorTest {
         assertThat(server.getRequestCount()).isZero();
     }
 
+    @Test
+    public void httpErrorCarriesKindAndStatus() {
+        server.enqueue(new MockResponse().setResponseCode(503).setBody("down"));
+
+        assertThatThrownBy(() -> executor.execute(request("/v1/chat/completions")))
+                .isInstanceOf(LlmCallException.class)
+                .satisfies(ex -> {
+                    LlmCallException error = (LlmCallException) ex;
+                    assertThat(error.getKind())
+                            .isEqualTo(LlmCallException.Kind.HTTP);
+                    assertThat(error.getStatusCode()).isEqualTo(Integer.valueOf(503));
+                });
+    }
+
     private HttpRequest request(String path) {
         return request(path, null);
     }

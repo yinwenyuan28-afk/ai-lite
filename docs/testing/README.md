@@ -45,6 +45,8 @@
 | `LlmTextsTest`（新增图片校验） | core | 7 | null 元素、空 MIME、非 image/*、空 data、非 base64 data URL、MIME 大小写 |
 | `LlmImageTest` | core | 6 | data URL 前缀剥离、裸 base64 去空白、非 base64 data URL 保留待校验 |
 | 三个 transport test（图片分片） | http-okhttp | 6 | OpenAI `image_url`、Responses `input_image`、Anthropic base64 source、流式与合并 |
+| `RetryPolicyTest` / `LlmGatewayRetryTest` | core | 26 | 显式重试、瞬时错误分类、退避、总 deadline、取消感知、每次尝试独立记录 |
+| `LlmCoroutinesRetryTest` | executor-coroutines | 10 | suspend 重试、`delay()` 退避、`withTimeout`/`job.cancel`、deadline、记录 |
 
 已修复：`one(call, cancel)` 缺失、回调内 NPE 导致 future 挂起、`future.cancel` 漏记调用记录、`LlmCancelHandle` 非幂等、图片参数未收口（空 MIME/data、非 base64 data URL、MIME 大小写误拒）。**L1 的传输差异**（JDK 8 正文读取阶段可能等到读超时）已写入 `docs/entry-points.md`，编排层（AgentLoop / SessionLoop）的 P0 仍按本文档后续实现。
 

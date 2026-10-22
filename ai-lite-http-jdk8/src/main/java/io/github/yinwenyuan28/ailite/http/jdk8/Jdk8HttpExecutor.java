@@ -96,7 +96,8 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (request.getCancel() != null && request.getCancel().isCancelled()) {
-                    throw new LlmCallException("调用已取消");
+                    throw new LlmCallException("调用已取消", null,
+                            LlmCallException.Kind.CANCELLED);
                 }
                 listener.onLine(line);
             }
@@ -130,7 +131,8 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
             });
             if (cancel.isCancelled()) {
                 connection.disconnect();
-                throw new LlmCallException("调用已取消");
+                throw new LlmCallException("调用已取消", null,
+                        LlmCallException.Kind.CANCELLED);
             }
         }
         OutputStream output = connection.getOutputStream();
@@ -172,14 +174,15 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
             oneLine = oneLine.substring(0, 300);
         }
         return new LlmCallException("模型请求失败，状态码：" + status
-                + (oneLine.isEmpty() ? "" : "，响应：" + oneLine));
+                + (oneLine.isEmpty() ? "" : "，响应：" + oneLine),
+                null, LlmCallException.Kind.HTTP, Integer.valueOf(status));
     }
 
     private static LlmCallException wrap(IOException ex, LlmCancelHandle cancel) {
         if (cancel != null && cancel.isCancelled()) {
-            return new LlmCallException("调用已取消", ex);
+            return new LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED);
         }
-        return new LlmCallException("模型请求失败", ex);
+        return new LlmCallException("模型请求失败", ex, LlmCallException.Kind.TRANSPORT);
     }
 
     private static void disconnect(HttpURLConnection connection, LlmCancelHandle cancel) {

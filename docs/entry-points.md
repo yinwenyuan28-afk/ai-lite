@@ -12,9 +12,11 @@
 | --- | --- | --- | --- | --- |
 | `LlmGateway.one(LlmCall)` | `LlmResult` | 阻塞调用线程直到响应或超时 | 只能靠超时 | 脚本、CLI、请求线程本来就该等待的同步业务 |
 | `LlmGateway.one(LlmCall, LlmCancelHandle)` | `LlmResult` | 同上，但支持其他线程中止 | `handle.cancel()` | 同步代码里需要“用户点了停止” |
+| `LlmGateway.oneWithRetry(LlmCall, RetryPolicy, LlmCancelHandle)` | `LlmResult` | 阻塞，包含退避等待 | handle；退避可被打断 | 网络波动、需要显式重试的同步调用 |
 | `LlmGateway.oneAsync(LlmCall)` | `CompletableFuture<LlmResult>` | 不阻塞，提交后立即返回 | `future.cancel(true)` | Web 请求线程、批量并发、JDK 8 高并发接入 |
 | `LlmGateway.oneAsync(LlmCall, LlmCancelHandle)` | `CompletableFuture<LlmResult>` | 同上 | handle 或 `future.cancel(true)` | 需要把取消句柄传给上层（超时、断连、业务取消） |
 | `LlmCoroutines.one(gateway, call, cancel?)` | `LlmResult`（suspend） | 挂起协程，不占载体线程 | 取消 `Job` 或 `handle.cancel()` | Kotlin 协程代码 |
+| `LlmCoroutines.oneWithRetry(gateway, call, policy, cancel?)` | `LlmResult`（suspend） | 挂起；退避用 `delay()`，不占载体线程 | 取消 `Job` / `withTimeout` / handle | Kotlin 协程里的显式重试 |
 | `LlmCoroutines.oneAsync(gateway, call, cancel?)` | `CompletableFuture<LlmResult>` | 不阻塞 | 同 `oneAsync` | 给 Java 侧保留的静态方法形式 |
 
 流式变体属于同一个家族：
@@ -23,6 +25,17 @@
 - `oneByStreamAsync(call, onDelta, cancel)`
 
 它们和 `one` 的区别只是“边生成边回调”，结果字段、校验、异常和取消语义完全一致。
+
+### `oneWithRetry` 的定位
+
+`oneWithRetry` 是单次入口的**显式重试变体**，只覆盖同步非流式调用：
+
+- `one(call)` / `oneAsync(call)` 默认仍然只尝试一次。
+- `oneWithRetry(call, policy, cancel?)` 在 `one` 外面循环，只重试瞬时错误（429、5xx、408、连接/读超时）。
+- 每次尝试独立写一条调用记录；重试会重复计费。
+- 取消后不再发起新尝试；总 deadline 覆盖所有尝试和退避。
+- 异步、流式、工具循环、编排层不在本轮重试范围内。
+- Kotlin 协程使用 `LlmCoroutines.oneWithRetry`：`await()` + `delay()`，退避不占载体线程。
 
 ### `LlmCoroutines.oneAsync` 的定位
 
@@ -120,7 +133,7 @@ L1 不是协议层能单方面保证的能力，最终取决于 HTTP 客户端�
 
 ## 4. 调用记录
 
-每次单次调用写一条 `LlmCallRecord`（工具循环按轮写多条）。**`future.cancel(true)` 也会补一条 `aborted` 记录。**
+每次单次调用写一条 `LlmCallRecord`（工具循环按轮写多条）。**`future.cancel(true)` 也会补一条 `aborted` 记录；`oneWithRetry` 的每次尝试各写一条记录。**
 
 | 字段 | 含义 |
 | --- | --- |
@@ -136,24 +149,31 @@ L1 不是协议层能单方面保证的能力，最终取决于 HTTP 客户端�
 
 ## 5. 重试放在哪里
 
-网关**不做自动重试**：
+网关**默认不做自动重试**：
 
 - `LlmGateway` 每轮只调用一次 transport，失败即进入 `ERROR` 或抛异常。
 - `OkHttpExecutor` 默认 `retryOnConnectionFailure(false)`，关闭 OkHttp 自己的连接重试。
 - `Attempt` 只负责 usage / latency 累加，不承担重试。
 
-重试属于调用方策略，应放在单次入口之外：
+需要重试时，优先使用内置的同步非流式入口：
 
 ```text
-调用方 / RetryPolicy
+gateway.oneWithRetry(call, policy, cancel)
+  ├─ 次数、指数退避、可重试分类、总 deadline
+  └─ 每次尝试独立调用，独立记录
+```
+
+其他入口（异步、流式）可以自己包一层策略：
+
+```text
+调用方 / 自定义 RetryPolicy
   └─ gateway.oneAsync(call, cancel)
-       ├─ 次数、指数退避、可重试分类、总 deadline
        └─ 每次尝试独立调用，独立记录
 ```
 
-可重试：429、5xx、连接/读超时、可识别的瞬时 IO 错误。
-不可重试：400/401/403/404、参数/协议错误、内容审核拒绝、取消。
-流式：未收到首个 delta 前可重试；收到后不自动重试。
+可重试：429、5xx、408、连接/读超时、可识别的瞬时 IO 错误。
+不可重试：400/401/403/404、参数/协议错误、内容审核拒绝、解析错误、取消。
+流式：内置 `oneWithRetry` 不覆盖；自定义策略只能在收到首个 delta 前重试。
 
 详见 [重试边界](retry.md)。
 
@@ -166,6 +186,7 @@ L1 不是协议层能单方面保证的能力，最终取决于 HTTP 客户端�
 | 普通 Web 请求，业务线程可以等待 | `one` |
 | Web 请求需要尽快释放 Tomcat 线程 | `oneAsync`，controller 返回异步类型 |
 | 需要用户主动停止 | `one(call, handle)` 或 `oneAsync(call, handle)` |
+| 网络波动、需要显式重试 | `oneWithRetry(call, policy, handle)`（仅同步非流式） |
 | Kotlin 协程 | `LlmCoroutines.one` |
 | 需要边生成边推给前端 | `oneByStream` / `oneByStreamAsync` |
 | 需要工具调用 | 不属于单次入口，用 `round` / `toolLoop` 或编排层 |

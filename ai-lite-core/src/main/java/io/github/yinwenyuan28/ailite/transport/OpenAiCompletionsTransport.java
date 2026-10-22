@@ -320,12 +320,14 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
         JsonNode root = TransportSupport.parse(json);
         JsonNode choices = root.path("choices");
         if (!choices.isArray() || choices.size() == 0) {
-            throw new LlmCallException("响应无法解析");
+            throw new LlmCallException("响应无法解析", null,
+                    LlmCallException.Kind.PARSE);
         }
         JsonNode choice = choices.get(0);
         JsonNode message = choice.path("message");
         if (message.isMissingNode()) {
-            throw new LlmCallException("响应无法解析");
+            throw new LlmCallException("响应无法解析", null,
+                    LlmCallException.Kind.PARSE);
         }
         String reasoning = TransportSupport.firstText(message, "reasoning_content", "reasoning");
         String content = TransportSupport.text(message, "content");
