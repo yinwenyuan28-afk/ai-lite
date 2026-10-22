@@ -244,7 +244,24 @@ public final class LlmGateway {
      * @return 最后一轮结果
      */
     public LlmResult toolLoop(LlmCall call, List<LlmTool> tools, Integer maxRounds) {
-        return invoke(call, tools, maxRounds, MODE_LOOP, false, null, null);
+        return toolLoop(call, tools, maxRounds, null);
+    }
+
+    /**
+     * 模型要工具就执行，再请求下一轮，并允许其他线程中止。
+     *
+     * <p>使用 4 参重载而不是 3 参 {@code (call, tools, cancel)}：后者会和
+     * {@code (call, tools, Integer)} 在传 null 时产生二义性。</p>
+     *
+     * @param call      调用参数
+     * @param tools     工具列表
+     * @param maxRounds 最大轮数，null 表示 8
+     * @param cancel    取消句柄，可为 null
+     * @return 最后一轮结果
+     */
+    public LlmResult toolLoop(LlmCall call, List<LlmTool> tools, Integer maxRounds,
+                              LlmCancelHandle cancel) {
+        return invoke(call, tools, maxRounds, MODE_LOOP, false, null, cancel);
     }
 
     public LlmResult toolLoop(LlmCall call, List<LlmTool> tools) {
@@ -856,7 +873,10 @@ public final class LlmGateway {
         private final Consumer<String> onDelta;
         private final LlmCancelHandle cancel;
         private final CompletableFuture<LlmResult> result = new CompletableFuture<LlmResult>();
-        private final AtomicBoolean recorded = new AtomicBoolean(false);
+        /**
+         * 只保护“终态记录”不被竞态重复写；TOOL_USE 这类非终态轮次按轮正常记录。
+         */
+        private final AtomicBoolean terminalRecorded = new AtomicBoolean(false);
 
         private volatile int completed;
         private LlmCompletion last;
@@ -883,7 +903,7 @@ public final class LlmGateway {
                 return;
             }
             if (cancel != null && cancel.isCancelled()) {
-                recordOnce(attempt, completed == 0 ? 0 : completed,
+                recordTerminal(attempt, completed == 0 ? 0 : completed,
                         LlmStopReason.ABORTED, 0, 0L, null);
                 result.complete(result(attempt, last, LlmStopReason.ABORTED, completed));
                 return;
@@ -925,29 +945,30 @@ public final class LlmGateway {
 
                 if (cancel != null && cancel.isCancelled()) {
                     // transport 不配合 abort 时由网关兜底：取消优先于正常完成。
-                    recordOnce(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
+                    recordTerminal(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
                     result.complete(result(attempt, completion, LlmStopReason.ABORTED, completed));
                     return;
                 }
                 if (completion.getStop() == LlmStopReason.ABORTED) {
-                    recordOnce(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
+                    recordTerminal(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
                     result.complete(result(attempt, completion, LlmStopReason.ABORTED, completed));
                     return;
                 }
                 boolean wantsTool = executeTools && completion.getStop() == LlmStopReason.TOOL_USE
                         && !completion.getToolCalls().isEmpty();
                 if (!wantsTool) {
-                    recordOnce(attempt, round, completion.getStop(), success(completion.getStop()),
-                            latency, null);
+                    recordTerminal(attempt, round, completion.getStop(),
+                            success(completion.getStop()), latency, null);
                     result.complete(result(attempt, completion, completion.getStop(), completed));
                     return;
                 }
                 if (round >= limit) {
-                    recordOnce(attempt, round, LlmStopReason.MAX_ROUNDS, 0, latency, null);
+                    recordTerminal(attempt, round, LlmStopReason.MAX_ROUNDS, 0, latency, null);
                     result.complete(result(attempt, completion, LlmStopReason.MAX_ROUNDS, completed));
                     return;
                 }
-                recordOnce(attempt, round, LlmStopReason.TOOL_USE, 1, latency, null);
+                // 非终态轮次：每轮一条记录，不能被后续终态记录“合并”。
+                record(attempt, round, LlmStopReason.TOOL_USE, 1, latency, null);
                 transcript.add(LlmMessage.assistant(completion.getContent(),
                         completion.getToolCalls()));
                 CompletableFuture<List<String>> toolFuture;
@@ -965,33 +986,43 @@ public final class LlmGateway {
                     if (result.isDone()) {
                         return;
                     }
-                    if (toolError != null) {
-                        fail(new LlmCallException("工具执行失败", unwrap(toolError)), round, latency);
-                        return;
+                    try {
+                        if (toolError != null) {
+                            fail(new LlmCallException("工具执行失败", unwrap(toolError)),
+                                    round, latency);
+                            return;
+                        }
+                        List<String> texts = results == null
+                                ? Collections.<String>emptyList() : results;
+                        for (int i = 0; i < completion.getToolCalls().size(); i++) {
+                            LlmToolCall toolCall = completion.getToolCalls().get(i);
+                            String text = i < texts.size() ? texts.get(i) : "";
+                            transcript.add(LlmMessage.toolResult(toolCall.getId(),
+                                    text == null ? "" : text));
+                        }
+                        if (cancel != null && cancel.isCancelled()) {
+                            recordTerminal(attempt, round, LlmStopReason.ABORTED, 0,
+                                    System.currentTimeMillis() - started, null);
+                            result.complete(result(attempt, completion,
+                                    LlmStopReason.ABORTED, completed));
+                            return;
+                        }
+                        next();
+                    } catch (RuntimeException ex) {
+                        // 工具结果处理异常不能落在回调线程里导致 future 永不完成。
+                        fail(new LlmCallException("工具结果处理失败", ex), round, latency);
                     }
-                    List<String> texts = results == null
-                            ? Collections.<String>emptyList() : results;
-                    for (int i = 0; i < completion.getToolCalls().size(); i++) {
-                        LlmToolCall toolCall = completion.getToolCalls().get(i);
-                        String text = i < texts.size() ? texts.get(i) : "";
-                        transcript.add(LlmMessage.toolResult(toolCall.getId(), text));
-                    }
-                    if (cancel != null && cancel.isCancelled()) {
-                        result.complete(result(attempt, completion, LlmStopReason.ABORTED, completed));
-                        return;
-                    }
-                    next();
                 });
             });
         }
 
         private void fail(Throwable cause, int round, long latency) {
             if (cancel != null && cancel.isCancelled()) {
-                recordOnce(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
+                recordTerminal(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
                 result.complete(result(attempt, null, LlmStopReason.ABORTED, completed));
                 return;
             }
-            recordOnce(attempt, round, LlmStopReason.ERROR, 0, latency, cause.getMessage());
+            recordTerminal(attempt, round, LlmStopReason.ERROR, 0, latency, cause.getMessage());
             if (cause instanceof LlmCallException) {
                 result.completeExceptionally(cause);
             } else {
@@ -1003,13 +1034,16 @@ public final class LlmGateway {
          * future 被调用方取消时补一条记录。终态已被取消，不能再 complete 结果。
          */
         private void cancelledByFuture() {
-            recordOnce(attempt, completed == 0 ? 0 : completed,
+            recordTerminal(attempt, completed == 0 ? 0 : completed,
                     LlmStopReason.ABORTED, 0, 0L, null);
         }
 
-        private void recordOnce(Attempt attempt, int round, LlmStopReason stop, int success,
-                                long latencyMs, String error) {
-            if (recorded.compareAndSet(false, true)) {
+        /**
+         * 终态记录只允许写一次；TOOL_USE 等中间轮次使用 {@link #record} 按轮记录。
+         */
+        private void recordTerminal(Attempt attempt, int round, LlmStopReason stop, int success,
+                                    long latencyMs, String error) {
+            if (terminalRecorded.compareAndSet(false, true)) {
                 record(attempt, round, stop, success, latencyMs, error);
             }
         }
@@ -1128,13 +1162,31 @@ public final class LlmGateway {
             }
             record(attempt, round, LlmStopReason.TOOL_USE, 1, latency, null);
             transcript.add(LlmMessage.assistant(completion.getContent(), completion.getToolCalls()));
-            List<String> results = toolExecutor.execute(tools, completion.getToolCalls());
+            List<String> results;
+            try {
+                results = toolExecutor.execute(tools, completion.getToolCalls());
+            } catch (RuntimeException ex) {
+                long failedLatency = System.currentTimeMillis() - started;
+                if (cancel != null && cancel.isCancelled()) {
+                    record(attempt, round, LlmStopReason.ABORTED, 0, failedLatency, null);
+                    return result(attempt, completion, LlmStopReason.ABORTED, completed);
+                }
+                record(attempt, round, LlmStopReason.ERROR, 0, failedLatency, ex.getMessage());
+                throw new LlmCallException("工具执行失败", ex);
+            }
+            if (results == null) {
+                // SPI 违约时按空结果处理，避免 NPE 打断整个工具循环。
+                results = Collections.emptyList();
+            }
             for (int i = 0; i < completion.getToolCalls().size(); i++) {
                 LlmToolCall toolCall = completion.getToolCalls().get(i);
                 String text = i < results.size() ? results.get(i) : "";
-                transcript.add(LlmMessage.toolResult(toolCall.getId(), text));
+                transcript.add(LlmMessage.toolResult(toolCall.getId(),
+                        text == null ? "" : text));
             }
             if (cancel != null && cancel.isCancelled()) {
+                record(attempt, round, LlmStopReason.ABORTED, 0,
+                        System.currentTimeMillis() - started, null);
                 return result(attempt, completion, LlmStopReason.ABORTED, completed);
             }
         }

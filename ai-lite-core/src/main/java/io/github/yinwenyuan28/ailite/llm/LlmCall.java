@@ -72,6 +72,17 @@ public final class LlmCall {
     }
 
     /**
+     * 复制调用参数。用于步骤工厂在创建时做快照，避免调用方后续修改
+     * {@link #timeouts(Integer, Integer)} 影响已构造的步骤。
+     *
+     * @return 新的调用参数，消息列表仍为浅拷贝
+     */
+    public LlmCall copy() {
+        return new LlmCall(bizId, provider, modelId, thinkingLevel, profile, messages,
+                connectTimeoutMs, readTimeoutMs);
+    }
+
+    /**
      * 复制调用，只替换消息。模型选择、超时保持调用当下的值。
      *
      * @param messages 新消息列表
