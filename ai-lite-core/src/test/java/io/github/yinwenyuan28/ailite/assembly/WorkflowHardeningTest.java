@@ -170,14 +170,14 @@ public class WorkflowHardeningTest {
         Workflow workflow = workflow(transport);
         final LlmCancelHandle cancel = new LlmCancelHandle();
 
-        Workflow.Step first = new Workflow.Step() {
+        SyncStep first = new SyncStep() {
             @Override
             public LlmResult execute(LlmGateway gateway) {
                 cancel.cancel();
                 return result("first", LlmStopReason.STOP);
             }
         };
-        Workflow.Step second = new Workflow.Step() {
+        SyncStep second = new SyncStep() {
             @Override
             public LlmResult execute(LlmGateway gateway) {
                 throw new AssertionError("第二步不应执行");
@@ -233,8 +233,8 @@ public class WorkflowHardeningTest {
         Workflow workflow = workflow(new CapturingTransport());
         final LlmCancelHandle cancel = new LlmCancelHandle();
 
-        Workflow.Step first = step(result("first", LlmStopReason.STOP));
-        Workflow.Step second = new Workflow.Step() {
+        SyncStep first = step(result("first", LlmStopReason.STOP));
+        SyncStep second = new SyncStep() {
             @Override
             public LlmResult execute(LlmGateway gateway) {
                 cancel.cancel();
@@ -327,7 +327,7 @@ public class WorkflowHardeningTest {
         Workflow workflow = workflow(new CapturingTransport());
 
         assertThatThrownBy(() -> workflow.run(Collections.singletonList(
-                new Workflow.Step() {
+                new SyncStep() {
                     @Override
                     public LlmResult execute(LlmGateway gateway) {
                         throw new BoomError();
@@ -354,7 +354,7 @@ public class WorkflowHardeningTest {
     @Test
     public void legacyCustomStepStillWorks() {
         Workflow workflow = workflow(new CapturingTransport());
-        Workflow.Step legacy = new Workflow.Step() {
+        SyncStep legacy = new SyncStep() {
             @Override
             public LlmResult execute(LlmGateway gateway) {
                 return result("legacy", LlmStopReason.STOP);
@@ -400,7 +400,7 @@ public class WorkflowHardeningTest {
         CapturingTransport transport = new CapturingTransport();
         Workflow workflow = workflow(transport);
         LlmCall call = llmCall().timeouts(111, 222);
-        Workflow.Step step = Workflow.oneStep(call);
+        SyncStep step = Workflow.oneStep(call);
         call.timeouts(999, 999);
 
         workflow.run(Collections.singletonList(step));
@@ -444,8 +444,8 @@ public class WorkflowHardeningTest {
                 LlmThinkingLevel.OFF, 0L, 1, null);
     }
 
-    private static Workflow.Step step(final LlmResult result) {
-        return new Workflow.Step() {
+    private static SyncStep step(final LlmResult result) {
+        return new SyncStep() {
             @Override
             public LlmResult execute(LlmGateway gateway) {
                 return result;
@@ -453,8 +453,8 @@ public class WorkflowHardeningTest {
         };
     }
 
-    private static Workflow.Step failing(final RuntimeException error) {
-        return new Workflow.Step() {
+    private static SyncStep failing(final RuntimeException error) {
+        return new SyncStep() {
             @Override
             public LlmResult execute(LlmGateway gateway) {
                 throw error;
