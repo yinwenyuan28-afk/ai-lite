@@ -11,14 +11,16 @@ AI Lite 的用户级并发不是"自己造一个虚拟线程"，而是两条互�
 - **JDK 21 原生虚拟线程**：JVM 管理的 stackful 线程，阻塞时自动卸载载体线程。
 - **Kotlin 协程桥接**：编译期 CPS 变换的协作式任务，挂起点不占载体线程。它是 JDK 8 上的重点方案。
 
-两条路径的共同底座是**异步 I/O**：网关先做到"等待响应不占线程"，执行器再决定"用什么跑代码"。
+两条路径的共同底座是**异步回调**：网关先做到"调用线程不阻塞"，执行器再决定"用什么跑代码"。但调用线程不阻塞不等于传输层不占线程——OkHttp 的 `enqueue` 仍会在 Dispatcher 线程上执行 I/O。
 
-| 方案 | JDK 要求 | 等待时是否占线程 | 编程模型 |
+| 方案 | JDK 要求 | 等待时是否占调用方线程 | 编程模型 |
 | --- | --- | --- | --- |
 | 平台线程池 + 阻塞调用 | 8+ | 是 | 最直观，线程数即并发数 |
-| Java 异步 API + `CompletableFuture` | 8+ | 否 | 回调/链式组合 |
+| Java 异步 API + `CompletableFuture` | 8+ | 否（但可能占传输线程） | 回调/链式组合 |
 | Kotlin 协程桥接 | 8+ | 否 | 顺序写法 + suspend |
-| JDK 21 虚拟线程 | 21+ | 否（阻塞时卸载） | 顺序写法 + 阻塞 API |
+| JDK 21 虚拟线程 | 21+ | 否（阻塞时卸载载体） | 顺序写法 + 阻塞 API |
+
+> `Java 异步 API` 这一行只承诺“不占调用方线程”。OkHttp `enqueue` 每个在途请求仍占一个 Dispatcher 线程；只有 NIO/event-loop 传输才能把大量等待压到少量线程。详见 [HTTP 传输并发模型评估](http-transport-concurrency-evaluation.md)。
 
 ---
 
@@ -36,7 +38,7 @@ JDK 8 没有虚拟线程，可选方案只有：
 
 1. **字节码增强的 stackful fiber**：Quasar、Kilim 一类。
 2. **编译器/运行时支持的协作式任务**：Kotlin 协程。
-3. **异步 I/O + 回调/`CompletableFuture`**。
+3. **异步回调 + 状态机（或协程）**。
 4. 自己写调度器和 continuation。
 
 我们选了 2 + 3，并在 JDK 21 上补了 1 的原生版本。第 4 条没有选，原因见第 9 节。
@@ -57,7 +59,7 @@ JDK 8 没有虚拟线程，可选方案只有：
                   LlmTransport.completeAsync
                           │
                   AsyncHttpExecutor
-                  （OkHttp enqueue / JDK8 线程池）
+                  （okhttp / okhttp-virtual / jetty / jdk8）
                           │
                         网络
                           │
@@ -67,10 +69,10 @@ JDK 8 没有虚拟线程，可选方案只有：
 
 两个轴要分开看：
 
-- **I/O 轴**：`AsyncHttpExecutor` 决定"等待时是否占线程"。
-- **执行轴**：`ExecutorProvider` 决定"代码在哪种线程上跑"。
+- **I/O 轴**：`AsyncHttpExecutor` 决定“等待时占哪类线程、占多少”。OkHttp `enqueue` 不占调用线程，但每个在途请求占一个 Dispatcher 线程；只有真正的 NIO/event-loop 实现才能把大量等待压到少量线程。
+- **执行轴**：`ExecutorProvider` 决定“代码在哪种线程上跑”。
 
-协程桥接和虚拟线程都只解决执行轴；真正把 QPS 拉起来的是 I/O 轴。上一节的基准里，纯 Java `CompletableFuture` 和 Kotlin 协程的 QPS 几乎一样，就是这个原因。
+协程桥接和虚拟线程都只解决执行轴；在这个基准里，QPS 主要由 I/O 轴（调用方是否被阻塞）决定。上一节的基准里，纯 Java `CompletableFuture` 和 Kotlin 协程的 QPS 几乎一样，就是这个原因。注意：该基准使用独立调度器模拟响应，不包含 OkHttp Dispatcher 线程。
 
 四种执行器模式（platform / direct / virtual / coroutines）各自执行什么、横向对比和配置字段的生效范围，见 [architecture.md](architecture.md) 的 5.2 节和 [configuration.md](configuration.md) 第 3 节。本节只展开与“用户级线程”直接相关的 virtual 和 coroutines 两个实现。
 
@@ -223,7 +225,7 @@ ai-lite:
 
 两条路径可以独立使用：
 
-- **只用异步网关**：不需要虚拟线程。`oneAsync` 本来就不占线程。
+- **只用异步网关**：不需要虚拟线程。`oneAsync` 本来就不占**调用**线程；传输层线程占用取决于 HTTP 客户端。
 - **有阻塞 SDK / JDBC / 老代码**：把 `mode` 设为 `virtual`，`ExecutorProvider.io()` 返回虚拟线程执行器。异步日志和任何显式通过 `io()` 提交的阻塞任务会跑在虚拟线程上。
 - **两者一起用**：异步网关负责网络等待，虚拟线程负责阻塞工具或阻塞 SDK；载体线程不会被这些阻塞任务拖住。
 
@@ -542,7 +544,7 @@ try {
 
 ### 5.11 测试与基准
 
-- `LlmCoroutinesTest` 用单线程调度器模拟异步 I/O，验证 **2000 个 suspend 调用在 2 个载体线程上完成**，并覆盖取消、错误传播和工具循环。
+- `LlmCoroutinesTest` 用单线程调度器模拟异步响应，验证 **2000 个 suspend 调用在 2 个载体线程上完成**，并覆盖取消、错误传播和工具循环。
 - `benchmark/qps-benchmark` 对平台线程池、Java 异步、Kotlin 协程做同延迟对比。完整实测数据见第 6 节，复现命令和边界说明见该目录的 README。
 
 ---
@@ -581,7 +583,7 @@ try {
 
 ### 6.3 怎么读这组数据
 
-1. **吞吐提升主要来自异步 I/O。** `java-async` 不使用协程，QPS 与 `coroutines-8` 同一量级；协程不是"把 I/O 变快"的魔法。
+1. **吞吐提升主要来自“调用线程不再阻塞”。** `java-async` 不使用协程，QPS 与 `coroutines-8` 同一量级；协程不是"把 I/O 变快"的魔法。基准用 fake transport 模拟延迟，真实 OkHttp 仍受 Dispatcher 线程数限制。
 2. **协程解决的是编程模型。** 它让你用顺序写法表达多步调用，同时保留挂起能力；取消、超时、结构化并发也比回调链自然。
 3. **线程数才是成本差异。** 同样的 QPS 量级，`coroutines-8` 只占 26 个线程，`platform-pool-1000` 占 1017 个。线程栈、上下文切换和内存都会随线程数增长。
 4. **8 线程池是"稳定但低"的基线。** 128.7 QPS 不是实现问题，而是"线程数 / 延迟"的物理上限。
@@ -671,45 +673,60 @@ Kotlin 协程把"保存/恢复"交给了编译器，运行时只需要一个调�
 
 ### 10.1 OkHttp 的并发上限
 
-这是实际部署最容易忽略的一点。OkHttp 4.x 的 `Dispatcher` 默认：
+这是实际部署最容易忽略的一点。默认 `okhttp` 使用 OkHttp 4.x 的 `Dispatcher`：
 
 - `maxRequests = 64`
 - `maxRequestsPerHost = 5`
 
-也就是说，默认情况下对同一个 provider 主机最多只有 **5 个并发请求**。协程开得再多，也会卡在这里。高并发场景请自建 client：
+也就是说，默认情况下对同一个 provider 主机最多只有 **5 个并发请求**。协程开得再多，也会卡在这里。可以直接用配置调整：
 
-```java
-Dispatcher dispatcher = new Dispatcher();
-dispatcher.setMaxRequests(512);
-dispatcher.setMaxRequestsPerHost(256);
-
-OkHttpClient client = new OkHttpClient.Builder()
-        .dispatcher(dispatcher)
-        .connectionPool(new ConnectionPool(200, 5, TimeUnit.MINUTES))
-        .build();
-
-new OkHttpExecutor(client);
+```yaml
+ai-lite:
+  http:
+    transport: okhttp
+    dispatcher:
+      max-requests: 512
+      max-requests-per-host: 256
 ```
+
+也可以自建 client 并交给 `new OkHttpExecutor(client)`；这时 Starter 不会覆盖用户 Bean。
 
 不要盲目调到几千：服务端限流、连接池、文件描述符和带宽都会成为新瓶颈。
 
-### 10.2 流式调用的线程占用
+### 10.2 传输层线程模型
 
-非流式异步请求在等待响应时不占 dispatcher 线程；流式 SSE 在响应到达后会占一个 dispatcher 线程读取事件，直到流结束。长流很多时，`maxRequests` 要相应放大，或者接受"一条流一个线程"的成本。
+`ai-lite.http.transport` 决定“等待模型响应时占哪类线程”，与 `ai-lite.executor` 无关：
 
-### 10.3 超时
+| transport | 等待时占用 | 何时选 |
+| --- | --- | --- |
+| `okhttp` | 每个在途请求一个 Dispatcher 平台线程 | 默认；并发几十到一两百 |
+| `okhttp-virtual` | 每个在途请求一个虚拟线程 | JDK 21+；改动最小 |
+| `jetty` | selector + 连接池，少量线程承载大量连接 | JDK 8、Boot 2.1/2.7、高并发流式 |
+| `webclient` | Reactor Netty event loop | 已使用 WebFlux |
+| `ktor-cio` | Ktor CIO selector | Kotlin 项目 |
+
+- B 路径（`okhttp-virtual`）只影响异步入口；`one` / `oneWithRetry` 仍在调用线程上阻塞。
+- C 路径（`jetty`）的同步入口同样阻塞调用线程，异步入口由 Jetty 线程驱动回调。
+- `jetty` 的 connect timeout 是客户端级配置，实现按 connect timeout 缓存客户端；请尽量统一供应商的超时配置。
+- 选择未引入的模块会启动失败，不会静默退回 OkHttp。
+
+### 10.3 流式调用的线程占用
+
+非流式异步请求在等待响应时不占调用线程；OkHttp 的流式 SSE 在响应到达后会占一个 Dispatcher 线程读取事件，直到流结束。长流很多时，`maxRequests` 要相应放大，或者改用 Jetty 这类 NIO 传输，把大量长连接压到少量 selector 线程上。
+
+### 10.4 超时
 
 - `connect-timeout-ms` 控制建连。
 - `read-timeout-ms` 对流式调用是"两次数据之间"的超时。
 - 协程侧再加 `withTimeout` 时，注意它是总时长；两者不要互相替代。
 
-### 10.4 Spring 事务与请求上下文
+### 10.5 Spring 事务与请求上下文
 
 - 不要把事务跨越挂起点。
 - 不要把请求级 ThreadLocal 当作协程上下文。
 - 日志 MDC 用 `MDCContext` 或显式传 traceId。
 
-### 10.5 协程异常与日志
+### 10.6 协程异常与日志
 
 - `await()` 可能抛 `CompletionException`，按需解包。
 - `AsyncLlmCallLogger` 仍然异步落库；协程取消不会阻塞日志线程。

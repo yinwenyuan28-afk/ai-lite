@@ -53,6 +53,17 @@
             <artifactId>ai-lite-session-jdbc</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- 仅在测试里提供可选传输，验证显式选择与 fail-fast。 -->
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-http-jdk8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-http-jetty</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>

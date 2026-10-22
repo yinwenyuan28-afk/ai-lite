@@ -13,21 +13,21 @@ AI Lite 是面向 **Spring Boot 2.x / JDK 8** 存量系统的 AI 接入层，提
 
 ## 轻量并发
 
-JDK 8 没有虚拟线程，但等待模型响应的大部分时间并不需要占住线程：
+JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**；传输层占不占线程取决于所选 HTTP 客户端。
 
 - 单次模型调用入口：`gateway.one`（同步）、`gateway.oneAsync`（future）、`LlmCoroutines.one`（suspend）、`LlmCoroutines.oneAsync`（Java 别名）。
 - 网关还提供 `roundAsync` / `toolLoopAsync`，返回 `CompletableFuture`。
-- OkHttp 适配器用 `enqueue` 做真正的非阻塞请求；Responses 和 Anthropic 的 SSE 也在回调线程解析。
+- OkHttp 适配器用 `enqueue` **让调用线程不阻塞**；实际 socket I/O 和响应解析仍在 OkHttp Dispatcher 线程上执行，每个在途请求占一个 Dispatcher 线程，流式请求会占到流结束。
 - `ai-lite-executor-coroutines` 提供 Kotlin 协程调度器和 suspend 桥接，挂起点不占载体线程。
-- JDK 21 下可切换到 `ai-lite-executor-jdk21` 的真虚拟线程，上层 API 不变。
+- JDK 21 下可切换到 `ai-lite-executor-jdk21` 的真虚拟线程，上层 API 不变；它接管的是 `io()`，**不改变 OkHttp Dispatcher 的线程模型**。
 
-这不是"自己造一个假虚拟线程"：JDK 8 的 stackful fiber 需要字节码增强，代价和维护风险都不适合作为 Starter 的基础设施。这里选择的是**异步 I/O + 协作式协程**，并用测试证明少量载体线程可以承载大量并发调用。
+这不是"自己造一个假虚拟线程"：JDK 8 的 stackful fiber 需要字节码增强，代价和维护风险都不适合作为 Starter 的基础设施。这里选择的是**异步回调 + 协作式协程**：调用线程和协程载体被释放，传输层仍按所选 HTTP 客户端的模型占线程。
 
-实测（3000 次调用、50ms 延迟、8 载体）：协程路径约 3.4 万 QPS、26 个线程；1000 线程池约 1.5 万 QPS、1017 个线程；纯 Java 异步约 4.2 万 QPS、18 个线程。实现细节见 [docs/user-level-concurrency.md](docs/user-level-concurrency.md)，可复现的 QPS 对比见 [benchmark/qps-benchmark](benchmark/qps-benchmark/README.md)。
+实测（3000 次调用、50ms 延迟、8 载体）：协程路径约 3.4 万 QPS、26 个线程；1000 线程池约 1.5 万 QPS、1017 个线程；纯 Java 异步约 4.2 万 QPS、18 个线程。该基准使用独立调度器模拟延迟的 fake transport，测的是业务侧/载体线程，**不包含 OkHttp Dispatcher 线程**；真实 OkHttp 的并发上限见 [docs/user-level-concurrency.md](docs/user-level-concurrency.md) 第 10.1 节。实现细节见 [docs/user-level-concurrency.md](docs/user-level-concurrency.md)，可复现的 QPS 对比见 [benchmark/qps-benchmark](benchmark/qps-benchmark/README.md)。
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 463 个测试通过、0 失败；Redis 不可用时 1 个 Redis 集成测试类整体跳过（可用时该类 18 个用例运行）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环、会话续聊、提示词中心、异步调用和自动装配都已落地。当前 538 个测试用例、0 失败（JDK 8 构建运行 535 个；JDK 21+ 额外运行 3 个虚拟线程 HTTP 用例）；Redis 不可用时 1 个 Redis 集成测试类整体跳过（可用时该类 18 个用例运行）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/configuration.md](docs/configuration.md)。
 
 ## 环境要求
 
@@ -35,6 +35,8 @@ JDK 8 没有虚拟线程，但等待模型响应的大部分时间并不需要�
 - Spring Boot 2.1 ~ 2.7
 - 协程执行器需要 `ai-lite-executor-coroutines`（JDK 8 可用，可选）
 - 虚拟线程执行器需要 JDK 21+（独立模块，可选）
+- NIO 传输需要 `ai-lite-http-jetty`（跨 Boot 2.1/2.7，可选）
+- 虚拟线程 HTTP 传输需要 JDK 21+ 和 `ai-lite-http-okhttp-jdk21`（可选）
 
 ## 模块
 
@@ -43,7 +45,9 @@ JDK 8 没有虚拟线程，但等待模型响应的大部分时间并不需要�
 | `ai-lite-core` | 纯 Java：模型、网关、编排、会话抽象 |
 | `ai-lite-prompt` | 提示词目录、版本、发布回滚、审计与渲染 |
 | `ai-lite-prompt-jdbc` | 提示词 JDBC 存储 |
-| `ai-lite-http-okhttp` | 默认 HTTP 实现（OkHttp 4.12，支持非阻塞） |
+| `ai-lite-http-okhttp` | 默认 HTTP 实现（OkHttp 4.12，调用线程异步；底层仍占 Dispatcher 线程） |
+| `ai-lite-http-okhttp-jdk21` | OkHttp 虚拟线程 Dispatcher（JDK 21 才编译，可选） |
+| `ai-lite-http-jetty` | Jetty 9.4 NIO 传输（跨 Boot 2.1/2.7，可选） |
 | `ai-lite-http-jdk8` | 零依赖 HTTP 实现（HttpURLConnection） |
 | `ai-lite-session-redis` | Redis 会话缓存 |
 | `ai-lite-session-jdbc` | JDBC 会话存储 |
@@ -125,6 +129,33 @@ future.thenAccept(result -> System.out.println(result.getContent()));
 
 `toolLoopAsync` 与 `roundAsync` 的语义和阻塞版本一致。取消时创建 `LlmCancelHandle` 并传给 `oneByStreamAsync` / `toolLoopByStreamAsync`，或者直接取消返回的 future。
 
+### 4.1 选择 HTTP 传输
+
+默认 `okhttp`，现有应用无需改配置。需要减少传输层平台线程时，显式选择 B/C 路径：
+
+```yaml
+ai-lite:
+  http:
+    transport: jetty          # okhttp | okhttp-virtual | jetty | webclient | ktor-cio | jdk8
+```
+
+| transport | 依赖 | 适用 |
+| --- | --- | --- |
+| `okhttp` | 默认 | 通用；等待时占 Dispatcher 平台线程 |
+| `okhttp-virtual` | `ai-lite-http-okhttp-jdk21` | JDK 21+，改动最小 |
+| `jetty` | `ai-lite-http-jetty` | JDK 8 + Boot 2.1/2.7，真 NIO 主路径 |
+| `webclient` / `ktor-cio` | 可选模块 | 已使用 WebFlux / Kotlin 的项目 |
+
+```xml
+<dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-http-jetty</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+选择未引入的模块或未知值会在启动时失败，并给出缺少的依赖或允许值。完整字段、兼容矩阵和线程模型见 [配置参考](docs/configuration.md) 第 4 节。
+
 ### 5. 提示词中心
 
 ```yaml
@@ -183,9 +214,15 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [重试边界](docs/retry.md)：网关不做自动重试，以及对 429/5xx/超时/取消的分类建议。
 - [架构说明](docs/architecture.md)：模块拓扑、调用链、线程与取消模型、扩展点与设计取舍。
 - [夯实单次模型调用入口](docs/夯实单次模型调用入口-plan.md)：单次模型调用入口的 parity、L1/L2 取消、异常与重试边界。
+- [夯实 oneWithRetry](docs/夯实oneWithRetry-plan.md)：单次模型调用的显式重试、错误分类、退避与取消。
+- [夯实 Workflow 顺序执行器](docs/夯实Workflow顺序执行器-plan.md)：顺序执行器的原则、预校验、取消、失败定位与边界契约。
+- [夯实 AgentLoop 一次性执行](docs/夯实AgentLoop一次性执行-plan.md)：一次性 Agent 循环的终态、钩子、取消、工具语义与行业对照。
 - [Agent Loop 发给 LLM 的上下文](docs/llm-context.md)：每轮请求组成、thinking 字段和协议差异。
 - [配置参考](docs/configuration.md)：所有 `ai-lite.*` 字段。
 - [用户级线程实现](docs/user-level-concurrency.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
+- [HTTP 传输并发模型评估](docs/http-transport-concurrency-evaluation.md)：OkHttp Dispatcher、JDK 21 虚拟线程与 NIO 传输的取舍。
+- [夯实 HTTP 传输并发（B/C 双路径）](docs/夯实HTTP传输并发-plan.md)：`okhttp-virtual`、Jetty、WebClient/Ktor 的配置选择、模块设计与验收。
+- [夯实回调执行策略](docs/夯实回调执行策略-plan.md)：用户回调与 Agent 钩子的串行执行、队列/取消和 afterRun 终态。
 - [编排层异步对抗性测试设计](docs/testing/README.md)：103 个竞态/异常用例，按 AgentLoop、会话层、网关拆分。
 - [QPS 基准](benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
 
@@ -214,7 +251,7 @@ mvn -B verify
 3. **配置驱动。** 新增 OpenAI 兼容供应商只改 YAML；新增协议才加适配器。
 4. **治理优先。** 未登记的 `biz-id` 不发请求、不记记录；调用记录不含提示词和密钥。
 5. **老系统友好。** JDK 8 字节码，Boot 2.1 可用，不使用 `@AutoConfiguration` 等新 API。
-6. **并发不靠堆线程。** JDK 8 用异步 I/O 和协程，JDK 21 无缝切到虚拟线程。
+6. **并发不靠堆线程。** JDK 8 用异步回调 + 协程释放调用线程和载体线程；JDK 21 可切到虚拟线程；传输层线程模型取决于 HTTP 客户端。
 
 ## 许可证
 

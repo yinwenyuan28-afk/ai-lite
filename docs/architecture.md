@@ -81,7 +81,7 @@ flowchart LR
 | `AiLiteConfig` | `core/config` | 纯 POJO 配置模型：业务白名单、供应商、profile、执行器、会话 |
 | `ModelResolver` | `core/config` | 把 `LlmCall` 解析成 `ResolvedModel`，校验业务 id 与协议 |
 | `LlmTransport` | `core/llm` | 协议适配器 SPI：同步 `complete`，可选异步 `completeAsync` |
-| `HttpExecutor` / `AsyncHttpExecutor` | `core/http` | HTTP SPI：同步、流式、非阻塞、非阻塞流式 |
+| `HttpExecutor` / `AsyncHttpExecutor` | `core/http` | HTTP SPI：同步、流式、异步回调、异步流式 |
 | `LlmGateway` | `core/llm` | 统一入口：`one` / `round` / `toolLoop` 及对应异步版本 |
 | `ToolExecutor` | `core/llm` | 工具批量执行 SPI，网关的 `toolLoop` 使用 |
 | `AgentLoop` | `core/assembly` | 多轮工具循环 + 7 个生命周期钩子 |
@@ -252,7 +252,7 @@ sequenceDiagram
 
 #### 5.2.1 它执行什么
 
-异步模型调用由 `CompletableFuture` 和 HTTP 回调驱动，等待响应时不占 `io()`。提交到 `io()` 的是那些没有非阻塞 API、只能占住线程的工作：
+异步模型调用由 `CompletableFuture` 和 HTTP 回调驱动，等待响应时不占 `io()`。**但这不等于不占线程**：OkHttp 的 `enqueue` 只释放调用线程，实际 I/O、读 body 和解析仍在它的 Dispatcher 线程上执行；流式请求会占住一个 Dispatcher 线程直到流结束。提交到 `io()` 的是那些没有异步 API、只能占住线程的工作：
 
 | 触发点 | 提交到 `io()` 的任务 | 代码位置 |
 | --- | --- | --- |
@@ -293,7 +293,7 @@ io 线程：toolsFuture.whenComplete
 
 **不在 `io()` 上执行的工作：**
 
-- 模型网络等待。OkHttp 用 `enqueue`，响应在 OkHttp Dispatcher 线程上完成 future。
+- 模型网络等待。OkHttp 用 `enqueue`，调用线程不阻塞；响应在 OkHttp Dispatcher 线程上完成 future。每个在途请求占一个 Dispatcher 线程，流式请求占至流结束；默认 `maxRequests=64`、`maxRequestsPerHost=5`。
 - 协程续体。`coroutines` 模式下协程走 `dispatcher()`；`io()` 只是同一个载体池的阻塞视图。
 - 大部分生命周期钩子。`afterModel`、`afterTurn`、`afterRun` 跑在完成 future 的线程上；`beforeRun` 和第一轮 `beforeModel` 跑在调用 `runAsync` 的线程上。只有 `runTools` 内的 `beforeTool` / `afterTool` 跟着工具任务走 `io()`。
 - 网关 `toolLoop` 的默认工具执行。`ToolExecutor.executeAsync` 的默认实现是裸 `CompletableFuture.supplyAsync`，落在 `ForkJoinPool.commonPool()`；只有 `AgentLoop` 的工具路径明确使用 `io()`。走网关 `toolLoop` 且工具有阻塞时，需要自定义 `ToolExecutor.executeAsync`。
@@ -409,7 +409,7 @@ io()               finish：store.save + store.find
 
 常见误区：
 
-1. **“换 virtual/coroutines 会让模型 QPS 更高。”** 不会。纯模型等待不占线程，异步网关已经解决；执行器只影响阻塞副作用任务。
+1. **“换 virtual/coroutines 会让模型 QPS 更高。”** 不会。纯模型等待不占调用线程；传输层仍按 HTTP 客户端模型占线程（OkHttp 占 Dispatcher 线程），执行器只影响阻塞副作用任务。
 2. **“`mode=virtual` 会让同步 API 变成异步。”** 不会，它只替换 `io()` 的实现。
 3. **“协程模式下所有代码都自动挂起。”** 不会，只有 `suspend` 函数在挂起点让出载体；阻塞调用照样占线程。
 4. **“`direct` 适合生产高并发。”** 不适合，它会把本该并行的阻塞工作串行压到调用线程上。
@@ -597,7 +597,7 @@ JDBC 自动装配在 `JdbcTemplateAutoConfiguration` 之后、`AiLiteSessionAuto
 | SPI | 默认实现 | 替换方式 |
 | --- | --- | --- |
 | `LlmTransport` | 三个内置协议 | 实现 `api()` + `complete`，注册为 Bean |
-| `HttpExecutor` | OkHttp / JDK8 | 实现同步接口；需要非阻塞时同时实现 `AsyncHttpExecutor` |
+| `HttpExecutor` | OkHttp / OkHttp-Virtual / Jetty / JDK8 | 实现同步接口；需要异步回调时同时实现 `AsyncHttpExecutor`。Starter 按 `ai-lite.http.transport` 选择 |
 | `ToolExecutor` | `SequentialToolExecutor` | 实现批量执行；必须保证结果顺序与入参一致 |
 | `ExecutorProvider` | Platform / Direct / Virtual / Coroutines | 实现 `io()`，交给 Starter 或手动注入 |
 | `AgentSessionStore` | InMemory / JDBC | 实现 `find/save/delete/exists` |
@@ -609,7 +609,7 @@ JDBC 自动装配在 `JdbcTemplateAutoConfiguration` 之后、`AiLiteSessionAuto
 
 ## 13. 测试策略
 
-当前全量 464 个用例（Redis 不可用时其中 1 个集成测试类跳过），覆盖：
+当前全量 503 个用例（Redis 不可用时其中 1 个集成测试类跳过），覆盖：
 
 - 网关同步/异步/流式、取消、错误包装、工具循环。
 - AgentLoop 的生命周期顺序、拒绝/停止共识、多轮工具、取消、回调异常出口。
@@ -633,7 +633,7 @@ JDBC 自动装配在 `JdbcTemplateAutoConfiguration` 之后、`AiLiteSessionAuto
 - **会话落盘与模型调用不在同一个事务里。** 模型已经产生费用后，落盘失败只能由调用方重试；`finish` 中 save 成功但读回失败属于部分成功，调用方需要按业务决定是否重试。
 - **跨轮 thinking 默认不回放。** 同一轮工具循环内会回放；跨 `resume` 默认丢弃，避免不兼容协议和额外 token。
 - **JDK 8 下没有原生虚拟线程。** `virtual` 模式需要 JDK 21 运行时；`coroutines` 模式需要 Kotlin 依赖。两者都是可选模块。
-- **默认 `LlmTransport.completeAsync` 仍可能落到 commonPool。** 内置完整传输会覆盖为真正的非阻塞路径；自定义传输如果只有阻塞实现，应自己覆盖 `completeAsync` 或改用 `AsyncHttpExecutor`。
+- **默认 `LlmTransport.completeAsync` 仍可能落到 commonPool。** 内置完整传输会覆盖为异步回调路径；调用线程不阻塞，但 OkHttp 仍在 Dispatcher 线程执行 I/O。自定义传输如果只有阻塞实现，应自己覆盖 `completeAsync` 或改用 `AsyncHttpExecutor`，并明确它占哪类线程。
 
 ---
 

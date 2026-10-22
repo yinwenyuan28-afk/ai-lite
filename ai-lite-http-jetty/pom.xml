@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.github.yinwenyuan28-afk</groupId>
+        <artifactId>ai-lite-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>ai-lite-http-jetty</artifactId>
+    <name>AI Lite HTTP Jetty</name>
+    <description>NIO HTTP transport backed by Jetty 9.4, compatible with Spring Boot 2.1 and 2.7.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-core</artifactId>
+        </dependency>
+        <!-- 版本由 Boot BOM 管理：2.1 为 9.4.22，2.7 为 9.4.53。 -->
+        <dependency>
+            <groupId>org.eclipse.jetty</groupId>
+            <artifactId>jetty-client</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>mockwebserver</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

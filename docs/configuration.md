@@ -10,6 +10,7 @@ ai-lite:
   enabled: true
   llm: { ... }
   executor: { ... }
+  http: { ... }
   session: { ... }
   prompt: { ... }
 ```
@@ -159,7 +160,99 @@ executor:
 
 注意：`direct` 和 `virtual` 会忽略所有池字段；`coroutines` 只使用 `core-size` 和 `thread-name-prefix`，`max-size`、`queue-capacity`、`keep-alive-seconds`、`rejection-policy` 不生效。`platform` 默认 `abort`，队列满会拒绝会话加载/落盘；异步调用日志会吞掉拒绝并打 warn，不影响主调用。
 
-## 4. 会话 `ai-lite.session`
+## 4. HTTP 传输 `ai-lite.http`
+
+模型请求的 HTTP 客户端与 `ai-lite.executor` 相互独立：前者决定“等待网络时占哪类线程”，后者决定“工具、日志、会话落盘在哪里跑”。默认 `okhttp`，与旧版本行为一致。
+
+```yaml
+http:
+  transport: okhttp          # okhttp | okhttp-virtual | jetty | webclient | ktor-cio | jdk8
+  dispatcher:
+    max-requests: 64
+    max-requests-per-host: 5
+  jetty:
+    max-connections-per-destination: 64
+    threads: 0               # 0 表示使用 Jetty 默认线程池
+  ktor:
+    max-connections: 1000
+    max-connections-per-route: 100
+    pipelining: true
+```
+
+| 字段 | 默认值 | 生效范围 | 说明 |
+| --- | --- | --- | --- |
+| `transport` | `okhttp` | 全部 | 选择 HTTP 实现；大小写不敏感 |
+| `dispatcher.max-requests` | `64` | `okhttp`、`okhttp-virtual` | 全局在途请求上限 |
+| `dispatcher.max-requests-per-host` | `5` | `okhttp`、`okhttp-virtual` | 单 host 在途请求上限 |
+| `jetty.max-connections-per-destination` | Jetty 默认 | `jetty` | 单目标连接数上限 |
+| `jetty.threads` | Jetty 默认 | `jetty` | 自定义 Jetty 线程池大小；0 表示不覆盖 |
+| `ktor.max-connections` | 引擎默认 | `ktor-cio` | 最大连接数 |
+| `ktor.max-connections-per-route` | 引擎默认 | `ktor-cio` | 单路由连接数 |
+| `ktor.pipelining` | 引擎默认 | `ktor-cio` | 是否复用连接 |
+
+### 4.1 选择语义
+
+| transport | JDK | 依赖 | 线程模型 |
+| --- | --- | --- | --- |
+| `okhttp` | 8+ | `ai-lite-http-okhttp`（Starter 默认引入） | 每个在途请求占一个 Dispatcher 平台线程 |
+| `okhttp-virtual` | 21+ | `ai-lite-http-okhttp-jdk21` | 每个在途请求一个虚拟线程；同步入口仍阻塞调用线程 |
+| `jetty` | 8+ | `ai-lite-http-jetty` | Jetty selector + 连接池，少量线程承载大量连接 |
+| `webclient` | 8+ | `ai-lite-http-webclient` + `spring-webflux` | Reactor Netty event loop（可选路径） |
+| `ktor-cio` | 8+ | `ai-lite-http-ktor-cio` | Ktor CIO selector（可选路径） |
+| `jdk8` | 8+ | `ai-lite-http-jdk8` | 把阻塞 `HttpURLConnection` 交给线程池 |
+
+规则：
+
+- 选择了未引入的模块，启动直接失败，错误消息会列出缺少的依赖。
+- 选择了未知值，启动直接失败，错误消息会列出允许值。
+- 用户自己提供 `HttpExecutor` / `AsyncHttpExecutor` Bean 时优先使用用户 Bean，`transport` 只打 WARN。
+- 与当前 `transport` 不匹配的显式配置（例如给 Jetty 配 `dispatcher.*`）会在启动时 WARN。
+- `jdk8` 要真正去掉 OkHttp，需要从 Starter 排除 `ai-lite-http-okhttp`，引入 `ai-lite-http-jdk8`，并显式设置 `transport: jdk8`。
+
+`okhttp-virtual` 需要 JDK 21 和独立模块：
+
+```xml
+<dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-http-okhttp-jdk21</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+```yaml
+ai-lite:
+  http:
+    transport: okhttp-virtual
+```
+
+> JDK 21–23 的 `synchronized` 可能 pin 载体线程，高并发流式场景建议 JDK 24+。
+> `max-requests-per-host` 仍然限流：虚拟线程让等待更便宜，但不会提高供应商配额。
+
+Jetty 作为跨 Boot 2.1/2.7 的 NIO 主路径：
+
+```xml
+<dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-http-jetty</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+```yaml
+ai-lite:
+  http:
+    transport: jetty
+    jetty:
+      max-connections-per-destination: 64
+```
+
+> Jetty 9.4 已 EOL，安全要求高的项目应评估替代实现；本实现默认关闭重定向、
+> 不使用 proxy auth/Basic auth，并强制 `Accept-Encoding: identity` 避免 SSE 被 gzip 缓冲。
+> 更多背景与风险见 [夯实 HTTP 传输并发](夯实HTTP传输并发-plan.md)。
+
+用户回调与 Agent 钩子的线程策略不属于本节，见 [夯实回调执行策略](夯实回调执行策略-plan.md)。
+
+## 5. 会话 `ai-lite.session`
 
 ```yaml
 session:
@@ -182,7 +275,7 @@ session:
 `ai-lite.session.jdbc.table-name` 指定。引入 `ai-lite-session-redis` 后，
 自行提供一个 `SessionCache` Bean，并用 `CachingAgentSessionStore` 包装持久层。
 
-## 5. 提示词 `ai-lite.prompt`
+## 6. 提示词 `ai-lite.prompt`
 
 ```yaml
 prompt:
@@ -211,7 +304,7 @@ prompt:
 渲染优先级：生效版本 → 调用方兜底 → 配置默认模板。数据库不可用时 `render`
 不会抛异常；只有完全没有系统模板时才报错。
 
-## 6. 密钥处理
+## 7. 密钥处理
 
 推荐顺序：
 
@@ -221,7 +314,7 @@ prompt:
 
 不推荐把密钥写进 `application.yml` 或代码。开源仓库里不要出现任何真实密钥。
 
-## 7. 常见供应商示例
+## 8. 常见供应商示例
 
 ### vLLM / Qwen
 

@@ -16,6 +16,7 @@ public final class AiLiteConfig {
     private boolean enabled = true;
     private Llm llm = new Llm();
     private Executor executor = new Executor();
+    private Http http = new Http();
     private Session session = new Session();
 
     public boolean isEnabled() {
@@ -40,6 +41,14 @@ public final class AiLiteConfig {
 
     public void setExecutor(Executor executor) {
         this.executor = executor == null ? new Executor() : executor;
+    }
+
+    public Http getHttp() {
+        return http;
+    }
+
+    public void setHttp(Http http) {
+        this.http = http == null ? new Http() : http;
     }
 
     public Session getSession() {
@@ -408,6 +417,138 @@ public final class AiLiteConfig {
 
         public void setRejectionPolicy(String rejectionPolicy) {
             this.rejectionPolicy = rejectionPolicy;
+        }
+    }
+
+    /**
+     * 模型 HTTP 传输配置。
+     *
+     * <p>只影响模型请求使用的 HTTP 客户端，与 {@link Executor} 里管工具、日志、
+     * 会话的线程池相互独立。默认值保持 OkHttp 行为不变。</p>
+     */
+    public static final class Http {
+
+        /** okhttp | okhttp-virtual | jetty | webclient | ktor-cio | jdk8。 */
+        private String transport = "okhttp";
+        private Dispatcher dispatcher = new Dispatcher();
+        private Jetty jetty = new Jetty();
+        private Ktor ktor = new Ktor();
+
+        public String getTransport() {
+            return transport;
+        }
+
+        public void setTransport(String transport) {
+            this.transport = transport;
+        }
+
+        public Dispatcher getDispatcher() {
+            return dispatcher;
+        }
+
+        public void setDispatcher(Dispatcher dispatcher) {
+            this.dispatcher = dispatcher == null ? new Dispatcher() : dispatcher;
+        }
+
+        public Jetty getJetty() {
+            return jetty;
+        }
+
+        public void setJetty(Jetty jetty) {
+            this.jetty = jetty == null ? new Jetty() : jetty;
+        }
+
+        public Ktor getKtor() {
+            return ktor;
+        }
+
+        public void setKtor(Ktor ktor) {
+            this.ktor = ktor == null ? new Ktor() : ktor;
+        }
+    }
+
+    /**
+     * OkHttp Dispatcher 的并发上限。null 表示使用默认值 64/5。
+     */
+    public static final class Dispatcher {
+
+        private Integer maxRequests;
+        private Integer maxRequestsPerHost;
+
+        public Integer getMaxRequests() {
+            return maxRequests;
+        }
+
+        public void setMaxRequests(Integer maxRequests) {
+            this.maxRequests = maxRequests;
+        }
+
+        public Integer getMaxRequestsPerHost() {
+            return maxRequestsPerHost;
+        }
+
+        public void setMaxRequestsPerHost(Integer maxRequestsPerHost) {
+            this.maxRequestsPerHost = maxRequestsPerHost;
+        }
+    }
+
+    /**
+     * Jetty 传输配置。null 表示使用 Jetty 默认值。
+     */
+    public static final class Jetty {
+
+        private Integer maxConnectionsPerDestination;
+        /** 0 或 null 表示不创建自定义线程池，使用 Jetty 默认。 */
+        private Integer threads;
+
+        public Integer getMaxConnectionsPerDestination() {
+            return maxConnectionsPerDestination;
+        }
+
+        public void setMaxConnectionsPerDestination(Integer maxConnectionsPerDestination) {
+            this.maxConnectionsPerDestination = maxConnectionsPerDestination;
+        }
+
+        public Integer getThreads() {
+            return threads;
+        }
+
+        public void setThreads(Integer threads) {
+            this.threads = threads;
+        }
+    }
+
+    /**
+     * Ktor CIO 传输配置。只有引入可选模块后才生效。
+     */
+    public static final class Ktor {
+
+        private Integer maxConnections;
+        private Integer maxConnectionsPerRoute;
+        private Boolean pipelining;
+
+        public Integer getMaxConnections() {
+            return maxConnections;
+        }
+
+        public void setMaxConnections(Integer maxConnections) {
+            this.maxConnections = maxConnections;
+        }
+
+        public Integer getMaxConnectionsPerRoute() {
+            return maxConnectionsPerRoute;
+        }
+
+        public void setMaxConnectionsPerRoute(Integer maxConnectionsPerRoute) {
+            this.maxConnectionsPerRoute = maxConnectionsPerRoute;
+        }
+
+        public Boolean getPipelining() {
+            return pipelining;
+        }
+
+        public void setPipelining(Boolean pipelining) {
+            this.pipelining = pipelining;
         }
     }
 

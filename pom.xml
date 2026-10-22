@@ -56,6 +56,7 @@
         <module>ai-lite-prompt</module>
         <module>ai-lite-prompt-jdbc</module>
         <module>ai-lite-http-okhttp</module>
+        <module>ai-lite-http-jetty</module>
         <module>ai-lite-http-jdk8</module>
         <module>ai-lite-session-redis</module>
         <module>ai-lite-session-jdbc</module>
@@ -99,6 +100,16 @@
             <dependency>
                 <groupId>io.github.yinwenyuan28-afk</groupId>
                 <artifactId>ai-lite-http-jdk8</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-http-jetty</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-http-okhttp-jdk21</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
@@ -192,6 +203,7 @@
             </activation>
             <modules>
                 <module>ai-lite-executor-jdk21</module>
+                <module>ai-lite-http-okhttp-jdk21</module>
             </modules>
         </profile>
     </profiles>
