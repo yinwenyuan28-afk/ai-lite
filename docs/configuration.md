@@ -1,7 +1,8 @@
 # 配置参考
 
 所有配置都在 `ai-lite` 前缀下。完整示例见 `ai-lite-demo/src/main/resources/application.yml`。
-业务 API 的用法见 [api-usage.md](api-usage.md)。
+业务 API 的用法见 [api-usage.md](api-usage.md)；只关心单次调用和 HTTP 客户端时，见
+[单次调用与 HTTP 客户端使用指南](single-call-http-usage.md)。
 
 ## 1. 顶层
 

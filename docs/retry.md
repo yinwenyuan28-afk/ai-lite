@@ -218,6 +218,7 @@ LlmResult callWithRetry(LlmGateway gateway, LlmCall call, int maxAttempts,
 ## 7. 相关文档
 
 - [单次模型调用入口](entry-points.md)
+- [单次调用与 HTTP 客户端使用指南](single-call-http-usage.md)
 - [架构说明](architecture.md)
 - [用户级并发与取消](user-level-concurrency.md)
 - [夯实单次模型调用入口](夯实单次模型调用入口-plan.md)

@@ -206,6 +206,7 @@ gateway.oneWithRetryAsync(call, policy, cancel)     // 异步，退避在 ai-lit
 ## 7. 相关文档
 
 - [API 使用指南](api-usage.md)
+- [单次调用与 HTTP 客户端使用指南](single-call-http-usage.md)
 - [架构说明](architecture.md)
 - [用户级并发与取消](user-level-concurrency.md)
 - [重试边界](retry.md)
