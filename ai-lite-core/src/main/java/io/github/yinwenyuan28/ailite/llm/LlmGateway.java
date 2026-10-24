@@ -285,6 +285,21 @@ public final class LlmGateway {
     }
 
     /**
+     * 只发一轮并带上工具声明，但不执行工具，并允许其他线程中止。
+     *
+     * <p><b>不要再加 {@code round(call, tools, Integer)} 重载</b>：那样
+     * {@code round(call, tools, null)} 会产生二义性。最大轮数只属于 toolLoop。</p>
+     *
+     * @param call   调用参数
+     * @param tools  工具列表
+     * @param cancel 取消句柄，可为 null
+     * @return 模型返回，可能带 toolCalls
+     */
+    public LlmResult round(LlmCall call, List<LlmTool> tools, LlmCancelHandle cancel) {
+        return invoke(call, tools, null, MODE_ROUND, false, null, cancel);
+    }
+
+    /**
      * 非阻塞问一次。等待模型响应时不占调用线程，适合 JDK 8 下高并发接入。
      *
      * @param call 调用参数
@@ -292,6 +307,14 @@ public final class LlmGateway {
      */
     public CompletableFuture<LlmResult> oneAsync(LlmCall call) {
         return invokeAsync(call, null, null, MODE_ONE, false, null, null);
+    }
+
+    /**
+     * @return 重试/超时共用的调度器；编排层（如 AgentLoop 的整轮超时）挂一次性任务用。
+     * Starter 注入自定义 aiLiteRetryScheduler bean 时这里返回的就是该实例。
+     */
+    public ScheduledExecutorService retryScheduler() {
+        return retryScheduler;
     }
 
     /**
@@ -473,6 +496,14 @@ public final class LlmGateway {
         final LlmCancelHandle effectiveCancel = cancel == null ? new LlmCancelHandle() : cancel;
         AsyncRun run = new AsyncRun(call, bizId, model, transcript, tools, declareTools,
                 executeTools, limit, stream, onDelta, effectiveCancel);
+        // AL-H05：非合作 transport 不 bindAbort 时 cancel 无法唤醒挂起的 future；
+        // 取消监听器在取消方线程主动收敛。句柄是 one-shot 生命周期，无需显式解绑。
+        effectiveCancel.onCancel(new Runnable() {
+            @Override
+            public void run() {
+                run.cancelledByListener();
+            }
+        });
         run.result.whenComplete((value, error) -> {
             if (run.result.isCancelled()) {
                 // future.cancel(true) 不是终态：底层要 abort，调用记录也要留下一条 aborted。
@@ -896,6 +927,19 @@ public final class LlmGateway {
             this.stream = stream;
             this.onDelta = onDelta;
             this.cancel = cancel;
+        }
+
+        /**
+         * 取消监听收敛（AL-H05）：transport 不配合 abort 时由取消方线程主动完成
+         * result，调用方不再永久挂起；result 已完成时是 no-op，与正常完成路径无竞态。
+         */
+        private void cancelledByListener() {
+            if (result.isDone()) {
+                return;
+            }
+            recordTerminal(attempt, completed == 0 ? 0 : completed,
+                    LlmStopReason.ABORTED, 0, 0L, null);
+            result.complete(result(attempt, last, LlmStopReason.ABORTED, completed));
         }
 
         private void next() {

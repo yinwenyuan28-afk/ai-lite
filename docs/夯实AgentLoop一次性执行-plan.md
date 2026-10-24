@@ -1,6 +1,6 @@
 # 夯实 AgentLoop 一次性执行
 
-**状态（2026-10-22）：现状审计、Python/TypeScript 调研、Java 生态调研均已完成，计划可进入评审/实现。** 本计划只覆盖一次性、无上下文持久化的 `AgentLoop.run` / `runAsync`，不涉及 `AgentSessionLoop`、会话存储或 Workflow。
+**状态（2026-10-24）：同步 `run` 已实现并回归通过（Phase 0–5 全部完成，见第 11 节执行记录）；异步 `runAsync` 已拆分至独立计划《夯实AgentLoop异步执行器-plan.md》（含 AL-H04/H05、decideRound 共享与 AL-A1–A3）。** 本计划只覆盖一次性、无上下文持久化的 `AgentLoop`，不涉及 `AgentSessionLoop`、会话存储或 Workflow。
 
 一句话总纲：
 
@@ -116,8 +116,8 @@
 | AL-H01 | 同步 `run` 调 `gateway.round(call, tools)`，没有 cancel 重载 | 在途取消无效，只能等读超时；`readTimeout=0` 时永久阻塞 |
 | AL-H02 | 取消发生在模型返回后、工具启动前，仍执行全部工具 | 取消后产生真实业务副作用 |
 | AL-H03 | `afterRun` 抛异常覆盖成功结果 | 同步丢弃 `LlmResult`，异步把成功结果变成异常 |
-| AL-H04 | 已完成 future 触发同步递归 `next()`，且只捕获 `RuntimeException` | 多轮 CONTINUE 可 `StackOverflowError`；Error 可能导致 future 永不完成 |
-| AL-H05 | 非合作 transport 下 `handle.cancel()` 不能终结 future | `roundFuture` 永久 pending，调用方挂起 |
+| AL-H04 | 已完成 future 触发同步递归 `next()`，且只捕获 `RuntimeException` | 多轮 CONTINUE 可 `StackOverflowError`；Error 可能导致 future 永不完成 | **仅异步，本轮不做** |
+| AL-H05 | 非合作 transport 下 `handle.cancel()` 不能终结 future | `roundFuture` 永久 pending，调用方挂起 | **仅异步，本轮不做** |
 
 **P1 重点**：
 
@@ -179,6 +179,24 @@
 
 **继续条件**：由“本轮是否还有 toolCalls”决定，`stopReason` 只作诊断。模型返回 `STOP` 但带 `toolCalls` 时仍执行工具并继续；这是 Spring AI、LangChain4j、ADK 的共同做法。
 
+**例外（审查补充，必须实现）**：`stopReason` 为 `ABORTED` 或 `ERROR` 时，即使 `toolCalls` 非空也**不执行工具**。
+网关在 `MODE_ROUND` 下遇到取消会带着 toolCalls 返回 `ABORTED`，若不排除会执行真实副作用。
+
+完整判定：`shouldRunTools = toolCalls 非空 && stopReason ∉ {ABORTED, ERROR} && !ctx.isCancelled()`。
+
+**终态矩阵（审查补充，覆盖全部组合）**：
+
+| toolCalls | stopReason | 最后一轮 | afterTurn | 终态 |
+| --- | --- | --- | --- | --- |
+| 非空 | 非 ABORTED/ERROR | 否 | 任意 | 执行工具 → 下一轮 |
+| 非空 | 任意 | 是 | STOP | `STOP` + 合成 tool_result |
+| 非空 | 任意 | 是 | 其它 | `MAX_ROUNDS` + 合成 tool_result |
+| 空 | STOP | — | STOP / CONTINUE | `STOP` / 下一轮或 `MAX_ROUNDS` |
+| 空 | 任意 | — | MODEL_DECIDES | 模型 stopReason（LENGTH / CONTEXT_LENGTH_EXCEEDED / ERROR 原样） |
+| 任意 | 取消标志 / ABORTED | — | — | `ABORTED`（最高优先级） |
+
+“模型 STOP + toolCalls + 最后一轮”由 `afterTurn` 决定：有 `STOP` 决策就是 `STOP`，否则 `MAX_ROUNDS`。
+
 | 场景 | stopReason | rounds | content | toolCalls |
 | --- | --- | --- | --- | --- |
 | 模型正常停止且无 toolCalls | `STOP` / `LENGTH` | 实际请求数 | 最后一轮 | 最后一轮 |
@@ -189,11 +207,32 @@
 | 钩子/工具执行器异常 | 抛异常（不构造结果） | — | — | — |
 | `future.cancel` | JDK cancelled | — | — | — |
 
-**最后一轮未执行的 toolCalls**：达到 `MAX_ROUNDS` 或取消导致本轮 toolCalls 未执行时，向 `AgentLoopContext` 追加合成的 tool result（例如“未执行：达到最大轮数/调用已取消”），保证 ctx 历史可被上层复用；返回的 `LlmResult.toolCalls` 仍保留原始调用。
+**未执行 toolCalls 的合成规则（审查修正）**：
+
+达到 `MAX_ROUNDS`、取消、或批次执行到一半被取消时，本轮**所有未执行**的 toolCalls 都要合成
+一条 tool_result（“未执行：达到最大轮数” / “未执行：调用已取消”），不只是最后一轮。
+否则上层复用 `AgentLoopContext` 时会出现 assistant tool_use 没有对应 tool_result 的 dangling 历史。
+
+返回的 `LlmResult.toolCalls` 仍保留原始调用。
+
+异常路径（钩子/执行器故障）**不做合成**：整个 turn 随 run 丢弃，不把半截历史交给上层。
+这是取消与异常的有意差异。
 
 ### 5.2 钩子异常策略
 
-`afterRun` **恰好执行一次**：只要 `beforeRun` 成功进入，无论正常、取消还是异常，都调用一次；新增 `default afterRun(ctx, result, error)`，旧 `afterRun(ctx, result)` 默认委托，成功/取消时 error=null，异常路径 result=null、error=cause。
+`afterRun` **恰好执行一次**：只要 `beforeRun` 成功进入，无论正常、取消还是异常，都调用一次；
+新增 `default afterRun(ctx, result, error)`，旧 `afterRun(ctx, result)` 默认委托，成功/取消时
+error=null，异常路径 result=null、error=cause。
+
+**实现约束（审查补充）**：
+
+- 两个方法都只应在实现类里覆写**一个**；只覆写旧 2 参方法时，新 3 参方法委托它。
+- `run` 必须改成单出口 `try/catch/finally`：现有 6 个 `return finish(...)` 无法保证“恰好一次”，
+  也无法保证钩子/网关异常时 `afterRun` 被执行。
+- `afterRun` 的异常用 `catch (Throwable)` 捕获（含 `AssertionError`），记录后继续下一个钩子；
+  原始结果不被覆盖。原异常可用 `addSuppressed` 保留在诊断里。
+- `finish()` 是同步/异步共用入口，改动会同时生效于 `runAsync`；这是期望行为（异步侧无
+  “afterRun 异常必须外抛”的断言）。
 
 | 钩子 | 异常策略 | 后续钩子 | afterRun |
 | --- | --- | --- | --- |
@@ -209,16 +248,33 @@
 
 ### 5.3 取消边界
 
-- 进入 `beforeRun` 前：已取消 → 直接返回 `ABORTED`，零请求，零 `afterModel`。
+- **审查修正**：`beforeRun` 仍然执行；取消检查放在 `beforeRun` 之后、首轮 `beforeModel` 之前。
+  理由：现有测试 `cancelledBeforeRunReturnsAbortedAndStillCallsAfterRun` 期望 `beforeRun` 和
+  `afterRun` 各执行一次；`beforeRun` 是“run 已开始”的边界。已取消 → 零请求、零 `afterModel`。
 - `beforeModel` 后、发请求前：已取消 → 不请求，不计轮次。
 - 模型返回后、工具启动前：已取消 → 不启动工具，返回 `ABORTED`。
 - **每个工具执行前**：已取消 → 该工具及后续工具都不启动；已启动的工具允许跑完。
 - 工具批次结束后：已取消 → 不再发下一轮。
-- 非合作 transport：由网关在取消时主动以 `ABORTED` 收敛 future，不依赖传输层响应 abort。
-- `future.cancel(true)`：future 进入 cancelled，底层 abort；不产生 `LlmResult`，但 `afterRun` 仍按 5.2 调用一次（result=null, error=CancellationException）。
+- 非合作 transport（**仅异步**，由网关在取消时以 `ABORTED` 收敛 future）：本轮不做。
+  同步 `run` 是阻塞调用，取消只能靠传输层响应 abort 或超时——`LlmCancelHandle` 增加监听
+  无法唤醒一个不调用 `bindAbort` 的阻塞 transport，所以同步验收不含这一项。
+- `future.cancel(true)`（**仅异步**）：future 进入 cancelled，底层 abort；不产生 `LlmResult`，
+  但 `afterRun` 仍按 5.2 调用一次（result=null, error=CancellationException）。
 
 ### 5.4 工具语义
 
+**ToolExecutor SPI 契约（审查补充，必须先写死）**：
+
+- 实现**必须**自行捕获单个工具的业务异常并返回文本；抛出异常视为**执行器级故障**。
+- `AgentLoop` 与 `gateway.toolLoop` 都依赖这条契约；内置 `SequentialToolExecutor` 已满足。
+- `AgentLoop` 逐条调用 `execute(singleton)` 是为了保留 `beforeTool`/`afterTool` 顺序；
+  `toolLoop` 一次调用 `execute(all)`。这是两者唯一的批次粒度差异。
+- 自定义 `ToolExecutor` 若不吞业务异常，`AgentLoop` 会把它当执行器故障中断，与 `toolLoop`
+  的行为不同；文档必须写明，不能静默分叉。
+- 工具异常回喂文本沿用现有文案“工具执行失败”，不追加异常类名，避免打破
+  `LlmGatewayAdversarialTest:236` 的断言；**诊断信息通过日志和 `afterTool` 钩子暴露**。
+
+其余规则：
 - 同一轮多个工具：串行，按模型返回顺序执行；结果顺序与 call id 对齐。
 - `beforeTool` deny：deny-wins，跳过执行；`afterTool` 不调用，写入文档。
 - 工具业务异常：返回 tool_result 文本回喂模型，循环继续；文本包含异常类名和安全摘要，不包含堆栈；记录 toolName/callId/round/cause。
@@ -246,61 +302,66 @@
 
 ## 6. 实施阶段
 
-### Phase 0：契约基线与网关前置（P0）
+**范围声明（2026-10-23 修订）：本轮只实现同步 `run`。** 异步 `runAsync` 的 AL-H04（递归）、
+AL-H05（非合作 transport 收敛）、`LlmCancelHandle` 取消监听全部延后；共享代码的改动必须保证
+`runAsync` 现有测试继续通过。
+**（2026-10-24 更新：同步 Phase 0–5 已全部完成；异步内容已拆分至《夯实AgentLoop异步执行器-plan.md》。）**
 
-- 在 `docs/` 固化 5.1–5.6 的终态、钩子、取消、工具、上下文契约（并入 `api-usage` 与 `architecture`）。
+### Phase 0：网关前置（同步）✅ 已完成（2026-10-24）
+
 - 新增 `LlmGateway.round(LlmCall, List<LlmTool>, LlmCancelHandle)`，复用现有同步 `invoke(..., cancel)`。
-- 网关取消收敛：`LlmCancelHandle` 增加取消监听（additive），`invokeAsync` 注册“取消时以 `ABORTED` 完成 result”，解决非合作 transport 的永久 pending。
-- 验收：预取消零请求；非合作 transport 取消 1 秒内返回 `ABORTED`；现有测试通过。
+- 只加 3 参重载；**不得**再新增 `round(call, tools, Integer)`，否则 `round(c, t, null)` 会歧义。
+- 验收：预取消零请求；现有测试通过。
 
-### Phase 1：不挂起（P0）
+### Phase 1：不挂起（同步，P0）✅ 已完成（2026-10-24）
 
 - `run` 把 `ctx.getCancel()` 传给 `gateway.round(call, tools, cancel)`。
-- `beforeModel` 后、模型返回后、工具启动前各加一次取消检查。
-- `afterRun` 改为观察钩子：无论正常、取消还是异常都恰好执行一次（`beforeRun` 失败除外）；新增 `default afterRun(ctx, result, error)`，逐个 try/catch、记录、继续；不覆盖结果。
-- 异步推进改为 trampoline：`next()` 通过 `executor.io()` 提交，禁止在 `whenComplete` 内递归；所有 future 边界 `catch (Throwable)` 并完成 `result`。
-- 验收：AL-H01–H05 全部有回归测试；同步完成 + 大 maxRounds 不栈溢出；`AssertionError` 不会让 future 挂起；异常/取消路径 `afterRun` 恰好一次。
+- `run` 改为单出口 `try/catch/finally`：用一个局部 `LlmResult outcome`，所有终止分支只赋值不返回；
+  `finally` 里调用一次 `afterRun`。
+- 新增 `AgentLifecycle.afterRun(ctx, result, error)` default 方法，默认委托旧方法。
+- `afterRun` 逐个 `try/catch (Throwable)`，异常只记录、不覆盖结果；`beforeRun` 失败时不调用。
+- 验收：钩子或网关异常时 `afterRun` 恰好一次且原异常仍抛出；`afterRun` 抛异常时成功结果
+  仍返回；现有 22 个测试除明确修正项外全部通过。
 
-### Phase 2：上下文与终止（P1）
+### Phase 2：上下文与终止（同步，P1）✅ 已完成（2026-10-24）
 
-- 继续条件改为“toolCalls 非空”，不再要求 `stopReason == TOOL_USE`。
-- `CONTINUE` 非工具轮追加 assistant 消息。
-- `beforeModel` 取消不计轮次、不调用 `afterModel`。
-- 停止优先级：取消 > STOP > MAX_ROUNDS > 模型；最后一轮 `TOOL_USE + STOP` 返回 `STOP`。
+- 续行条件改为 `toolCalls 非空 && stopReason ∉ {ABORTED, ERROR} && !ctx.isCancelled()`。
+- `CONTINUE` 非工具轮追加 assistant 消息（content + thinking + signature）。
+- 取消检查点：`beforeRun` 之后、每次 `beforeModel` 之后、模型返回之后、每个工具执行之前、
+  工具批次之后。
+- 停止优先级：取消 > STOP > MAX_ROUNDS > 模型；最后一轮 `toolCalls + STOP` 且 `afterTurn` 有
+  STOP 决策时返回 `STOP`，否则 `MAX_ROUNDS`。
 - `CONTINUE` 耗尽返回 `MAX_ROUNDS`。
-- 最后一轮未执行的 toolCalls 向 ctx 追加合成 tool_result。
+- **所有未执行的 toolCalls 都合成 tool_result**（最后一轮、取消、批次中途取消三种情况）。
 - 明确首轮前取消时 provider/model/thinkingLevel 为 null，并写入文档。
-- 验收：第二轮请求包含第一轮 assistant；六组冲突场景终态正确；ctx 历史无 dangling tool call。
+- 验收：第二轮请求包含第一轮 assistant；终态矩阵逐格覆盖；ctx 历史无 dangling tool call。
 
-### Phase 3：工具语义（P1）
+### Phase 3：工具语义（同步，P1）✅ 已完成（2026-10-24）
 
-- 工具异常结构化：toolName/callId/round/cause 记录；回喂文本包含异常类名和安全摘要，不含堆栈。
-- 区分业务失败与执行器故障；执行器故障写 `ERROR` 记录并终止。
-- `beforeTool` deny 不调用 `afterTool`，写入文档并测试。
-- 每个工具执行前检查取消；部分工具批次失败时，run 终止，不发下一轮。
-- 工具列表请求前快照。
-- 与 `gateway.toolLoop` 做 parity 测试；无法统一的行为写入文档。
-- 验收：工具错误可定位、无第二次调用、上下文不残缺。
+- 写死 `ToolExecutor` SPI 契约：实现必须自行捕获单工具业务异常；抛出即执行器故障。
+- `AgentLoop.execute` 的 catch 只处理执行器故障：终止 run，并把 toolName/callId/round/cause
+  写入日志。
+- 业务异常回喂文本保持“工具执行失败”，不追加类名，避免打破既有断言。
+- `beforeTool` deny 不调用 `afterTool`（现状已如此，补测试）。
+- 每个工具执行前检查取消；未启动的工具不启动。
+- 与 `gateway.toolLoop` 的批次粒度差异写入文档，并做 parity 测试（同一个吞异常工具在两条入口
+  下终态一致）。
+- 验收：执行器故障终止一次；业务失败回喂后循环继续；无第二次工具调用。
 
-### Phase 4：钩子与并发（P1）
+### Phase 4：钩子与并发（同步，P1）✅ 已完成（2026-10-24）
 
-- 钩子列表防御性拷贝；工具列表快照。
-- 按 5.2 实现异常策略；`afterRun` 只读。
-- 取消与钩子并发：取消后不再启动新钩子链；已进入的同步钩子允许完成。
-- `future.cancel` 与 `handle.cancel` 的终态差异写入文档和测试。
-- 验收：每个钩子异常用例；并发 run 互不串扰。
+- 钩子列表和工具列表做防御性拷贝。
+- 并发 `run` 互不串扰；每个 run 独立 ctx。
+- 验收：每个钩子异常用例；并发用例。
 
-### Phase 5：校验、记录与文档（P2）
+### Phase 5：测试与文档（P2）✅ 已完成（2026-10-24）
 
-- 入口结构校验与网关业务校验的边界；决定是否暴露 `LlmGateway.validateCall`。
-- 决定记录口径：每轮 `roundNo`、run 级聚合、轮间取消是否补记录。
-- 文档修正：类注释、architecture §6、api-usage、testing 设计中的过期条目。
-- 验收：文档与实现一致；记录回归测试通过。
+- 新增约 15–20 个同步用例；异步专属用例标注为后续。
+- 更新 `api-usage`、`architecture`、`docs/testing/README.md`、README 统计、本计划执行记录。
 
-### Phase 6：测试与全量回归
+### Phase 6：异步——已拆分至独立计划（2026-10-24）
 
-- 新增约 25–30 个用例，覆盖第 7 节矩阵。
-- 全量 `mvn test` 通过，所有异步断言带超时。
+异步 `runAsync` 不再以存根形式挂在本计划。AL-H04（蹦床）、AL-H05（取消监听收敛）、`decideRound` 共享、AL-A1/A2/A3（并行工具 / 执行器 future 自适配 / 整轮超时），以及异步侧专项缺陷（终态优先级错位、CONTINUE 非工具轮不追加 assistant、异常路径不跑 afterRun、hooks 未拷贝）全部移入《夯实AgentLoop异步执行器-plan.md》，含分阶段实施与测试矩阵；调研依据见本文 10.4。
 
 ---
 
@@ -344,7 +405,7 @@
 - 会话持久化、跨 run 记忆、checkpoint、resume、HITL、审批。
 - 图编排、DAG、多 Agent、handoff、guardrail agent。
 - 自动重试工具或模型请求；自动退避/熔断。
-- 并行工具执行（本轮）；流式 AgentLoop 入口。
+- 并行工具执行（本轮不做；已由《夯实AgentLoop异步执行器-plan.md》的 AL-A1 落地，`ToolRunMode.PARALLEL` 对 `run` 与 `runAsync` 都生效）；流式 AgentLoop 入口。
 - 每工具/总调用限额；`ToolErrorPolicy` SPI（本轮固定默认策略）。
 - 自动 token 预算、上下文截断、模型降级。
 - 结构化输出、输出重试预算。
@@ -395,3 +456,59 @@
 - Spring AI/LangChain4j 跨轮累加 usage；SK/ADK 把每轮 usage 留给调用方。
 - memory/session 与循环分层清晰；ai-lite 的 `AgentLoopContext.copy` 方向正确。
 - Spring AI/LangChain4j/ADK 都要求 Java 17+；可移植的是状态机、call id 关联、错误回喂、限额和 usage 累加，不能照搬容器/响应式抽象。
+
+### 10.4 补充调研（2026-10-24，异步阶段对照；同日二次核实）
+
+**来源声明：首轮为检索摘要级，同日用官方文档原文（LangChain4j Tools、Spring AI Tool Calling）与 issue #1778 二次核实，修正首轮两处错误。** 10.3 早期源码级调研的结论（LangChain4j 默认串行可选并行、并行按请求顺序写回）与本次核实一致。
+
+核实后的结论：
+
+- **并行工具**：LangChain4j 的并行是 AiServices 上的显式开关 `executeToolsConcurrently()` / `executeToolsConcurrently(Executor)`；ChatModel 下多工具用 Executor 并发、**单工具仍在调用者线程执行**（官方 Tools 文档原文）；工具无超时机制。Spring AI 文档未见工具级并发开关。首轮"工具返回 CompletableFuture 即并行"的说法**有误**，已修正 → AL-A1 采用显式开关形态。
+- **返回类型自适配**：**两家都没有**。LangChain4j 文档未提供该形态；Spring AI 2.0 的 MethodToolCallback 明确禁止 `CompletableFuture`/`Future`/`Mono`/`Flux` 返回类型（"not serializable to the model"），`ToolCallback` 接口是同步的 `String call(...)`；原生响应式工具调用 issue #1778 至今 OPEN（tzolov："Reactive FunctionCallback isn't currently supported"；chemicL：需要整个技术栈响应式化；社区靠 boundedElastic 包装或第三方 `@ReactiveTool` 桥接）。首轮"Spring AI 检测 reactive 类型自动异步"的说法**有误**，已修正 → AL-A2 降级为无先例的自有设计。
+- **超时与限额**：两家均无工具/循环级时间超时。Spring AI 提供的是次数维度限额 Tool Call Limits（`max-calls-per-tool` 默认 40、`max-total-tool-calls` 默认 150，超限 THROW 或 RETURN_ERROR_RESPONSE）——时间维度（AL-A3）无先例；次数限额有先例但属 §8 明确不做项。
+- 两家的异步形态都是三层：整次调用返回 future/Flux、每轮模型调用异步、工具执行异步——与 AL-H04/H05 计划同构，方向得到印证；但 Reactor 调度天然遮掉了取消收敛问题，两家文档都没有展开我们手写 CPS 必须显式处理的部分。（该条为首轮结论，二次核实后维持。）
+
+明确不借鉴（补充）：Reactor 自动调度魔法（ai-lite 手写 CPS 就是为了显式管住线程边界，属差异化而非落后）、agentic 模块的 planner/并行块编排（一次性 AgentLoop 不背该复杂度，归 Workflow）、human-in-the-loop（LangChain4j issue #3405 自认 naive，现有 `beforeTool.deny` 覆盖主场景）。
+
+**方法论教训**：检索摘要级调研只能用于方向判断，进入计划的条目必须以官方文档或源码原文核实——本轮两处错误均由摘要引入、由原文纠正；AiServices 1.9.1 源码抓取超时，`executeToolsConcurrently` 的实现级细节（默认 Executor 构造等）开工时如需再读源码。
+
+---
+
+## 11. 执行记录（2026-10-24，同步部分）
+
+本轮只实现同步 `run`；异步 `runAsync` 的 AL-H04 / AL-H05 与 `LlmCancelHandle` 取消监听延后。
+
+### 审查结论（独立子代理）
+
+- P0 全部真实存在；AL-H04、AL-H05 **仅影响异步**，同步不可修（监听器无法唤醒不调用
+  `bindAbort` 的阻塞 transport）。
+- 遗漏的同步 P0：`run` 全程无 try/catch，钩子/网关异常时 `afterRun` 一次都不执行。
+- 3 参 `round(call, tools, cancel)` 无重载歧义，可以安全新增。
+- “toolCalls 非空就继续”必须排除 `ABORTED` / `ERROR`，否则会执行真实副作用。
+- “模型 STOP + toolCalls + 最后一轮”原先无定义，现由 `afterTurn` 决定。
+
+### 已落地
+
+| 阶段 | 内容 |
+| --- | --- |
+| 网关 | 新增 `round(call, tools, cancel)`；Javadoc 写明不得再加 `round(call, tools, Integer)` |
+| 钩子 | `AgentLifecycle.afterRun(ctx, result, error)` default 委托旧方法；只覆写一个 |
+| 单出口 | `run` 改为 `try/catch/finally`，`runRounds` 只返回结果，`afterRun` 在 finally 恰好一次 |
+| 观察钩子 | `afterRun` 用 `catch (Throwable)`，异常只记日志，不覆盖结果、不阻止后续钩子 |
+| 取消 | 五个检查点；`beforeRun` 后取消也保证 `beforeRun`/`afterRun` 各一次 |
+| 续行 | `toolCalls 非空 && stopReason ∉ {ABORTED, ERROR}`；`STOP + toolCalls` 仍执行工具 |
+| 终态 | 取消 > STOP > MAX_ROUNDS > 模型；最后轮 `toolCalls + STOP 决策` 返回 STOP |
+| 上下文 | 非工具轮 `CONTINUE` 追加 assistant；所有未执行 toolCalls 合成 `tool_result` |
+| 工具 | `ToolExecutor` 契约写死；执行器故障 → `LlmCallException("工具执行器故障")` + 日志；业务异常仍由执行器回喂“工具执行失败” |
+| 测试 | 新增 `AgentLoopSyncHardeningTest` 18 条 |
+
+### 顺带修复
+
+`LlmGatewayAsyncRetryTest.awaitAttempts` 原断言“恰好等于 expected”，与零延迟重试存在竞态
+（第 2 次尝试可能在断言前启动）。改为“至少 expected”，精确次数仍由调用方区间断言。
+连续 3 次运行通过。
+
+### 后续
+
+- 异步：见独立计划《夯实AgentLoop异步执行器-plan.md》（蹦床化、`LlmCancelHandle` 取消监听、
+  非合作 transport 收敛、`decideRound` 共享、AL-A1–A3）。

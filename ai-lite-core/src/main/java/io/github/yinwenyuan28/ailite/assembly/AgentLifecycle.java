@@ -39,4 +39,21 @@ public interface AgentLifecycle {
     /** 循环已经停。这里再改上下文也不会再发请求。 */
     default void afterRun(AgentLoopContext ctx, LlmResult lastResult) {
     }
+
+    /**
+     * 循环已经停，并携带失败原因。默认委托旧方法，保证已有实现不受影响。
+     *
+     * <p>只要 {@link #beforeRun} 成功进入，本方法在正常、取消、异常三种终态下都恰好调用一次：
+     * 正常和取消时 {@code error} 为 null；异常时 {@code result} 为 null、{@code error} 为原因。
+     * 这是观察钩子——抛出的异常只记录，不覆盖已经确定的结果。</p>
+     *
+     * <p>实现类只应覆写本方法或旧的两参方法之一，避免同一次运行被调用两次。</p>
+     *
+     * @param ctx        本次运行的上下文
+     * @param lastResult 最终结果；异常路径为 null
+     * @param error      导致 run 失败的原因；正常/取消路径为 null
+     */
+    default void afterRun(AgentLoopContext ctx, LlmResult lastResult, Throwable error) {
+        afterRun(ctx, lastResult);
+    }
 }

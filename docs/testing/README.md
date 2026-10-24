@@ -58,6 +58,10 @@
 | `LlmGatewayToolLoopRecordTest` | core | 9 | 工具循环每轮记录、终态记录不被 TOOL_USE 吞掉、工具异常/null、工具后取消 |
 | `WorkflowTest` / `WorkflowHardeningTest` | core | 31 | 顺序执行、预校验、取消、失败定位、不可变结果、并发与快照 |
 | `WorkflowAsyncTest` | core | 31 | 异步顺序、蹦床、取消竞态、`future.cancel`、晚到 unbind 回归、重试步骤与适配器 |
+| `AgentLoopTest` / `AgentLoopSyncHardeningTest` | core | 22 + 19 | 生命周期顺序、拒绝/停止共识、终态矩阵、取消检查点、afterRun 观察语义、工具执行器故障、AL-D08 不重复追加 |
+| `AgentLoopAsyncHardeningTest` | core | 22 | 泵蹦床（万轮不爆栈）、传输线程 Error 收敛、afterRun 恰好一次、future.cancel 与非合作 transport 收敛、幽灵轮、终态 parity、合成 tool_result、整轮超时、并行工具、异步工具执行器 |
+| `AgentLoopDecisionTest` | core | 2 | 两段式决策（工具阶段 + 终态）全组合矩阵，同步/异步共用 |
+| `LlmCancelHandleListenerTest` | core | 5 | onCancel 恰好一次、已取消后注册立即触发、监听器异常不影响他人、注册/取消竞态 |
 | `LlmCoroutinesRetryTest` | executor-coroutines | 12 | suspend 重试、`delay()` 退避、`withTimeout`/`job.cancel`、deadline、记录、与异步版 parity |
 | `Utf8LineBufferTest` | core | 8 | CRLF 跨 chunk、多字节字符逐字节切分、空行、末尾无换行、单行上限 |
 | `JettyHttpExecutorTest` | http-jetty | 11 | 同步/异步/原始行、非 2xx、预取消、流中取消、提前 EOF、close |

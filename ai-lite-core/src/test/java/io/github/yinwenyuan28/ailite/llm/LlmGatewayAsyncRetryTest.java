@@ -762,13 +762,19 @@ public class LlmGatewayAsyncRetryTest {
         assertThat(scheduler.getQueue().size()).isEqualTo(expected);
     }
 
+    /**
+     * 等到至少发起 {@code expected} 次尝试。
+     *
+     * <p>零延迟重试下，断言“恰好等于”会和调度线程竞态：第 2 次尝试可能在断言前已经启动。
+     * 这里的语义只是“已经过了这个点”，精确次数由调用方用区间断言。</p>
+     */
     private static void awaitAttempts(ScriptedTransport transport, int expected)
             throws InterruptedException {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
         while (transport.attempts.get() < expected && System.nanoTime() < end) {
             Thread.sleep(5L);
         }
-        assertThat(transport.attempts.get()).isEqualTo(expected);
+        assertThat(transport.attempts.get()).isGreaterThanOrEqualTo(expected);
     }
 
     /**

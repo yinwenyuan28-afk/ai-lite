@@ -442,24 +442,37 @@ LlmResult result = agentLoop.run(call, tools, lifecycles, maxRounds, cancel);
 
 CompletableFuture<LlmResult> future =
         agentLoop.runAsync(call, tools, lifecycles, maxRounds, cancel);
+
+// 带整轮超时（毫秒）：覆盖模型轮次 + 工具执行，到点触发取消并收敛 ABORTED
+CompletableFuture<LlmResult> timed =
+        agentLoop.runAsync(call, tools, lifecycles, maxRounds, cancel, 30_000L);
+
+// 并行工具（默认串行）：beforeTool 串行预检 → 并发执行 → 按模型原始顺序写回
+AgentLoop parallel = new AgentLoop(gateway, executor, toolExecutor,
+        AgentLoop.ToolRunMode.PARALLEL /*, 可选专用线程池 */);
 ```
 
 | 参数 | 说明 |
 | --- | --- |
 | `call` | 调用参数；消息会被上下文副本替换 |
 | `tools` | 可用工具；生命周期可以修改 |
-| `lifecycles` | 钩子列表，按顺序执行；可为 `null` |
+| `lifecycles` | 钩子列表，按顺序执行；可为 `null`（入口做防御性拷贝） |
 | `maxRounds` | 最大轮数；`null` 表示 8；必须大于 0 |
 | `cancel` | 取消句柄；可为 `null`（内部会创建） |
+| `timeoutMs` | 整轮预算毫秒数；`null` 或 `<=0` 不限制。会消费传入的句柄（one-shot） |
 
-行为：
+行为（同步 / 异步共用同一套决策）：
 
-- 每一轮调用 `gateway.round` / `roundAsync`，不直接用 `one`。
-- 模型要求工具且不是最后一轮时，执行工具并把结果写回消息。
-- 最后一轮仍要求工具时，`stopReason = MAX_ROUNDS`。
-- 钩子抛异常时：同步版本向上抛；异步版本 future 异常完成。
-- 取消：同步版本在轮次之间检查；异步版本会取消进行中的请求（通过 `ctx.getCancel()`）。
-- 取消或异常时不会产生"半截"结果；`afterRun` 在取消时仍会调用（同步/异步的实现一致）。
+- 每一轮调用 `gateway.round` / `roundAsync`，不直接用 `one`；在途请求可被中止。
+- 是否执行工具由 `toolCalls` 是否非空决定；`ABORTED` / `ERROR` 即使带 `toolCalls` 也不执行。
+- 终态优先级：取消 > STOP（钩子）> MAX_ROUNDS > 模型自身 stopReason；同步异步一致。
+- 最后一轮仍要求工具、或 `ERROR` 带工具调用时，为未执行的调用补合成 `tool_result`，上下文不留 dangling。
+- 钩子抛异常时：同步版本向上抛，异步版本 future 异常完成；`afterRun` 在成功/取消/异常三条路径都恰好一次（`beforeRun` 失败除外），异常只记录不覆盖结果。
+- 取消：五个检查点（轮首、`beforeModel` 后、模型返回后、每个工具执行前、工具批次后）；`beforeModel` 内取消不产生"幽灵轮"（不计轮次、不调 `afterModel`）。
+- 异步实现为泵结构：完成回调只登记结果，全部推进集中在单一循环里并统一兜底 `Throwable`——future 不会因同步递归爆栈、Error 逃逸或非合作传输而挂起；非合作 transport 的取消由网关取消监听主动收敛为 ABORTED。
+- `future.cancel(true)`：底层请求被 abort，`afterRun` 仍恰好一次（error = `CancellationException`）。
+- 并行工具（`ToolRunMode.PARALLEL`，对 `run` 与 `runAsync` 都生效）：执行器故障即终止 run，已完成工具的 `afterTool` 不再调用。
+- 工具执行器实现 `AsyncToolExecutor`（`executeOneAsync`）时，`runAsync` 自动走异步链、不占载体线程阻塞等待；同步 `run` 仍走 `execute`。
 
 ### 4.3 生命周期：`AgentLifecycle`
 
@@ -472,13 +485,28 @@ CompletableFuture<LlmResult> future =
 | `afterTool(ctx, call, resultText)` | 工具执行后 | 返回替换文本；`null` 表示沿用 | ⭐ |
 | `afterTurn(ctx, roundResult)` | 一轮工具处理完 | 返回 `stop()` / `continueRound()` / `modelDecides()` | ⭐ |
 | `afterRun(ctx, lastResult)` | 循环停止后，只一次 | 记录日志/指标；不能再影响请求 |  |
+| `afterRun(ctx, lastResult, error)` | 同上，带失败原因 | 正常/取消时 `error=null`；异常时 `result=null` |  |
+
+`afterRun` 是**观察钩子**：
+
+- 只要 `beforeRun` 成功进入，正常、取消、异常三条路径都**恰好执行一次**；
+- 两个重载只应覆写**一个**，三参方法默认委托两参方法；
+- 抛出的异常（含 `AssertionError`）只记录，不覆盖已经确定的结果，也不阻止后续钩子；
+- `beforeRun` 失败时不调用 `afterRun`（run 尚未开始）。
 
 共识规则：
 
-- **拒绝优先**：任何一个 `beforeTool` 返回 `deny`，该工具不执行；后续钩子的 `beforeTool` 不再调用。拒绝原因作为工具结果进入下一轮。
+- **拒绝优先**：任何一个 `beforeTool` 返回 `deny`，该工具不执行；后续钩子的 `beforeTool` 不再调用，`afterTool` 也不调用。拒绝原因作为工具结果进入下一轮。
 - **停止优先**：任何一个 `afterTurn` 返回 `stop()`，本轮结束后停止；同时有人要求 `continueRound()` 也以停止为准。
-- 没有人停止、但有人要求继续或本轮有工具调用时，进入下一轮。
+- **继续条件**：本轮 `toolCalls` 非空且 `stopReason` 不是 `ABORTED`/`ERROR` 时执行工具并继续；模型返回 `STOP` 但带 `toolCalls` 也会继续。
 - `afterModel` 改写的正文会用于工具消息和最终结果。
+- 非工具轮被 `CONTINUE` 要求继续时，assistant 正文会先写回上下文，避免下一轮重复同一请求。
+
+终态优先级：**取消 > `STOP` > `MAX_ROUNDS` > 模型自身 `stopReason`**。
+
+未执行的工具调用会补一条合成 `tool_result`（“未执行：达到最大轮数” / “未执行：调用已取消”），
+保证上层复用 `AgentLoopContext` 时不会出现 assistant `tool_use` 没有对应 `tool_result` 的
+dangling 历史。异常路径不做合成：整个 turn 随 run 丢弃。
 
 上下文：
 
