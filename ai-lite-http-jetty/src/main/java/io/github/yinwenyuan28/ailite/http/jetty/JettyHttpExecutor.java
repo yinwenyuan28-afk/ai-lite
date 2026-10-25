@@ -39,6 +39,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Jetty 9.4 NIO 传输。
@@ -93,7 +94,7 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
         try {
             ContentResponse response = jettyRequest.send();
             return toResult(response.getStatus(),
-                    new String(response.getContent(), UTF_8));
+                    new String(response.getContent(), UTF_8), response.getHeaders().get("Retry-After"));
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw failure(ex, request.getCancel());
@@ -121,7 +122,8 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
             try {
                 if (!isSuccessful(response.getStatus())) {
                     throw httpError(response.getStatus(),
-                            readBounded(input, MAX_ERROR_BYTES));
+                            readBounded(input, MAX_ERROR_BYTES),
+                            response.getHeaders().get("Retry-After"));
                 }
                 BufferedReader reader = new BufferedReader(new InputStreamReader(input, UTF_8));
                 String line;
@@ -165,12 +167,18 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
             return future;
         }
         final AtomicInteger status = new AtomicInteger(-1);
+        final AtomicReference<String> retryAfter = new AtomicReference<String>();
         final ByteArrayOutputStream body = new ByteArrayOutputStream();
         final AtomicBoolean done = new AtomicBoolean(false);
         jettyRequest.send(new Response.Listener.Adapter() {
             @Override
             public void onBegin(Response response) {
                 status.set(response.getStatus());
+            }
+
+            @Override
+            public void onHeaders(Response response) {
+                retryAfter.set(response.getHeaders().get("Retry-After"));
             }
 
             @Override
@@ -195,7 +203,7 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
                 int code = status.get();
                 String text = new String(body.toByteArray(), UTF_8);
                 if (!isSuccessful(code)) {
-                    future.completeExceptionally(httpError(code, text));
+                    future.completeExceptionally(httpError(code, text, retryAfter.get()));
                     return;
                 }
                 future.complete(new HttpResult(code, text));
@@ -220,6 +228,7 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
             return future;
         }
         final AtomicInteger status = new AtomicInteger(-1);
+        final AtomicReference<String> retryAfter = new AtomicReference<String>();
         final Utf8LineBuffer lines = new Utf8LineBuffer(MAX_LINE_BYTES);
         final ByteArrayOutputStream errorBody = new ByteArrayOutputStream();
         final AtomicBoolean failed = new AtomicBoolean(false);
@@ -228,6 +237,11 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
             @Override
             public void onBegin(Response response) {
                 status.set(response.getStatus());
+            }
+
+            @Override
+            public void onHeaders(Response response) {
+                retryAfter.set(response.getHeaders().get("Retry-After"));
             }
 
             @Override
@@ -268,7 +282,7 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
                 int code = status.get();
                 if (!isSuccessful(code)) {
                     future.completeExceptionally(httpError(code,
-                            new String(errorBody.toByteArray(), UTF_8)));
+                            new String(errorBody.toByteArray(), UTF_8), retryAfter.get()));
                     return;
                 }
                 try {
@@ -458,9 +472,9 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
         out.write(bytes, 0, allowed);
     }
 
-    private static HttpResult toResult(int status, String body) {
+    private static HttpResult toResult(int status, String body, String retryAfterHeader) {
         if (!isSuccessful(status)) {
-            throw httpError(status, body);
+            throw httpError(status, body, retryAfterHeader);
         }
         return new HttpResult(status, body);
     }
@@ -469,9 +483,9 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
         return status >= 200 && status < 300;
     }
 
-    private static LlmCallException httpError(int status, String body) {
-        return new LlmCallException("模型请求失败，状态码：" + status + brief(body), null,
-                LlmCallException.Kind.HTTP, Integer.valueOf(status));
+    private static LlmCallException httpError(int status, String body, String retryAfterHeader) {
+        return LlmCallException.httpError("模型请求失败，状态码：" + status + brief(body),
+                status, retryAfterHeader);
     }
 
     private static LlmCallException failure(Throwable error, LlmCancelHandle cancel) {

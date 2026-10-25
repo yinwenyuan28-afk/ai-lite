@@ -161,7 +161,7 @@ class KtorCioHttpExecutor private constructor(
             val status = response.status.value
             val body = response.bodyAsText()
             if (!response.status.isSuccess()) {
-                throw httpError(status, body)
+                throw httpError(status, body, response.headers["Retry-After"])
             }
             HttpResult(status, body)
         }
@@ -173,7 +173,7 @@ class KtorCioHttpExecutor private constructor(
         statement(request).execute { response ->
             if (!response.status.isSuccess()) {
                 val body = readBoundedText(response.bodyAsChannel())
-                throw httpError(response.status.value, body)
+                throw httpError(response.status.value, body, response.headers["Retry-After"])
             }
             val channel = response.bodyAsChannel()
             while (true) {
@@ -318,9 +318,9 @@ class KtorCioHttpExecutor private constructor(
         return LlmCallException("调用已取消", cause, LlmCallException.Kind.CANCELLED)
     }
 
-    private fun httpError(status: Int, body: String): LlmCallException {
-        return LlmCallException("模型请求失败，状态码：" + status + brief(body), null,
-                LlmCallException.Kind.HTTP, Integer.valueOf(status))
+    private fun httpError(status: Int, body: String, retryAfterHeader: String?): LlmCallException {
+        return LlmCallException.httpError("模型请求失败，状态码：" + status + brief(body),
+                status, retryAfterHeader)
     }
 
     private fun brief(text: String): String {

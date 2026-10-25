@@ -6,34 +6,60 @@ import io.github.yinwenyuan28.ailite.llm.LlmThinkingLevel;
 import io.github.yinwenyuan28.ailite.llm.ResolvedModel;
 import io.github.yinwenyuan28.ailite.util.Strings;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 把 YAML 配置解析成一次调用需要的 {@link ResolvedModel}。
  *
  * <p>校验尽量前移：供应商、模型、profile 的引用关系在构造时就检查，
  * 密钥和业务 id 在调用时再检查，避免启动阶段依赖外部环境变量。</p>
+ *
+ * <p>多 key 轮换（限流熔断计划 §3.4）：配置了 {@code api-keys} 的供应商在
+ * {@link #markKeyFailure}（429/401 失败标记）时推进游标并冷却当前 key，
+ * resolve 只读游标——无失败不轮换。轮换状态用原子类型，resolve 并发调用安全；
+ * 冷却惰性到期判定（时间戳比较），无定时器。key 值只参与值匹配，永不进日志。</p>
  */
 public final class ModelResolver {
+
+    /** 默认 key 冷却时长（未显式传入时）。 */
+    private static final long DEFAULT_KEY_COOLDOWN_MS = 60_000L;
 
     private final AiLiteConfig.Llm config;
     private final boolean configured;
     private final Set<String> bizIds;
     private final Map<String, AiLiteConfig.Provider> providers;
     private final Map<String, AiLiteConfig.Profile> profiles;
+    private final long keyCooldownMs;
+    /** providerId → 轮换状态；只在配置了 api-keys 的 provider 上创建。 */
+    private final ConcurrentHashMap<String, KeyRotation> rotations = new ConcurrentHashMap<String, KeyRotation>();
 
     /**
      * @param config 模型配置节
      * @throws LlmCallException 配置结构非法时抛出
      */
     public ModelResolver(AiLiteConfig.Llm config) {
+        this(config, DEFAULT_KEY_COOLDOWN_MS);
+    }
+
+    /**
+     * @param config         模型配置节
+     * @param keyCooldownMs  429/401 失败标记后单把 key 的冷却毫秒数
+     * @throws LlmCallException 配置结构非法时抛出
+     */
+    public ModelResolver(AiLiteConfig.Llm config, long keyCooldownMs) {
         this.config = config == null ? new AiLiteConfig.Llm() : config;
         this.providers = this.config.getProviders();
         this.profiles = this.config.getProfiles();
         this.configured = providers != null && !providers.isEmpty();
+        this.keyCooldownMs = Math.max(0L, keyCooldownMs);
         this.bizIds = new HashSet<String>();
         if (this.config.getBizIds() != null) {
             for (String id : this.config.getBizIds()) {
@@ -147,7 +173,7 @@ public final class ModelResolver {
         boolean acceptsImage = m.getInput() != null && m.getInput().contains("image");
 
         return new ResolvedModel(providerId, p.getApi(), trimTrailingSlash(p.getBaseUrl()),
-                requireApiKey(providerId, p), headers, m.getId(), contextWindow, maxTokens,
+                apiKeyFor(providerId, p), headers, m.getId(), contextWindow, maxTokens,
                 acceptsImage, m.isReasoning(), effective, m.getThinkingLevelMap(),
                 Strings.isBlank(m.getThinkingFormat()) ? "none" : m.getThinkingFormat().trim(),
                 sampler, extraBody, connect, read);
@@ -176,6 +202,141 @@ public final class ModelResolver {
             throw new LlmCallException("模型密钥未配置: " + providerId);
         }
         return key;
+    }
+
+    /**
+     * 取一次调用使用的密钥：配置了 api-keys 时从轮换池取（优先于单 key），
+     * 否则走单 key 路径。
+     */
+    private String apiKeyFor(String providerId, AiLiteConfig.Provider p) {
+        List<String> keys = resolveKeys(p);
+        if (keys.isEmpty()) {
+            return requireApiKey(providerId, p);
+        }
+        return pickKey(providerId, keys);
+    }
+
+    /**
+     * 解析 api-keys 列表：每个元素支持与单 key 相同的占位符；解析为 null 的
+     * 条目（env 缺失且无默认值）跳过。全部无效时抛出——配置了池却无可用 key
+     * 属于配置错误，不能静默退化。
+     */
+    private List<String> resolveKeys(AiLiteConfig.Provider p) {
+        List<String> raw = p.getApiKeys();
+        if (raw == null || raw.isEmpty()) {
+            return new ArrayList<String>(0);
+        }
+        List<String> resolved = new ArrayList<String>(raw.size());
+        for (String item : raw) {
+            String key = resolvePlaceholder(item);
+            if (key != null) {
+                resolved.add(key);
+            }
+        }
+        if (resolved.isEmpty()) {
+            throw new LlmCallException("模型密钥未配置: api-keys 全部无效");
+        }
+        return resolved;
+    }
+
+    /**
+     * 从游标起找第一个未冷却的 key（惰性到期判定）；全部冷却时等价单 key，
+     * 回游标位（失败标记已保证游标指向第一个）。resolve 不推进游标。
+     */
+    private String pickKey(String providerId, List<String> keys) {
+        KeyRotation rotation = rotationFor(providerId, keys.size());
+        long now = System.currentTimeMillis();
+        int start = Math.min(rotation.cursor.get(), keys.size() - 1);
+        for (int i = 0; i < keys.size(); i++) {
+            int idx = (start + i) % keys.size();
+            if (rotation.cooldownUntil[idx].get() <= now) {
+                return keys.get(idx);
+            }
+        }
+        return keys.get(start);
+    }
+
+    /**
+     * 429/401 失败标记（限流熔断计划 §3.4）：按 key 值匹配索引标记冷却，
+     * 游标切到其后第一个未冷却 key；全部冷却则回第一个（等价单 key）。
+     * 值不匹配（env 已变）不乱标；游标只在失败标记时推进。
+     *
+     * @param providerId 供应商 id
+     * @param apiKeyValue 本次调用实际使用的 key 值（来自 ResolvedModel）
+     */
+    public void markKeyFailure(String providerId, String apiKeyValue) {
+        if (providerId == null || apiKeyValue == null) {
+            return;
+        }
+        AiLiteConfig.Provider p = providers.get(providerId);
+        if (p == null) {
+            return;
+        }
+        List<String> keys;
+        try {
+            keys = resolveKeys(p);
+        } catch (LlmCallException ignored) {
+            // 池在此刻全部失效：无从标记，保持现状。
+            return;
+        }
+        if (keys.isEmpty()) {
+            return;
+        }
+        KeyRotation rotation = rotationFor(providerId, keys.size());
+        int matched = -1;
+        for (int i = 0; i < keys.size(); i++) {
+            if (apiKeyValue.equals(keys.get(i))) {
+                matched = i;
+                break;
+            }
+        }
+        if (matched < 0) {
+            return;
+        }
+        rotation.cooldownUntil[matched].set(System.currentTimeMillis() + keyCooldownMs);
+        long now = System.currentTimeMillis();
+        for (int i = 1; i <= keys.size(); i++) {
+            int idx = (matched + i) % keys.size();
+            if (i == keys.size()) {
+                // 全部冷却：回第一个（等价单 key）。
+                rotation.cursor.set(0);
+                break;
+            }
+            if (rotation.cooldownUntil[idx].get() <= now) {
+                rotation.cursor.set(idx);
+                break;
+            }
+        }
+    }
+
+    /** 取（或建）该 provider 的轮换状态；配置条数变化时重建（热更新兜底）。 */
+    private KeyRotation rotationFor(String providerId, int size) {
+        KeyRotation existing = rotations.get(providerId);
+        if (existing != null && existing.size == size) {
+            return existing;
+        }
+        KeyRotation created = new KeyRotation(size);
+        KeyRotation winner = rotations.putIfAbsent(providerId, created);
+        if (winner != null && winner.size == size) {
+            return winner;
+        }
+        rotations.put(providerId, created);
+        return created;
+    }
+
+    /** 多 key 轮换状态：游标 + 每 key 冷却到期时间戳（0 = 未冷却）。 */
+    private static final class KeyRotation {
+        private final int size;
+        private final AtomicInteger cursor = new AtomicInteger(0);
+        private final AtomicLong[] cooldownUntil;
+
+        private KeyRotation(int size) {
+            this.size = Math.max(1, size);
+            this.cooldownUntil = new AtomicLong[this.size];
+            for (int i = 0; i < this.size; i++) {
+                this.cooldownUntil[i] = new AtomicLong(0L);
+            }
+        }
     }
 
     /**

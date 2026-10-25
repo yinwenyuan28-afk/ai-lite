@@ -122,7 +122,8 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor {
                             .map(body -> new HttpResult(status, body));
                 }
                 return errorBody(response).defaultIfEmpty("")
-                        .flatMap(body -> Mono.<HttpResult>error(httpError(status, body)));
+                        .flatMap(body -> Mono.<HttpResult>error(httpError(status, body,
+                                response.headers().asHttpHeaders().getFirst("Retry-After"))));
             });
             subscribeMono(result, future, request.getCancel());
         } catch (RuntimeException ex) {
@@ -143,7 +144,8 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor {
                 int status = response.statusCode().value();
                 if (!response.statusCode().is2xxSuccessful()) {
                     return errorBody(response).defaultIfEmpty("")
-                            .flatMapMany(body -> Flux.<String>error(httpError(status, body)));
+                            .flatMapMany(body -> Flux.<String>error(httpError(status, body,
+                                    response.headers().asHttpHeaders().getFirst("Retry-After"))));
                 }
                 Flux<DataBuffer> body = response.body(BodyExtractors.toDataBuffers());
                 if (request.getReadTimeoutMs() > 0) {
@@ -386,9 +388,9 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor {
                 LlmCallException.Kind.CANCELLED);
     }
 
-    private static LlmCallException httpError(int status, String body) {
-        return new LlmCallException("模型请求失败，状态码：" + status + brief(body), null,
-                LlmCallException.Kind.HTTP, Integer.valueOf(status));
+    private static LlmCallException httpError(int status, String body, String retryAfterHeader) {
+        return LlmCallException.httpError("模型请求失败，状态码：" + status + brief(body),
+                status, retryAfterHeader);
     }
 
     private static RuntimeException unwrap(Throwable error) {

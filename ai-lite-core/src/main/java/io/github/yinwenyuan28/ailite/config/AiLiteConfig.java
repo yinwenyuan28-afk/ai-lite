@@ -22,6 +22,8 @@ public final class AiLiteConfig {
     private Callback callback = new Callback();
     /** 指标配置（可观测性计划）：micrometer 在 classpath 时把 LLM 调用记录聚合成指标。 */
     private Metrics metrics = new Metrics();
+    /** 出口保护（限流熔断计划）：并发限流/熔断/多 key 冷却的跨供应商通用参数，默认全关。 */
+    private Guard guard = new Guard();
 
     public boolean isEnabled() {
         return enabled;
@@ -61,6 +63,14 @@ public final class AiLiteConfig {
 
     public void setMetrics(Metrics metrics) {
         this.metrics = metrics == null ? new Metrics() : metrics;
+    }
+
+    public Guard getGuard() {
+        return guard;
+    }
+
+    public void setGuard(Guard guard) {
+        this.guard = guard == null ? new Guard() : guard;
     }
 
     public Http getHttp() {
@@ -134,12 +144,20 @@ public final class AiLiteConfig {
         private String apiKey;
         /** apiKey 为空时从该环境变量读取。 */
         private String apiKeyEnv;
+        /**
+         * 多 key 池（限流熔断计划 §3.4）。元素支持与 api-key 相同的 {@code ${ENV}}/
+         * {@code $ENV} 占位符；配置了 api-keys 时优先于 api-key/api-key-env。
+         * 游标只在 429/401 失败标记时推进，key 值永不进日志/记录/指标。
+         */
+        private List<String> apiKeys = new ArrayList<String>();
         private Map<String, String> headers = new LinkedHashMap<String, String>();
         /** 合并进每个请求体的私有字段，例如 vLLM 的 chat_template_kwargs。 */
         private Map<String, Object> extraBody = new LinkedHashMap<String, Object>();
         private Integer connectTimeoutMs = Integer.valueOf(10000);
         private Integer readTimeoutMs = Integer.valueOf(120000);
         private List<Model> models = new ArrayList<Model>();
+        /** 该供应商的出口保护（限流熔断计划 §3.0 第二个配置根）。 */
+        private GuardCfg guard = new GuardCfg();
 
         public String getApi() {
             return api;
@@ -171,6 +189,14 @@ public final class AiLiteConfig {
 
         public void setApiKeyEnv(String apiKeyEnv) {
             this.apiKeyEnv = apiKeyEnv;
+        }
+
+        public List<String> getApiKeys() {
+            return apiKeys;
+        }
+
+        public void setApiKeys(List<String> apiKeys) {
+            this.apiKeys = apiKeys == null ? new ArrayList<String>() : apiKeys;
         }
 
         public Map<String, String> getHeaders() {
@@ -211,6 +237,32 @@ public final class AiLiteConfig {
 
         public void setModels(List<Model> models) {
             this.models = models == null ? new ArrayList<Model>() : models;
+        }
+
+        public GuardCfg getGuard() {
+            return guard;
+        }
+
+        public void setGuard(GuardCfg guard) {
+            this.guard = guard == null ? new GuardCfg() : guard;
+        }
+
+        /**
+         * 供应商级出口保护。concurrency=0（默认）表示不限并发，未配置任何
+         * guard 项的供应商不建 ProviderGuard 实例（NOOP 直通）。
+         */
+        public static final class GuardCfg {
+
+            /** 该供应商的并发许可数（每次模型调用占一个）；0=不限。 */
+            private int concurrency = 0;
+
+            public int getConcurrency() {
+                return concurrency;
+            }
+
+            public void setConcurrency(int concurrency) {
+                this.concurrency = concurrency;
+            }
         }
     }
 
@@ -701,6 +753,123 @@ public final class AiLiteConfig {
 
         public void setLlmEnabled(boolean llmEnabled) {
             this.llmEnabled = llmEnabled;
+        }
+    }
+
+    /**
+     * 出口保护配置（限流熔断计划 §3.0 第一个配置根）。
+     *
+     * <p>所有能力默认关闭：未给供应商配置 {@code guard.concurrency} 且熔断
+     * {@code enabled=false} 时，网关不建 ProviderGuard，行为与现状零差异。
+     * 供应商级并发上限在 {@code ai-lite.llm.providers.<id>.guard.concurrency}。</p>
+     */
+    public static final class Guard {
+
+        /** 同步等待与异步排队共用的时长上限；小于等于 0 表示不等待。 */
+        private long concurrencyWaitMs = 2000L;
+        /** 异步排队容量，超出即 OVERLOAD 拒绝。 */
+        private int asyncQueueCapacity = 100;
+        private Circuit circuit = new Circuit();
+        /** 429/401 失败标记后单把 key 的冷却时长。 */
+        private long keyCooldownSeconds = 60L;
+
+        public long getConcurrencyWaitMs() {
+            return concurrencyWaitMs;
+        }
+
+        public void setConcurrencyWaitMs(long concurrencyWaitMs) {
+            this.concurrencyWaitMs = concurrencyWaitMs;
+        }
+
+        public int getAsyncQueueCapacity() {
+            return asyncQueueCapacity;
+        }
+
+        public void setAsyncQueueCapacity(int asyncQueueCapacity) {
+            this.asyncQueueCapacity = asyncQueueCapacity;
+        }
+
+        public Circuit getCircuit() {
+            return circuit;
+        }
+
+        public void setCircuit(Circuit circuit) {
+            this.circuit = circuit == null ? new Circuit() : circuit;
+        }
+
+        public long getKeyCooldownSeconds() {
+            return keyCooldownSeconds;
+        }
+
+        public void setKeyCooldownSeconds(long keyCooldownSeconds) {
+            this.keyCooldownSeconds = keyCooldownSeconds;
+        }
+
+        /**
+         * 熔断参数。状态机 CLOSED→OPEN→HALF_OPEN（单探测，带超时）；
+         * 失败口径为 {@code RetryPolicy.defaultRetryable}，guard 自身拒绝不回灌窗口。
+         */
+        public static final class Circuit {
+
+            private boolean enabled = false;
+            /** 窗口失败率阈值（%）。 */
+            private int failureRate = 50;
+            /** 统计窗口秒数，内部按 6 片环形滑动（近似值）。 */
+            private long windowSeconds = 60L;
+            /** 触发门槛的最少样本数。 */
+            private int minimumCalls = 20;
+            /** OPEN 冷却秒数，期满进 HALF_OPEN。 */
+            private long openSeconds = 30L;
+            /** 半开探测超时毫秒，超时按探测失败回 OPEN。 */
+            private long probeTimeoutMs = 30000L;
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public int getFailureRate() {
+                return failureRate;
+            }
+
+            public void setFailureRate(int failureRate) {
+                this.failureRate = failureRate;
+            }
+
+            public long getWindowSeconds() {
+                return windowSeconds;
+            }
+
+            public void setWindowSeconds(long windowSeconds) {
+                this.windowSeconds = windowSeconds;
+            }
+
+            public int getMinimumCalls() {
+                return minimumCalls;
+            }
+
+            public void setMinimumCalls(int minimumCalls) {
+                this.minimumCalls = minimumCalls;
+            }
+
+            public long getOpenSeconds() {
+                return openSeconds;
+            }
+
+            public void setOpenSeconds(long openSeconds) {
+                this.openSeconds = openSeconds;
+            }
+
+            public long getProbeTimeoutMs() {
+                return probeTimeoutMs;
+            }
+
+            public void setProbeTimeoutMs(long probeTimeoutMs) {
+                this.probeTimeoutMs = probeTimeoutMs;
+            }
         }
     }
 }

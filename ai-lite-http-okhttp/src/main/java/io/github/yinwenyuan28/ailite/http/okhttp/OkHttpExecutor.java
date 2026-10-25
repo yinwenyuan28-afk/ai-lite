@@ -252,8 +252,8 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
         }
         ResponseBody body = response.body();
         String text = body == null ? "" : body.string();
-        throw new LlmCallException("模型请求失败，状态码：" + response.code() + brief(text),
-                null, LlmCallException.Kind.HTTP, Integer.valueOf(response.code()));
+        throw LlmCallException.httpError("模型请求失败，状态码：" + response.code() + brief(text),
+                response.code(), response.header("Retry-After"));
     }
 
     private static String brief(String text) {

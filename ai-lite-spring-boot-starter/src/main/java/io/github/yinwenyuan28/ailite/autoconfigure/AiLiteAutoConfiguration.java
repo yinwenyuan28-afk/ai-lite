@@ -7,6 +7,8 @@ import io.github.yinwenyuan28.ailite.config.ModelResolver;
 import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.executor.PlatformExecutorProvider;
+import io.github.yinwenyuan28.ailite.guard.GuardMetrics;
+import io.github.yinwenyuan28.ailite.guard.ProviderGuard;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.llm.AsyncLlmCallLogger;
 import io.github.yinwenyuan28.ailite.llm.CallbackPolicy;
@@ -38,10 +40,13 @@ import org.springframework.context.annotation.Configuration;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -133,7 +138,9 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
     @Bean
     @ConditionalOnMissingBean
     public ModelResolver aiLiteModelResolver(AiLiteConfig config) {
-        return new ModelResolver(config.getLlm());
+        // key 冷却时长来自出口保护配置（限流熔断计划 §3.4），默认 60s。
+        return new ModelResolver(config.getLlm(),
+                config.getGuard().getKeyCooldownSeconds() * 1000L);
     }
 
     @Bean
@@ -182,6 +189,64 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
         return RetryScheduler.create();
     }
 
+    /**
+     * 出口保护指标回调（限流熔断计划 §3.5）：registry 在 classpath 且存在时挂
+     * Micrometer，否则 NOOP。core 侧只依赖接口。
+     */
+    @Bean(name = "aiLiteGuardMetrics")
+    @ConditionalOnMissingBean
+    public GuardMetrics aiLiteGuardMetrics(ObjectProvider<MeterRegistry> meterRegistry) {
+        MeterRegistry registry = meterRegistry.getIfAvailable();
+        return registry == null ? GuardMetrics.NOOP : new MicrometerGuardMetrics(registry);
+    }
+
+    /**
+     * 供应商出口保护表（限流熔断计划 §3.7）：只为配置了 guard 的 provider 建实例
+     * ——provider 级 {@code guard.concurrency > 0}，或顶级熔断 {@code enabled=true}
+     * （此时并发不限，只做熔断）。全默认时返回空表：网关直通，acquire 不发生。
+     *
+     * <p>刻意不做独立 Bean：Spring 对 {@code Map<K,V>} 参数注入的是"所有 V 类型
+     * bean 收集成的 map"而非 Map bean 本身，独立 bean 会让网关拿到空表。用户覆盖
+     * 途径是自定义 LlmGateway Bean（与回调策略 CB-09 一致）。</p>
+     */
+    private Map<String, ProviderGuard> buildProviderGuards(AiLiteConfig config,
+            GuardMetrics guardMetrics, ScheduledExecutorService retryScheduler) {
+        Map<String, ProviderGuard> guards = new LinkedHashMap<String, ProviderGuard>();
+        AiLiteConfig.Guard guardCfg = config.getGuard();
+        AiLiteConfig.Guard.Circuit circuitCfg = guardCfg.getCircuit();
+        ProviderGuard.CircuitSettings circuit = circuitCfg.isEnabled()
+                ? new ProviderGuard.CircuitSettings(circuitCfg.getFailureRate(),
+                        circuitCfg.getWindowSeconds() * 1000L, circuitCfg.getMinimumCalls(),
+                        circuitCfg.getOpenSeconds() * 1000L, circuitCfg.getProbeTimeoutMs())
+                : null;
+        // 排队超时定时器复用重试调度器（同一 daemon 池，不新增线程资源）。
+        ProviderGuard.Delayer delayer = new ProviderGuard.Delayer() {
+            @Override
+            public ScheduledFuture<?> schedule(Runnable task, long delayMs) {
+                return retryScheduler.schedule(task, delayMs, TimeUnit.MILLISECONDS);
+            }
+        };
+        if (config.getLlm().getProviders() != null) {
+            for (Map.Entry<String, AiLiteConfig.Provider> entry
+                    : config.getLlm().getProviders().entrySet()) {
+                AiLiteConfig.Provider provider = entry.getValue();
+                int concurrency = provider.getGuard() == null
+                        ? 0 : provider.getGuard().getConcurrency();
+                boolean limited = concurrency > 0;
+                if (!limited && circuit == null) {
+                    // 未配置任何 guard 项：不建实例（NOOP 直通，零开销）。
+                    continue;
+                }
+                guards.put(entry.getKey(), new ProviderGuard(entry.getKey(),
+                        limited ? concurrency : Integer.MAX_VALUE,
+                        guardCfg.getConcurrencyWaitMs(),
+                        guardCfg.getAsyncQueueCapacity(),
+                        circuit, System::currentTimeMillis, delayer, guardMetrics));
+            }
+        }
+        return guards;
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public LlmGateway aiLiteGateway(ModelResolver resolver, List<LlmTransport> transports,
@@ -191,6 +256,7 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
                                     ScheduledExecutorService retryScheduler,
                                     ObjectProvider<CallbackPolicy> callbackPolicy,
                                     ObjectProvider<MeterRegistry> meterRegistry,
+                                    ObjectProvider<GuardMetrics> guardMetrics,
                                     AiLiteConfig config) {
         // 可观测性计划：micrometer 在 classpath 且启用时，用指标装饰器包装记录存储
         //（不替换用户 Bean，装饰只发生在传给网关的引用上）。registry 缺失时零影响。
@@ -202,6 +268,9 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
         LlmGateway gateway = new LlmGateway(resolver, transports, effectiveStore, executor,
                 toolExecutor, retryScheduler);
         gateway.setCallbackPolicy(callbackPolicy.getIfAvailable());
+        GuardMetrics metrics = guardMetrics.getIfAvailable();
+        gateway.setGuards(buildProviderGuards(config,
+                metrics == null ? GuardMetrics.NOOP : metrics, retryScheduler));
         return gateway;
     }
 

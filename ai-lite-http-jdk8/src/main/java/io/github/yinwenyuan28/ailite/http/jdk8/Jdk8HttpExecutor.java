@@ -177,9 +177,9 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
         if (oneLine.length() > 300) {
             oneLine = oneLine.substring(0, 300);
         }
-        return new LlmCallException("模型请求失败，状态码：" + status
+        return LlmCallException.httpError("模型请求失败，状态码：" + status
                 + (oneLine.isEmpty() ? "" : "，响应：" + oneLine),
-                null, LlmCallException.Kind.HTTP, Integer.valueOf(status));
+                status, connection.getHeaderField("Retry-After"));
     }
 
     private static LlmCallException wrap(IOException ex, LlmCancelHandle cancel) {

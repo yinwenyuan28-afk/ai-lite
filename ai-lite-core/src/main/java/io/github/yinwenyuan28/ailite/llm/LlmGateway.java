@@ -3,6 +3,7 @@ package io.github.yinwenyuan28.ailite.llm;
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
 import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
+import io.github.yinwenyuan28.ailite.guard.ProviderGuard;
 import io.github.yinwenyuan28.ailite.util.Strings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,6 +48,11 @@ public final class LlmGateway {
     private final ScheduledExecutorService retryScheduler;
     /** 回调执行策略（回调策略 Phase 2）；默认 inline，Starter 按配置注入。 */
     private volatile CallbackPolicy callbackPolicy = CallbackPolicy.inline();
+    /**
+     * 出口保护（限流熔断计划 §3.7）：providerId → guard。默认空 Map = NOOP 直通，
+     * 未配置 guard 的 provider 连 acquire 调用都不发生。
+     */
+    private volatile Map<String, ProviderGuard> guards = Collections.emptyMap();
 
     /**
      * 手工构造入口。异步重试使用进程级共享调度器，避免调用方额外管理生命周期。
@@ -183,7 +189,11 @@ public final class LlmGateway {
                 if (cancel != null && cancel.isCancelled()) {
                     return one(call, cancel);
                 }
+                // 退避优先采用服务端 Retry-After（限流熔断 §3.3），与异步口径一致。
                 long delay = policy.delayMs(attempt);
+                if (ex.getRetryAfterMs() != null) {
+                    delay = Math.min(ex.getRetryAfterMs().longValue(), policy.getMaxBackoffMs());
+                }
                 if (deadlineNanos != null) {
                     long now = System.nanoTime();
                     if (RetrySupport.deadlineReached(deadlineNanos, now)) {
@@ -327,6 +337,26 @@ public final class LlmGateway {
      */
     public void setCallbackPolicy(CallbackPolicy policy) {
         this.callbackPolicy = policy == null ? CallbackPolicy.inline() : policy;
+    }
+
+    /**
+     * 设置出口保护 guard 表（限流熔断计划）。启动阶段设置一次；null/空 = 直通。
+     * 只应包含配置了 guard 的 provider，其余 provider 不建实例。
+     *
+     * @param guards providerId → ProviderGuard
+     */
+    public void setGuards(Map<String, ProviderGuard> guards) {
+        this.guards = guards == null
+                ? Collections.<String, ProviderGuard>emptyMap()
+                : Collections.unmodifiableMap(new HashMap<String, ProviderGuard>(guards));
+    }
+
+    /** 按 provider 取 guard；未配置返回 null（调用方直接跳过 acquire/release）。 */
+    private ProviderGuard guardFor(ResolvedModel model) {
+        if (guards.isEmpty()) {
+            return null;
+        }
+        return guards.get(model.getProvider());
     }
 
     /**
@@ -681,9 +711,17 @@ public final class LlmGateway {
                                     failureOut = RetrySupport.deadlineFailure(failures);
                                 }
                             } else {
+                                // 退避优先采用服务端 Retry-After（限流熔断 §3.3）：
+                                // 头值有效时 min(retryAfterMs, maxBackoffMs)，再被
+                                // deadline 收口；无头值保持指数退避。
+                                long backoff = policy.delayMs(attemptsStarted);
+                                if (failure.getRetryAfterMs() != null) {
+                                    backoff = Math.min(failure.getRetryAfterMs().longValue(),
+                                            policy.getMaxBackoffMs());
+                                }
                                 // delay 只算一次，监听器与真实调度使用同一个值。
                                 retryDelayMs = RetrySupport.clampDelayMs(
-                                        policy.delayMs(attemptsStarted), deadlineNanos, now);
+                                        backoff, deadlineNanos, now);
                                 retryCause = failure;
                                 retryFailedAttempt = attemptsStarted;
                             }
@@ -925,6 +963,14 @@ public final class LlmGateway {
          * 只保护“终态记录”不被竞态重复写；TOOL_USE 这类非终态轮次按轮正常记录。
          */
         private final AtomicBoolean terminalRecorded = new AtomicBoolean(false);
+        /**
+         * 当前在途轮次持有的 guard 许可。whenComplete 头部正常归还；取消监听、
+         * 回调队列溢出这类"run 已收敛但传输 future 可能永不完成"的兜底路径
+         * （不合作传输，AL-H05）经 {@link #abandonInFlightPermit} 幂等归还，
+         * 否则许可永久泄漏。引用相等 CAS 保证每张许可只被一条路径处理。
+         */
+        private final java.util.concurrent.atomic.AtomicReference<ProviderGuard.Permit> inFlightPermit =
+                new java.util.concurrent.atomic.AtomicReference<ProviderGuard.Permit>();
 
         private volatile int completed;
         private LlmCompletion last;
@@ -1014,6 +1060,14 @@ public final class LlmGateway {
             }
         }
 
+        /** 收敛兜底路径归还许可：不采样（传输结局未知/被取消），幂等。 */
+        private void abandonInFlightPermit() {
+            ProviderGuard.Permit permit = inFlightPermit.getAndSet(null);
+            if (permit != null) {
+                permit.release();
+            }
+        }
+
         /**
          * 回调队列溢出（M-2 顺序）：先异常完成 result 占住终态（OVERLOAD 语义
          * 不被取消监听的 ABORTED 吃掉），再 cancel——此时取消监听因 result 已
@@ -1025,6 +1079,8 @@ public final class LlmGateway {
             result.completeExceptionally(new LlmCallException("回调队列已满",
                     null, LlmCallException.Kind.OVERLOAD));
             cancel.cancel();
+            // 不合作传输的 future 可能永不完成，whenComplete 释放锚点等不到。
+            abandonInFlightPermit();
         }
 
         /**
@@ -1038,6 +1094,7 @@ public final class LlmGateway {
             recordTerminal(attempt, completed == 0 ? 0 : completed,
                     LlmStopReason.ABORTED, 0, 0L, null);
             completeBarrier(result(attempt, last, LlmStopReason.ABORTED, completed));
+            abandonInFlightPermit();
         }
 
         private void next() {
@@ -1050,7 +1107,57 @@ public final class LlmGateway {
                 completeBarrier(result(attempt, last, LlmStopReason.ABORTED, completed));
                 return;
             }
+            final ProviderGuard guard = guardFor(model);
             final int round = completed + 1;
+            if (guard == null) {
+                startRound(round, null);
+                return;
+            }
+            // 许可按轮获取（D4）。快速路径 onGranted 在当前线程同步回调（行为与
+            // 直通一致）；排队路径交接后在载体池上回调（线程纪律），排队超时经
+            // onRejected 收敛。立即拒绝（熔断开/队列满）同步抛出。
+            try {
+                guard.acquireAsync(new ProviderGuard.AcquireListener() {
+                    @Override
+                    public void onGranted(ProviderGuard.Permit permit) {
+                        startRound(round, permit);
+                    }
+
+                    @Override
+                    public void onRejected(LlmCallException reason) {
+                        fail(reason, round, 0L);
+                    }
+                }, new ProviderGuard.AliveCheck() {
+                    @Override
+                    public boolean isAlive() {
+                        return !result.isDone();
+                    }
+                }, executor.io());
+            } catch (LlmCallException ex) {
+                fail(ex, round, 0L);
+            }
+        }
+
+        /**
+         * 发起一轮模型请求。permit 为 null 表示该 provider 未配置 guard（直通）。
+         * 可能在三种线程上进入：调用线程、工具完成回调线程、guard 交接的载体线程。
+         */
+        private void startRound(final int round, final ProviderGuard.Permit permit) {
+            if (permit != null) {
+                inFlightPermit.set(permit);
+            }
+            if (result.isDone()) {
+                // 排队期间已被取消等其他路径收敛：只归还许可，不采样（未发起传输）。
+                abandonInFlightPermit();
+                return;
+            }
+            if (cancel != null && cancel.isCancelled()) {
+                abandonInFlightPermit();
+                recordTerminal(attempt, completed == 0 ? 0 : completed,
+                        LlmStopReason.ABORTED, 0, 0L, null);
+                completeBarrier(result(attempt, last, LlmStopReason.ABORTED, completed));
+                return;
+            }
             final LlmRequest request = new LlmRequest(model, transcript, declareTools ? tools : null,
                     stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(), null);
             final long started = System.currentTimeMillis();
@@ -1058,16 +1165,34 @@ public final class LlmGateway {
             try {
                 future = transports.get(model.getApi()).completeAsync(request);
             } catch (RuntimeException ex) {
+                // 没拿到 future：本轮结局在这里采样并归还，whenComplete 不会触发。
+                if (permit != null) {
+                    inFlightPermit.compareAndSet(permit, null);
+                    permit.verdict(ex);
+                    permit.release();
+                }
                 fail(ex, round, System.currentTimeMillis() - started);
                 return;
             }
             if (future == null) {
                 // 适配器违反 SPI 时不能让调用方挂在一个永远不完成的 future 上。
-                fail(new LlmCallException("协议适配器返回了空 future"), round,
-                        System.currentTimeMillis() - started);
+                LlmCallException nullFuture = new LlmCallException("协议适配器返回了空 future");
+                if (permit != null) {
+                    inFlightPermit.compareAndSet(permit, null);
+                    permit.verdict(nullFuture);
+                    permit.release();
+                }
+                fail(nullFuture, round, System.currentTimeMillis() - started);
                 return;
             }
             future.whenComplete((completion, error) -> {
+                // 释放锚点在 isDone 早退判断之前（审查 F1）：先按本轮传输结局采样并
+                // 归还许可，再判断终态——否则"取消先收敛、在途轮次后完成"会漏释放。
+                if (permit != null) {
+                    permit.verdict(error);
+                    permit.release();
+                    inFlightPermit.compareAndSet(permit, null);
+                }
                 if (result.isDone()) {
                     return;
                 }
@@ -1164,6 +1289,7 @@ public final class LlmGateway {
                 completeBarrier(result(attempt, null, LlmStopReason.ABORTED, completed));
                 return;
             }
+            markKeyFailure(attempt.model, cause);
             recordTerminal(attempt, round, LlmStopReason.ERROR, 0, latency, cause.getMessage());
             if (cause instanceof LlmCallException) {
                 failBarrier(cause);
@@ -1178,6 +1304,7 @@ public final class LlmGateway {
         private void cancelledByFuture() {
             recordTerminal(attempt, completed == 0 ? 0 : completed,
                     LlmStopReason.ABORTED, 0, 0L, null);
+            abandonInFlightPermit();
         }
 
         /**
@@ -1240,6 +1367,7 @@ public final class LlmGateway {
         }
 
         Attempt attempt = new Attempt(bizId, model, call.getProfile());
+        ProviderGuard guard = guardFor(model);
         int completed = 0;
         LlmCompletion last = null;
         while (true) {
@@ -1253,10 +1381,22 @@ public final class LlmGateway {
                     stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(), null);
             long started = System.currentTimeMillis();
             LlmCompletion completion;
+            // 许可按单次模型调用（每轮）获取（D4）：校验抛出点全部之后（F22），
+            // 工具执行期间不占许可。同步等待会 park 调用线程至多 concurrencyWaitMs。
+            ProviderGuard.Permit permit = null;
             try {
+                if (guard != null) {
+                    permit = guard.acquireSync();
+                }
                 completion = transport.complete(request);
             } catch (LlmCallException ex) {
                 long latency = System.currentTimeMillis() - started;
+                markKeyFailure(model, ex);
+                if (permit != null) {
+                    permit.verdict(ex);
+                    permit.release();
+                    permit = null;
+                }
                 if (cancel != null && cancel.isCancelled()) {
                     record(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
                     return result(attempt, null, LlmStopReason.ABORTED, completed);
@@ -1265,12 +1405,24 @@ public final class LlmGateway {
                 throw ex;
             } catch (RuntimeException ex) {
                 long latency = System.currentTimeMillis() - started;
+                LlmCallException wrapped = new LlmCallException("模型调用失败", ex);
+                if (permit != null) {
+                    permit.verdict(wrapped);
+                    permit.release();
+                    permit = null;
+                }
                 if (cancel != null && cancel.isCancelled()) {
                     record(attempt, round, LlmStopReason.ABORTED, 0, latency, null);
                     return result(attempt, null, LlmStopReason.ABORTED, completed);
                 }
                 record(attempt, round, LlmStopReason.ERROR, 0, latency, ex.getMessage());
-                throw new LlmCallException("模型调用失败", ex);
+                throw wrapped;
+            } finally {
+                if (permit != null) {
+                    // 正常返回（含 completion==null 的 SPI 违约抛出）按成功口径采样并归还。
+                    permit.verdict(null);
+                    permit.release();
+                }
             }
             long latency = System.currentTimeMillis() - started;
             if (completion == null) {
@@ -1331,6 +1483,34 @@ public final class LlmGateway {
                         System.currentTimeMillis() - started, null);
                 return result(attempt, completion, LlmStopReason.ABORTED, completed);
             }
+        }
+    }
+
+    /**
+     * 429/401 失败标记触发多 key 轮换（限流熔断计划 §3.4）：只认 HTTP 429/401，
+     * 其余类别（含 guard 合成的 OVERLOAD/CIRCUIT_OPEN）不标记。轮换失败不影响
+     * 主失败路径。key 值只在 resolver 内做值匹配，不出现在任何日志。
+     */
+    private void markKeyFailure(ResolvedModel model, Throwable cause) {
+        if (model == null || cause == null) {
+            return;
+        }
+        Throwable current = unwrap(cause);
+        if (!(current instanceof LlmCallException)) {
+            return;
+        }
+        LlmCallException ex = (LlmCallException) current;
+        if (ex.getKind() != LlmCallException.Kind.HTTP || ex.getStatusCode() == null) {
+            return;
+        }
+        int code = ex.getStatusCode().intValue();
+        if (code != 429 && code != 401) {
+            return;
+        }
+        try {
+            resolver.markKeyFailure(model.getProvider(), model.getApiKey());
+        } catch (RuntimeException ignored) {
+            // 轮换是尽力而为的兜底，不能改变本次调用的失败收敛。
         }
     }
 
