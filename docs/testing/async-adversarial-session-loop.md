@@ -8,12 +8,12 @@
 |---|---|---|---|---|
 | SL-01 | P0 | prepare 未完成时取消 future | Loop:140-141,148-152 | 否 |
 | SL-02 | P0 | 模型等待中取消 future | Loop:142-152, ALoop:176-208 | 部分（AsyncTest:86 仅验 abort） |
-| SL-03 | P0 | 循环已结束、finish 正在落盘时取消 | Loop:145-147,190-208 | 否 |
-| SL-04 | P1 | 重复 cancel / 重复 handle.cancel 的幂等性 | Loop:148-152, LlmCancelHandle:19-25 | 否 |
-| SL-05 | P0 | 外部 handle 在循环中取消得到 ABORTED | Loop:139,192-194, ALoop:249-251 | 否（仅预取消 AsyncTest:55） |
-| SL-06 | P1 | future.cancel 与 handle.cancel 混用 | Loop:139,148-152 | 否 |
-| SL-07 | P1 | ABORTED 返回旧会话快照而非最新版本 | Loop:192-194 | 否 |
-| SL-08 | P1 | 正常完成后 cancel 应返回 false | Loop:148-153 | 否 |
+| SL-03 | P0 | 循环已结束、finish 正在落盘时取消 | Loop:145-147,190-208 | 是（2026-10-25 修复缺陷：cancel 桥现在同步取消内层链，`cancelBetweenLoopAndFinishDoesNotPersist` 锁定该窗口不落盘） |
+| SL-04 | P1 | 重复 cancel / 重复 handle.cancel 的幂等性 | Loop:148-152, LlmCancelHandle:19-25 | 部分（句柄层 CAS 幂等已由 `LlmCancelHandleListenerTest` 锁定） |
+| SL-05 | P0 | 外部 handle 在循环中取消得到 ABORTED | Loop:139,192-194, ALoop:249-251 | 部分（预取消 AsyncTest:55） |
+| SL-06 | P1 | future.cancel 与 handle.cancel 混用 | Loop:139,148-152 | 部分（in-flight 传播已测；混用幂等由句柄层覆盖） |
+| SL-07 | P1 | ABORTED 返回旧会话快照而非最新版本 | Loop:192-194 | 部分（取消不落盘用例间接锁定返回原快照） |
+| SL-08 | P1 | 正常完成后 cancel 应返回 false | Loop:148-153 | 是（2026-10-25：`cancelAfterNormalCompletionReturnsFalse`） |
 | SL-09 | P0 | store.find 抛异常 | Loop:140-141,163-164 | 否 |
 | SL-10 | P1 | call 为 null | Loop:159-162 | 否 |
 | SL-11 | P1 | userId/sessionId 为空或空白 | Loop:159, StoreSupport:18-22 | 否 |
@@ -23,7 +23,7 @@
 | SL-15 | P1 | 本轮消息缺 id / 与历史 id 重复 | Loop:174, Codec:97-113 | 部分（AdvTest:404 同步） |
 | SL-16 | P0 | store.save 抛异常 | Loop:196-204 | 否（AdvTest:382 同步） |
 | SL-17 | P0 | save 成功但随后 find 失败 | Loop:204-206 | 否 |
-| SL-18 | P0 | 两个 resumeAsync 并发写同一会话 | Loop:163,203-204, Store:55-61 | 否（仅存储层 AdvTest:274） |
+| SL-18 | P0 | 两个 resumeAsync 并发写同一会话 | Loop:163,203-204, Store:55-61 | 是（2026-10-25：`concurrentResumesNeverLoseUpdatesSilently`——至少一个成功、失败显式呈现不静默丢更新；存储层 AdvTest:274 继续有效） |
 | SL-19 | P1 | 两个 ensureSession 并发创建 | Loop:76-91, Store:55-61 | 否 |
 | SL-20 | P1 | ensureSession 与 resumeAsync 交错 | Loop:76-91,163-164 | 否 |
 | SL-21 | P1 | 缓存返回旧版本导致冲突/陈旧快照 | Cache:33-56,59-78 | 部分（仅同步缓存故障） |

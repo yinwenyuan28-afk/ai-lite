@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 可续聊封装：组合 AgentLoop + AgentSessionStore。
@@ -137,17 +139,40 @@ public final class AgentSessionLoop {
                                                        final List<AgentSessionMessage> newUserTurns) {
         // 即使调用方只拿到返回的 future，也要让 cancel() 能传到内层循环和 HTTP。
         final LlmCancelHandle effectiveCancel = cancel == null ? new LlmCancelHandle() : cancel;
+        // 内层链（loop.runAsync + finish）的引用：外层 future.cancel 时一并取消，
+        // 避免"run 已完成、finish（落盘）尚未执行"的窗口里取消后仍落盘（SL-08）。
+        final AtomicReference<CompletableFuture<ResumeResult>> running =
+                new AtomicReference<CompletableFuture<ResumeResult>>();
+        final AtomicBoolean outerCancelled = new AtomicBoolean(false);
         CompletableFuture<Prepared> prepared = CompletableFuture.supplyAsync(
                 () -> prepare(userId, sessionId, call, lifecycles, newUserTurns), executor.io());
-        CompletableFuture<ResumeResult> future = prepared.thenComposeAsync(preparedTurn ->
-                        loop.runAsync(call.withMessages(preparedTurn.llmMessages), tools,
-                                preparedTurn.hooks, maxRounds, effectiveCancel)
-                                .thenApplyAsync(result -> finish(userId, sessionId, call,
-                                        preparedTurn, result), executor.io()),
-                executor.io());
+        final CompletableFuture<ResumeResult> future =
+                prepared.thenComposeAsync(new java.util.function.Function<Prepared,
+                        CompletableFuture<ResumeResult>>() {
+                    @Override
+                    public CompletableFuture<ResumeResult> apply(final Prepared preparedTurn) {
+                        CompletableFuture<ResumeResult> inner =
+                                loop.runAsync(call.withMessages(preparedTurn.llmMessages), tools,
+                                        preparedTurn.hooks, maxRounds, effectiveCancel)
+                                        .thenApplyAsync(result -> finish(userId, sessionId, call,
+                                                preparedTurn, result), executor.io());
+                        running.set(inner);
+                        if (outerCancelled.get() && !inner.isDone()) {
+                            inner.cancel(true);
+                        }
+                        return inner;
+                    }
+                }, executor.io());
         future.whenComplete((value, error) -> {
             if (future.isCancelled()) {
+                outerCancelled.set(true);
                 effectiveCancel.cancel();
+                CompletableFuture<ResumeResult> inner = running.get();
+                if (inner != null && !inner.isDone()) {
+                    // 内层链取消 → AgentLoop 的 future.cancel 桥触发 → abort + afterRun；
+                    // thenApplyAsync 在上游 cancelled 时跳过，finish 不再执行、不落盘。
+                    inner.cancel(true);
+                }
             }
         });
         return future;
