@@ -357,7 +357,7 @@ AL-H05（非合作 transport 收敛）、`LlmCancelHandle` 取消监听全部延
 ### Phase 5：测试与文档（P2）✅ 已完成（2026-10-24）
 
 - 新增约 15–20 个同步用例；异步专属用例标注为后续。
-- 更新 `api-usage`、`architecture`、`docs/testing/README.md`、README 统计、本计划执行记录。
+- 更新 `api-usage`、`architecture`、`docs/testing/测试索引.md`、README 统计、本计划执行记录。
 
 ### Phase 6：异步——已拆分至独立计划（2026-10-24）
 

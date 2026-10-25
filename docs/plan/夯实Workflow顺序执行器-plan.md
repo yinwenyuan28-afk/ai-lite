@@ -226,7 +226,7 @@
 
 - `WorkflowTest` 扩充到约 25 个用例；必要时新增 `WorkflowCancellationTest` / `WorkflowFailureTest`。
 - 新增 abort-aware fake transport（`bindAbort` 可观察），否则无法验证在途取消。
-- 更新 `docs/api-usage.md` §4.1、`docs/testing/README.md`，并在本文档回填审查结论与执行记录。
+- 更新 `docs/上层调用API使用指南.md` §4.1、`docs/testing/测试索引.md`，并在本文档回填审查结论与执行记录。
 - 验收：全量测试通过，文档与实现一致。
 
 ---
@@ -379,7 +379,7 @@ Workflow 夯实完成后，同样的“预校验 / 取消分层 / 失败可定�
 ### Phase 5：测试与文档
 
 - 新增 `WorkflowHardeningTest`（24 条）与 `LlmGatewayToolLoopRecordTest`（9 条）；现有 7 条 WorkflowTest 不改断言通过。
-- 更新 `docs/api-usage.md` §4.1、`docs/testing/README.md`、README 测试统计。
+- 更新 `docs/上层调用API使用指南.md` §4.1、`docs/testing/测试索引.md`、README 测试统计。
 
 ### 后续
 

@@ -492,9 +492,9 @@ ai-lite-retry-*（仅 oneStepWithRetryAsync）
 
 ### 5.3 文档
 
-- `docs/api-usage.md` §4.1：增加异步方法、类型模型、取消与重试边界；删除“`runAsync` 尚未提供”
+- `docs/上层调用API使用指南.md` §4.1：增加异步方法、类型模型、取消与重试边界；删除“`runAsync` 尚未提供”
   和 `Workflow.Step` 的表述。
-- `docs/testing/README.md`：新增异步测试类与用例数。
+- `docs/testing/测试索引.md`：新增异步测试类与用例数。
 - 本计划回填执行记录。
 - README 更新测试统计。
 - `docs/Workflow异步执行器使用指南.md` 与实现保持一致（尤其取消、`adapt`、commonPool）。
@@ -540,7 +540,7 @@ ai-lite-retry-*（仅 oneStepWithRetryAsync）
 ### Phase 5：测试与文档
 
 - 新增 `WorkflowAsyncTest`（覆盖取消用例）。
-- 更新 `docs/api-usage.md`、`docs/testing/README.md`、README、本计划执行记录。
+- 更新 `docs/上层调用API使用指南.md`、`docs/testing/测试索引.md`、README、本计划执行记录。
 - 验收：全量测试通过；JDK 8 构建无新增线程池依赖。
 
 ---
@@ -641,9 +641,9 @@ ai-lite-retry-*（仅 oneStepWithRetryAsync）
 - [夯实 Workflow 顺序执行器](夯实Workflow顺序执行器-plan.md)
 - [Workflow 异步执行器使用指南](Workflow异步执行器使用指南.md)
 - [夯实 oneWithRetry](夯实oneWithRetry-plan.md)
-- [单次模型调用入口](entry-points.md)
-- [API 使用指南](api-usage.md)
-- [架构说明](architecture.md)
+- [单次模型调用入口](单次模型调用入口.md)
+- [API 使用指南](上层调用API使用指南.md)
+- [架构说明](架构总览.md)
 
 ---
 

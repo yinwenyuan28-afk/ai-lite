@@ -364,9 +364,9 @@ HTTP 计划与回调计划可以独立实施；不引入 NIO 传输时，OkHttp 
 
 ### Phase 6：文档与发布（P2）
 
-- `docs/configuration.md`：`ai-lite.http.*` 字段、默认值、适用 transport、兼容矩阵。
-- `docs/user-level-concurrency.md`：各传输线程模型。
-- `docs/http-transport-concurrency-evaluation.md`：更新为“已调研 + 选型结论”，删除残留的“优先 Reactor Netty”旧建议。
+- `docs/配置说明.md`：`ai-lite.http.*` 字段、默认值、适用 transport、兼容矩阵。
+- `docs/用户级线程实现说明.md`：各传输线程模型。
+- `docs/HTTP传输并发选型评估.md`：更新为“已调研 + 选型结论”，删除残留的“优先 Reactor Netty”旧建议。
 - `README.md`：模块表、配置示例、exclusion、兼容矩阵。
 - 发布说明：Jetty 主路径、WebClient/Ktor 可选、Boot 2.1 legacy。
 
@@ -457,7 +457,7 @@ HTTP 计划与回调计划可以独立实施；不引入 NIO 传输时，OkHttp 
 
 ## 8. 与现有计划的关系
 
-- 本计划取代 `docs/http-transport-concurrency-evaluation.md` 中的“待评估”部分；评估文档保留为背景与基准依据。
+- 本计划取代 `docs/HTTP传输并发选型评估.md` 中的“待评估”部分；评估文档保留为背景与基准依据。
 - 不影响 `夯实oneWithRetry-plan.md`：重试入口不变，传输实现可替换。
 - 不影响 Workflow / AgentLoop 计划：它们只依赖 `HttpExecutor`/`AsyncHttpExecutor`。
 - 用户回调与 Agent 钩子的线程策略见 [夯实回调执行策略](夯实回调执行策略-plan.md)；本计划不修改 `LlmGateway`/`AgentLoop` 的回调语义。

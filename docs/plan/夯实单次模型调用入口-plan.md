@@ -69,7 +69,7 @@ LlmResult one(LlmCall call, LlmCancelHandle cancel);
 
 ## 2. Phase 0：契约基线（已实现）
 
-产出 `docs/entry-points.md`：
+产出 `docs/单次模型调用入口.md`：
 
 - 四个入口的返回类型、是否阻塞、取消方式、适用场景。
 - 第 1 节的 L1–L4 取消契约和终态语义。
@@ -149,8 +149,8 @@ LlmResult one(LlmCall call, LlmCancelHandle cancel);
 
 ## 7. Phase 5：文档与 CI（P2，已实现）
 
-- `docs/entry-points.md`：入口契约矩阵、L1–L4 取消语义、推荐用法。
-- `docs/retry.md`：单次入口的重试边界、可重试错误、幂等要求。
+- `docs/单次模型调用入口.md`：入口契约矩阵、L1–L4 取消语义、推荐用法。
+- `docs/重试说明.md`：单次入口的重试边界、可重试错误、幂等要求。
 - CI：所有异步测试带超时；新增测试类命名规范；对无超时 `get()` 的用例做评审检查。
 - README 文档索引补充本计划入口。
 
@@ -245,10 +245,10 @@ LlmResult one(LlmCall call, LlmCancelHandle cancel);
 
 ### 文档
 
-- 新增 `docs/entry-points.md`：入口矩阵、L1–L4、终态语义、错误分类。
-- 新增 `docs/retry.md`：重试边界、可重试分类、`RetryPolicy` 结构。
-- `docs/api-usage.md` 补充 `one(call, cancel)` 与取消/重试链接。
-- `docs/testing/README.md` 记录已实现用例和已修复缺陷。
+- 新增 `docs/单次模型调用入口.md`：入口矩阵、L1–L4、终态语义、错误分类。
+- 新增 `docs/重试说明.md`：重试边界、可重试分类、`RetryPolicy` 结构。
+- `docs/上层调用API使用指南.md` 补充 `one(call, cancel)` 与取消/重试链接。
+- `docs/testing/测试索引.md` 记录已实现用例和已修复缺陷。
 - `README.md` 文档索引补充两个新文档。
 
 ---

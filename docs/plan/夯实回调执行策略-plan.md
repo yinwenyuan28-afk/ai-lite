@@ -1,6 +1,6 @@
 # 夯实回调执行策略
 
-**状态（2026-10-24）：已实现并全量回归通过（执行记录见第 10 节）。** AgentLoop 异步泵结构（见《夯实AgentLoop异步执行器-plan.md》）已顺带完成本计划的一部分（CB-03 全部、CB-02 结构半边）。本计划从 `docs/夯实HTTP传输并发-plan.md` 拆出，专门处理“用户回调与 Agent 钩子不得无条件跑在共享 I/O 线程”的问题。它不改 HTTP 客户端实现。
+**状态（2026-10-24）：已实现并全量回归通过（执行记录见第 10 节）。** AgentLoop 异步泵结构（见《夯实AgentLoop异步执行器-plan.md》）已顺带完成本计划的一部分（CB-03 全部、CB-02 结构半边）。本计划从 `docs/plan/夯实HTTP传输并发-plan.md` 拆出，专门处理“用户回调与 Agent 钩子不得无条件跑在共享 I/O 线程”的问题。它不改 HTTP 客户端实现。
 
 一句话总纲：
 
@@ -308,7 +308,7 @@ Phase 0–4 当日实现完毕，全量回归通过：core 475（+7）、全模�
 | Phase 1 | core `SerialCallbackExecutor`（单 in-flight FIFO worker、有界队列、submit false 背压、close 清空幂等、共享池拒绝归位）+ `CallbackPolicy`（inline/io 静态工厂） |
 | Phase 2 | `LlmGateway.setCallbackPolicy`；`invokeAsync` 流式且 io 模式时 per-call 串行执行器承接 onDelta；完成屏障 `completeBarrier/failBarrier`（CB-07：future 完成前所有 delta 已回调，异常路径同样冲刷）；`failOverload` 按 M-2 顺序（先 OVERLOAD 异常完成再 cancel）；`Kind.OVERLOAD` additive（`defaultRetryable` 落 default=false） |
 | Phase 3 | `AgentLoop` 6 参构造器注入策略；`AsyncRun` per-run 串行执行器；`advance()` drain 派发（io 投递/inline 就地，M-1 投递被拒在提交线程 convergeFailure(OVERLOAD)+cancel）；工具链泛化——`submitToolBatch` 统一链，beforeTool/afterTool/写回走 `callbackExec`，工具本体双来源（`executeOneAsync` future 直接用/普通 `supplyAsync(io)`，S-3）；并行异步版三段非阻塞（M-3 fail-fast 汇合、M-4 异步无捷径）；同步 `run` 的 `runToolsParallel` 不变；终态三收敛点关闭回调通道 |
-| Phase 4 | 文档：configuration.md §3.1 新节、api-usage onDelta 提示、testing/README、README 统计、本记录 |
+| Phase 4 | 文档：配置说明.md §3.1 新节、api-usage onDelta 提示、testing/README、README 统计、本记录 |
 
 ### 测试（新增 7 条，全部通过）
 

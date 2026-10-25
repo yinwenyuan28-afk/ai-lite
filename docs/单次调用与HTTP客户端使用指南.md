@@ -90,7 +90,7 @@ AI Lite HTTP 传输：transport=okhttp，实现=...OkHttpExecutor
 
 ## 2. 配置参考
 
-只列本层相关的字段；完整字段见 [configuration.md](configuration.md)。
+只列本层相关的字段；完整字段见 [配置说明.md](配置说明.md)。
 
 ### 2.1 `ai-lite.llm`
 
@@ -628,9 +628,9 @@ public LlmCallStore llmCallStore(JdbcTemplate jdbc) {
 
 ## 10. 相关文档
 
-- [API 使用指南](api-usage.md)
-- [单次模型调用入口](entry-points.md)
-- [重试边界](retry.md)
-- [配置参考](configuration.md)
-- [架构说明](architecture.md)
-- [HTTP 传输并发模型评估](http-transport-concurrency-evaluation.md)
+- [API 使用指南](上层调用API使用指南.md)
+- [单次模型调用入口](单次模型调用入口.md)
+- [重试边界](重试说明.md)
+- [配置参考](配置说明.md)
+- [架构说明](架构总览.md)
+- [HTTP 传输并发模型评估](HTTP传输并发选型评估.md)

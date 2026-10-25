@@ -2,7 +2,7 @@
 
 > 适用版本：0.1.0-SNAPSHOT
 > 目标读者：业务开发、平台接入方、需要替换 SPI 实现的团队
-> 配套文档：[配置参考](configuration.md)、[用户级线程实现](user-level-concurrency.md)
+> 配套文档：[配置参考](配置说明.md)、[用户级线程实现](用户级线程实现说明.md)
 
 本文按"业务真正会调用的 API"组织，覆盖网关、Agent 编排、会话、提示词、并发执行器和扩展点。内部工具类（`TransportSupport`、`AgentSessionStoreSupport`、`AsyncLlmCallLogger` 等）不在本文范围内。
 
@@ -59,7 +59,7 @@ ai-lite:
         thinking-level: "off"
 ```
 
-字段细节见 [configuration.md](configuration.md)。
+字段细节见 [配置说明.md](配置说明.md)。
 
 ### 2.3 第一次调用
 
@@ -143,7 +143,7 @@ public class ChatService {
 - 网关默认不做自动重试；需要重试时显式使用 `gateway.oneWithRetry(call, policy, cancel?)`
   或 `gateway.oneWithRetryAsync(call, policy, cancel?)`。两者都只覆盖非流式调用，
   每次尝试独立写一条调用记录；异步版的退避与下一次尝试都在 `ai-lite-retry-*` 线程上，
-  HTTP 客户端线程不 sleep。完整矩阵见 [单次模型调用入口](entry-points.md) 与 [重试边界](retry.md)。
+  HTTP 客户端线程不 sleep。完整矩阵见 [单次模型调用入口](单次模型调用入口.md) 与 [重试边界](重试说明.md)。
 
 #### 3.1.2 工具与多轮方法
 
@@ -333,7 +333,7 @@ LlmResult result = gateway.oneByStream(call, new Consumer<String>() {
 }, null);
 ```
 
-`onDelta` 收到的是增量文本（可能包含推理增量，取决于模型和协议）。回调可能在不同线程上执行，不要在里面做长时间阻塞操作，也不要依赖请求线程的 `ThreadLocal`。如果回调里确实有慢操作（打日志、查库），配置 `ai-lite.callback.mode: io` 让回调经独立回调池串行执行（见 `docs/configuration.md` §3.1），不拖慢共享 I/O 线程上的其他请求。
+`onDelta` 收到的是增量文本（可能包含推理增量，取决于模型和协议）。回调可能在不同线程上执行，不要在里面做长时间阻塞操作，也不要依赖请求线程的 `ThreadLocal`。如果回调里确实有慢操作（打日志、查库），配置 `ai-lite.callback.mode: io` 让回调经独立回调池串行执行（见 `docs/配置说明.md` §3.1），不拖慢共享 I/O 线程上的其他请求。
 
 ### 3.9 同步 vs 异步
 
@@ -346,7 +346,7 @@ CompletableFuture<LlmResult> future = gateway.oneAsync(call);
 future.thenAccept(r -> System.out.println(r.getContent()));
 ```
 
-详细并发模型见 [user-level-concurrency.md](user-level-concurrency.md)。高并发场景优先使用异步方法；协程桥接见第 7 节。
+详细并发模型见 [用户级线程实现说明.md](用户级线程实现说明.md)。高并发场景优先使用异步方法；协程桥接见第 7 节。
 
 ### 3.10 错误处理
 
@@ -812,7 +812,7 @@ public interface ExecutorProvider extends Closeable {
 }
 ```
 
-`io()` 用于**阻塞副作用任务**：异步调用日志、`AgentLoop` 的工具执行、会话加载/落盘，以及业务自己的阻塞 SDK。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整对比见 [architecture.md](architecture.md) 的 5.2 节。
+`io()` 用于**阻塞副作用任务**：异步调用日志、`AgentLoop` 的工具执行、会话加载/落盘，以及业务自己的阻塞 SDK。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整对比见 [架构总览.md](架构总览.md) 的 5.2 节。
 
 | 实现 | 模块 | 构造/说明 |
 | --- | --- | --- |
@@ -835,7 +835,7 @@ ai-lite:
     rejection-policy: abort   # abort / caller-runs
 ```
 
-不同模式对字段的生效范围不同：`direct` / `virtual` 忽略全部池字段；`coroutines` 只用 `core-size`（载体数）和 `thread-name-prefix`；`platform` 使用全部字段。字段默认值和选型建议见 [configuration.md](configuration.md) 第 3 节。
+不同模式对字段的生效范围不同：`direct` / `virtual` 忽略全部池字段；`coroutines` 只用 `core-size`（载体数）和 `thread-name-prefix`；`platform` 使用全部字段。字段默认值和选型建议见 [配置说明.md](配置说明.md) 第 3 节。
 
 ### 7.2 Kotlin 协程桥接
 
@@ -875,7 +875,7 @@ ai-lite:
 
 需要引入 `ai-lite-executor-jdk21`。Starter 通过反射加载，JDK 8 运行时不会解析虚拟线程类。`mode=virtual` 只改变 `io()` 的实现，不会自动把 `gateway.one()` 变成异步；把阻塞调用提交到 `io()` 才会跑在虚拟线程上。
 
-详细原理、取消链和限制见 [user-level-concurrency.md](user-level-concurrency.md)。
+详细原理、取消链和限制见 [用户级线程实现说明.md](用户级线程实现说明.md)。
 
 ---
 
@@ -1244,8 +1244,8 @@ public final class MyTransport implements LlmTransport {
 
 ## 15. 相关文档
 
-- [配置参考](configuration.md)：所有 `ai-lite.*` 字段。
-- [Agent Loop 发给 LLM 的上下文](llm-context.md)：每轮请求组成、thinking 字段与协议差异。
-- [用户级线程实现](user-level-concurrency.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
+- [配置参考](配置说明.md)：所有 `ai-lite.*` 字段。
+- [Agent Loop 发给 LLM 的上下文](AgentLoop上下文说明.md)：每轮请求组成、thinking 字段与协议差异。
+- [用户级线程实现](用户级线程实现说明.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
 - [QPS 基准](../benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
 - [README](../README.md)：模块列表和快速开始。

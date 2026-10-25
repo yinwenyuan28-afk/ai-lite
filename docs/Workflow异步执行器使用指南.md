@@ -3,7 +3,7 @@
 本文面向业务调用方，说明 `Workflow.runAsync` 的用法、类型模型、取消、重试与性能边界。
 
 适用范围：`ai-lite` 0.1.0-SNAPSHOT；JDK 8+；Spring Boot 2.1 ~ 2.7。
-设计背景见 [夯实 Workflow 异步执行器](夯实Workflow异步执行器-plan.md)。
+设计背景见 [夯实 Workflow 异步执行器](plan/夯实Workflow异步执行器-plan.md)。
 
 一句话理解：
 
@@ -388,9 +388,9 @@ ai-lite-retry-*（仅 oneStepWithRetryAsync）
 
 ## 13. 相关文档
 
-- [夯实 Workflow 异步执行器](夯实Workflow异步执行器-plan.md)
-- [夯实 Workflow 顺序执行器](夯实Workflow顺序执行器-plan.md)
-- [API 使用指南](api-usage.md)
-- [单次模型调用入口](entry-points.md)
-- [重试边界](retry.md)
-- [架构说明](architecture.md)
+- [夯实 Workflow 异步执行器](plan/夯实Workflow异步执行器-plan.md)
+- [夯实 Workflow 顺序执行器](plan/夯实Workflow顺序执行器-plan.md)
+- [API 使用指南](上层调用API使用指南.md)
+- [单次模型调用入口](单次模型调用入口.md)
+- [重试边界](重试说明.md)
+- [架构说明](架构总览.md)

@@ -64,7 +64,7 @@ ai-lite:
 | --- | --- | --- |
 | Phase M0 | starter `MicrometerLlmCallStore`（装饰器 + 指标映射 + 全量 try/catch） | 单测：SimpleMeterRegistry 上计数/计时/标签逐一断言；指标异常不影响 delegate |
 | Phase M1 | 装配：条件注册、装饰用户 Bean、配置项 | 装配测试：有/无 registry、llm-enabled=false、自定义 store 被装饰 |
-| Phase M2 | 文档：configuration.md 指标节、api-usage 指标段落、testing/README、README 统计 | 文档与行为一致 |
+| Phase M2 | 文档：配置说明.md 指标节、api-usage 指标段落、testing/README、README 统计 | 文档与行为一致 |
 
 ## 4. 测试矩阵
 
@@ -99,7 +99,7 @@ Phase M0–M2 当日完成，starter 回归 53 测试全绿。
 | --- | --- |
 | M0 | starter `MicrometerLlmCallStore`：装饰 delegate store，四个指标（calls/duration/tokens/rounds）按 §2.2 口径映射；insert 全量 try/catch（Error 亦吞），指标故障不影响 delegate；core 模块零改动（验收达成） |
 | M1 | `AiLiteConfig.Metrics`（llm-enabled 默认 true）+ starter pom micrometer-core optional（Boot BOM 管版本 1.1.8）+ `aiLiteGateway` 装配点装饰：registry 存在且启用时包装传入的 store 引用，不新增 bean、不夺用户 Bean；registry 缺失或关闭时零影响 |
-| M2 | configuration.md §3.2 指标节（含不做了 trace 说明）、testing/README、README 统计、本记录 |
+| M2 | 配置说明.md §3.2 指标节（含不做了 trace 说明）、testing/README、README 统计、本记录 |
 
 ### 测试（新增 9 条，全部通过）
 

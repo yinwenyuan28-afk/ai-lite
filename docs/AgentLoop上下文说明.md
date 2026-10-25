@@ -2,7 +2,7 @@
 
 > 适用版本：0.1.0-SNAPSHOT
 > 相关代码：`AgentLoop`、`LlmGateway`、三个协议适配器、`LlmMessage`、`LlmResult`
-> 配套文档：[API 使用指南](api-usage.md)、[用户级线程实现](user-level-concurrency.md)
+> 配套文档：[API 使用指南](上层调用API使用指南.md)、[用户级线程实现](用户级线程实现说明.md)
 
 ## 0. 一句话结论
 

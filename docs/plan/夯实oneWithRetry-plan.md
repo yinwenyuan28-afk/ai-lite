@@ -201,7 +201,7 @@ LlmCoroutines.oneWithRetry(gateway, call, policy, cancel?)
 ### Phase 3：测试与文档（P1）
 
 - 新增 `LlmGatewayRetryTest`、`RetryPolicyTest`，扩充传输错误分类测试。
-- 更新 `docs/retry.md`、`docs/entry-points.md`、`docs/api-usage.md`。
+- 更新 `docs/重试说明.md`、`docs/单次模型调用入口.md`、`docs/上层调用API使用指南.md`。
 - README 文档索引补本计划。
 
 ---
@@ -282,9 +282,9 @@ LlmCoroutines.oneWithRetry(gateway, call, policy, cancel?)
 
 ### 文档
 
-- `docs/retry.md`：补充 `oneWithRetry` 用法、结构化分类和默认关闭语义，含 Kotlin 示例。
-- `docs/entry-points.md`：入口表增加 `oneWithRetry` 和 `LlmCoroutines.oneWithRetry`，说明只覆盖同步非流式与协程非流式。
-- `docs/api-usage.md`：§3.1.1 与 §7 增加重载说明。
+- `docs/重试说明.md`：补充 `oneWithRetry` 用法、结构化分类和默认关闭语义，含 Kotlin 示例。
+- `docs/单次模型调用入口.md`：入口表增加 `oneWithRetry` 和 `LlmCoroutines.oneWithRetry`，说明只覆盖同步非流式与协程非流式。
+- `docs/上层调用API使用指南.md`：§3.1.1 与 §7 增加重载说明。
 - `ai-lite-executor-coroutines/README.md`：补充 suspend 重试用法。
 - `README.md`：文档索引补充本计划。
 
@@ -698,7 +698,7 @@ CompletableFuture<LlmResult> oneWithRetryAsync(LlmCall call, RetryPolicy policy,
 ### 9.10 测试矩阵
 
 详细用例（数据、线程、竞态、记录数、断言）见
-[docs/testing/oneWithRetryAsync-test-cases.md](testing/oneWithRetryAsync-test-cases.md)。
+[docs/testing/异步重试测试用例.md](testing/异步重试测试用例.md)。
 本表只保留分组总览。
 
 | 分组 | 用例数 | 覆盖 |
@@ -771,8 +771,8 @@ CompletableFuture<LlmResult> oneWithRetryAsync(LlmCall call, RetryPolicy policy,
   `LlmGateway` 构造器注入；旧构造器兼容。
 - **Phase C（API）**：实现 `oneWithRetryAsync` 两个重载、取消代理、状态机。
 - **Phase D（测试）**：9.10 的用例，含竞态与调度器队列断言。
-- **Phase E（文档）**：`docs/retry.md`、`docs/entry-points.md`、`docs/api-usage.md`、
-  `docs/configuration.md`（如有新 Bean 配置）、README。
+- **Phase E（文档）**：`docs/重试说明.md`、`docs/单次模型调用入口.md`、`docs/上层调用API使用指南.md`、
+  `docs/配置说明.md`（如有新 Bean 配置）、README。
 
 建议顺序：A → B → C → D → E。A 是纯重构，先确保同步/协程测试全绿，再动异步状态机。
 
@@ -788,7 +788,7 @@ Phase A–E 已完成：
 | B | `RetryScheduler`：2 个 daemon 线程、`ai-lite-retry-*`、`removeOnCancelPolicy`、共享实例。Starter 新增 `aiLiteRetryScheduler` Bean；`LlmGateway` 新增 6 参构造器并保留 5 参兼容；`aiLiteGateway` 用 `@Qualifier` 注入。 |
 | C | `LlmGateway.oneWithRetryAsync` 两个重载与 `RetryRun` 状态机：终态 CAS、锁内发布、每尝试新 handle、外层取消代理、future 取消清理、零延迟调度、deadline 裁剪、异常归一化。 |
 | D | `LlmGatewayAsyncRetryTest`（42）、`LlmGatewayAsyncRetryParityTest`（6）、`AsyncRetryAssemblyTest`（7）、Kotlin parity（2）。 |
-| E | `docs/retry.md`、`entry-points.md`、`api-usage.md`、`configuration.md`、README、测试文档。 |
+| E | `docs/重试说明.md`、`单次模型调用入口.md`、`上层调用API使用指南.md`、`配置说明.md`、README、测试文档。 |
 
 实现中的两个细节：
 
