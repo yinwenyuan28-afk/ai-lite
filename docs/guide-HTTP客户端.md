@@ -1,98 +1,20 @@
-# 单次调用与 HTTP 客户端使用指南
+# HTTP 客户端使用指南
 
-本文面向**把 ai-lite 作为依赖引入的业务应用**，只讲两件事：
-
-1. 单次模型调用：`LlmGateway.one` / `oneAsync` / `oneByStream*` / `oneWithRetry*`。
-2. HTTP 客户端层：默认 OkHttp、切换传输、调优、自定义实现。
-
-Agent 循环、Workflow、会话续聊、提示词中心不在本文范围内；它们建立在本层之上。
+> **本文在哪一层**：HTTP 传输层（外加一页单次调用 API 速查）。
+> **讲什么**：五层里最底下那层——六种传输怎么选怎么切、连接池与超时调优、自定义 `HttpExecutor`；以及构造 `LlmCall`、结果字段、常见问题速查。
+> **不讲什么**：传输层为什么这样设计（线程模型、SSE 解析、取消怎么贯穿）→ [HTTP传输层原理](desc-HTTP传输.md)；一次调用的内部旅程（线程接力、重试环、出口保护）→ [单次模型调用入口](desc-单次调用.md)；重试策略细节 → [重试边界](desc-重试.md)；编排层 → [Workflow异步执行器使用指南](guide-Workflow异步执行器.md)。生词查 [术语表](ref-术语表.md)。
 
 适用版本：`0.1.0-SNAPSHOT`；JDK 8+；Spring Boot 2.1 ~ 2.7。
 
----
-
-## 1. 五分钟接入
-
-### 1.1 引入依赖
-
-默认场景只需要 Starter，它会传递引入 `ai-lite-core`、`ai-lite-prompt` 和
-`ai-lite-http-okhttp`：
-
-```xml
-<dependency>
-    <groupId>io.github.yinwenyuan28-afk</groupId>
-    <artifactId>ai-lite-spring-boot-starter</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
-</dependency>
-```
-
-### 1.2 最小配置
-
-```yaml
-ai-lite:
-  llm:
-    biz-ids: [my-biz]
-    default-profile: main
-    providers:
-      my-provider:
-        api: openai-completions        # openai-completions | openai-responses | anthropic-messages
-        base-url: ${AI_BASE_URL}       # 只写到 /v1，不要带 /chat/completions
-        api-key: ${AI_API_KEY}
-        models:
-          - id: ${AI_MODEL}
-            reasoning: false
-            input: [text]
-            max-tokens: 4096
-    profiles:
-      main:
-        provider: my-provider
-        model: ${AI_MODEL}
-        thinking-level: "off"          # 加引号，避免 YAML 解析成布尔值
-```
-
-密钥建议只走环境变量或 `${ENV}` / `${ENV:default}` / `$ENV` 占位符，不要提交到仓库。
-
-### 1.3 注入并调用
-
-```java
-@Service
-public class ChatService {
-
-    private final LlmGateway gateway;
-
-    public ChatService(LlmGateway gateway) {
-        this.gateway = gateway;
-    }
-
-    public String chat(String text) {
-        LlmCall call = LlmCall.profile("my-biz", "main",
-                Collections.singletonList(LlmMessage.user(text)));
-        LlmResult result = gateway.one(call);
-        return result.getContent();
-    }
-}
-```
-
-`LlmGateway` 是线程安全的共享门面，作为单例注入即可，不要每次请求 `new`。
-
-### 1.4 启动后确认
-
-应用启动时会打印实际使用的 HTTP 传输：
-
-```text
-AI Lite HTTP 传输：transport=okhttp，实现=...OkHttpExecutor
-```
-
-如果同时定义了自定义 `HttpExecutor` Bean，会改为警告，提示 `ai-lite.http.transport`
-被覆盖。
+本文结构：§1 配置参考；§2 单次调用 API 速查（行为细节在《单次模型调用入口》）；§3–§5 HTTP 客户端层本体（三层关系、切换传输、装配覆盖）；§6 调用记录；§7 常见问题。
 
 ---
 
-## 2. 配置参考
+## 1. 配置参考
 
-只列本层相关的字段；完整字段见 [配置说明.md](配置说明.md)。
+只列本层相关的字段；完整字段见 [ref-配置.md](ref-配置.md)。
 
-### 2.1 `ai-lite.llm`
+### 1.1 `ai-lite.llm`
 
 | 字段 | 说明 |
 | --- | --- |
@@ -124,7 +46,7 @@ AI Lite HTTP 传输：transport=okhttp，实现=...OkHttpExecutor
 | `thinking-level-map` | 业务档位到供应商档位的映射 |
 | `sampler-params` | 采样参数，例如 `temperature`、`top-p` |
 
-### 2.2 `ai-lite.http`
+### 1.2 `ai-lite.http`
 
 ```yaml
 ai-lite:
@@ -146,7 +68,7 @@ ai-lite:
 - `jetty` / `ktor-cio` / `webclient` / `jdk8` 不使用 `dispatcher.*`，配置了会得到启动警告。
 - 只配置 `transport` 而没有引入对应模块，会在启动时 fail-fast，不会静默退回 OkHttp。
 
-### 2.3 `ai-lite.executor`
+### 1.3 `ai-lite.executor`
 
 ```yaml
 ai-lite:
@@ -162,26 +84,24 @@ ai-lite:
 
 ---
 
-## 3. 单次调用 API
+## 2. 单次调用 API 速查
 
-### 3.1 入口矩阵
+本节只放"怎么用"；行为细节（线程接力、取消分层、重试环、出口保护）都在 [单次模型调用入口](desc-单次调用.md)，本文不重复。
 
-| 方法 | 返回 | 阻塞 | 取消 |
-| --- | --- | --- | --- |
-| `one(call)` | `LlmResult` | 是 | 只能等超时 |
-| `one(call, cancel)` | `LlmResult` | 是 | `handle.cancel()` |
-| `oneAsync(call)` | `CompletableFuture<LlmResult>` | 否 | `future.cancel(true)` |
-| `oneAsync(call, cancel)` | `CompletableFuture<LlmResult>` | 否 | handle 或 future |
-| `oneByStream(call, onDelta, cancel)` | `LlmResult` | 是 | handle |
-| `oneByStreamAsync(call, onDelta, cancel)` | `CompletableFuture<LlmResult>` | 否 | handle 或 future |
-| `oneWithRetry(call, policy)` | `LlmResult` | 是 | — |
-| `oneWithRetry(call, policy, cancel)` | `LlmResult` | 是 | handle |
-| `oneWithRetryAsync(call, policy)` | `CompletableFuture<LlmResult>` | 否 | future |
-| `oneWithRetryAsync(call, policy, cancel)` | `CompletableFuture<LlmResult>` | 否 | handle 或 future |
+### 2.1 入口矩阵
+
+完整矩阵（10 个入口的返回、阻塞、取消对照）见 [单次模型调用入口](desc-单次调用.md) §11.1。日常最常用的四个：
+
+| 任务 | 入口 |
+| --- | --- |
+| 同步等结果 | `gateway.one(call)` |
+| Web 请求释放线程 | `gateway.oneAsync(call)`，controller 返回 future |
+| 边生成边推送 | `gateway.oneByStreamAsync(call, onDelta, cancel)` |
+| 显式重试（非阻塞） | `gateway.oneWithRetryAsync(call, policy, cancel)` |
 
 `round` / `toolLoop` 属于工具相关入口，本文不展开；它们复用同一套 HTTP 与取消语义。
 
-### 3.2 构造 `LlmCall`
+### 2.2 构造 `LlmCall`
 
 ```java
 // 1) 用配置里的 profile
@@ -220,7 +140,7 @@ LlmMessage.other("其他角色内容");
 
 图片要求模型配置的 `input` 包含 `image`，否则发请求前抛 `LlmCallException`。
 
-### 3.3 同步调用
+### 2.3 同步调用
 
 ```java
 LlmResult result = gateway.one(call);
@@ -234,7 +154,7 @@ long latency = result.getLatencyMs();
 
 同步入口会占住调用线程直到响应、超时或取消。适合脚本、批处理、CLI。
 
-### 3.4 异步调用
+### 2.4 异步调用
 
 ```java
 CompletableFuture<LlmResult> future = gateway.oneAsync(call);
@@ -258,7 +178,7 @@ I/O、读 body 和解析，每个在途请求占一个 Dispatcher 线程；流�
 `onCompletion` / `onTimeout` 里调用 `cancel.cancel()`。直接返回 `CompletableFuture`
 时，Servlet 容器不保证断连会取消这个 future。
 
-### 3.5 流式调用
+### 2.5 流式调用
 
 ```java
 LlmCancelHandle cancel = new LlmCancelHandle();
@@ -278,7 +198,7 @@ CompletableFuture<LlmResult> future = gateway.oneByStreamAsync(call,
 - 已经收到 delta 后再失败，不会自动重试；是否续写由业务决定。
 - 流式读取超时按“两次数据之间”的间隔计算，不是整个响应时长。
 
-### 3.6 取消
+### 2.6 取消
 
 ```java
 LlmCancelHandle cancel = new LlmCancelHandle();
@@ -288,22 +208,11 @@ LlmResult result = gateway.one(call, cancel);
 cancel.cancel();
 ```
 
-| 取消方式 | 结果 |
-| --- | --- |
-| `handle.cancel()`（同步） | 返回 `LlmResult(stopReason=ABORTED)` |
-| `handle.cancel()`（异步） | future 正常完成，结果 `ABORTED` |
-| `future.cancel(true)` | future 进入 cancelled，`get()` 抛 `CancellationException` |
-| 发请求前取消 | 不发 HTTP，直接得到 `ABORTED` |
+`handle.cancel()`：同步入口返回 `ABORTED` 结果，异步入口 future 正常完成 `ABORTED`。`future.cancel(true)`：future 进入 cancelled，底层 HTTP 同时被中止。发请求前取消则不发 HTTP 直接 `ABORTED`。
 
-约定：
+分层保证（L1–L4）、传输差异、取消竞态的完整契约见 [单次模型调用入口](desc-单次调用.md) §9。要点只有两条：`LlmCancelHandle` 是一次性的，不要跨调用复用；取消后仍可能写一条 `aborted` 调用记录，这是预期行为。
 
-- `LlmCancelHandle` 是**一次性**的，不要跨调用复用；重试入口内部会自己管理句柄。
-- 取消只保证 L2（取消后不再推进）；在途 HTTP 能否立即中断取决于传输：
-  OkHttp / Jetty / WebClient / Ktor 基本即时，JDK 8 的 `HttpURLConnection` 在读正文阶段
-  可能等到读超时。
-- 取消后仍可能写一条 `aborted` 调用记录，这是预期行为。
-
-### 3.7 显式重试
+### 2.7 显式重试
 
 ```java
 RetryPolicy policy = RetryPolicy.builder()
@@ -325,39 +234,9 @@ CompletableFuture<LlmResult> future =
 
 默认策略：3 次尝试、200ms 起、2 倍退避、封顶 2s、带抖动、无总 deadline。
 
-只重试这些错误：
+可重试/不可重试分类、`Retry-After` 采纳、异步重试的线程与取消、自定义调度器 Bean（`aiLiteRetryScheduler`）见 [重试边界](desc-重试.md)；重试的完整流程图见 [单次模型调用入口](desc-单次调用.md) §4。
 
-- `Kind.TRANSPORT`：连接失败、超时、连接重置等；
-- `Kind.HTTP` 且状态码为 408 / 429 / 500 / 502 / 503 / 504；
-- `Kind.UNKNOWN` 但根因是 `IOException`（兼容第三方 transport）。
-
-不重试：400/401/403/404/422、`PARSE`、`CONFIG`、`CANCELLED`、取消、内容审核拒绝。
-
-异步重试的线程与取消：
-
-- HTTP 完成回调只做分类和 `schedule`，不 sleep；
-- 下一次尝试在 `ai-lite-retry-*` 线程上发起；
-- `handle.cancel()` 或 `future.cancel(true)` 会取消已排队的退避任务；
-- 每次尝试独立写一条调用记录，重试会重复计费；
-- 总 deadline 只阻止新尝试，不打断在途请求。
-
-默认调度器 Bean 名为 `aiLiteRetryScheduler`，2 个 daemon 线程。需要覆盖时提供同名 Bean：
-
-```java
-@Bean(name = "aiLiteRetryScheduler", destroyMethod = "shutdownNow")
-public ScheduledExecutorService retryScheduler() {
-    ScheduledThreadPoolExecutor executor =
-            new ScheduledThreadPoolExecutor(4, r -> {
-                Thread t = new Thread(r, "my-retry-" + counter.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            });
-    executor.setRemoveOnCancelPolicy(true);
-    return executor;
-}
-```
-
-### 3.8 结果与错误
+### 2.8 结果与错误
 
 `LlmResult` 常用字段：
 
@@ -388,9 +267,9 @@ public ScheduledExecutorService retryScheduler() {
 
 ---
 
-## 4. HTTP 客户端层
+## 3. HTTP 客户端层
 
-### 4.1 三层关系
+### 3.1 三层关系
 
 ```text
 LlmGateway                 业务入口：校验、解析模型、记录、取消、重试
@@ -400,7 +279,7 @@ LlmGateway                 业务入口：校验、解析模型、记录、取�
 
 业务代码通常只接触 `LlmGateway`；只有要换 HTTP 客户端或自定义协议时才需要往下看。
 
-### 4.2 默认实现
+### 3.2 默认实现
 
 Starter 默认引入 OkHttp 4.12：
 
@@ -409,7 +288,7 @@ Starter 默认引入 OkHttp 4.12：
 - 连接池大小跟随 `max-requests`，避免高并发下反复建连；
 - 提供 `executeAsync` / `executeStreamingAsync`，`oneAsync` 不占调用线程。
 
-### 4.3 切换传输
+### 3.3 切换传输
 
 | 传输 | 额外依赖 | 配置 | 特点 |
 | --- | --- | --- | --- |
@@ -440,7 +319,7 @@ ai-lite:
 
 切换后 `dispatcher.*`、`jetty.*`、`ktor.*` 中与当前传输无关的配置不会生效，启动日志会提示。
 
-### 4.4 调优建议
+### 3.4 调优建议
 
 - **先看瓶颈在哪。** 如果主要时间在等上游，换传输不会提高单请求延迟，只会改变线程占用。
 - **OkHttp**：提高 `max-requests` 时同步观察连接池和上游限流；`max-requests-per-host` 默认 5，单端点高并发时要显式调大。
@@ -449,7 +328,7 @@ ai-lite:
 - **超时**：供应商级 `connect-timeout-ms` / `read-timeout-ms` 是默认值，单次调用可用
   `LlmCall.timeouts(...)` 覆盖；重试的总时限用 `RetryPolicy.totalDeadlineMs`。
 
-### 4.5 自定义 `HttpExecutor`
+### 3.5 自定义 `HttpExecutor`
 
 实现 `HttpExecutor`（推荐同时实现 `AsyncHttpExecutor`），注册成 Bean：
 
@@ -483,7 +362,7 @@ Starter 的默认 `HttpExecutor` 带 `@ConditionalOnMissingBean`，用户 Bean �
 - 取消通过 `request.getCancel().bindAbort(runnable)` 绑定连接中断动作；
 - 不要在 `onLine` 里做长时间阻塞操作。
 
-### 4.6 不用 Spring 的手工装配
+### 3.6 不用 Spring 的手工装配
 
 ```java
 AiLiteConfig config = new AiLiteConfig();
@@ -516,7 +395,7 @@ try {
 
 ---
 
-## 5. 装配与覆盖
+## 4. 装配与覆盖
 
 | Bean | 默认 | 覆盖方式 |
 | --- | --- | --- |
@@ -540,7 +419,7 @@ try {
 
 ---
 
-## 6. 线程模型
+## 5. 线程模型
 
 | 线程 | 谁在用 | 注意 |
 | --- | --- | --- |
@@ -554,15 +433,9 @@ try {
 
 ---
 
-## 7. 调用记录
+## 6. 调用记录
 
-每次单次调用写一条 `LlmCallRecord`，包含：
-
-`bizId`、`provider`、`modelId`、`api`、`profile`、`thinkingLevel`、`roundNo`、
-输入/输出/总 token、`latencyMs`、`stopReason`、`success`、`errorBrief`、`createTime`。
-
-- 默认 `NoopLlmCallStore`，不落库。
-- 需要持久化时提供 `LlmCallStore` Bean，例如：
+每次单次调用写一条 `LlmCallRecord`；字段含义、异步写入线程、重试计费语义见 [单次模型调用入口](desc-单次调用.md) §10.2。默认 `NoopLlmCallStore` 不落库；需要持久化时提供 `LlmCallStore` Bean：
 
 ```java
 @Bean
@@ -571,14 +444,11 @@ public LlmCallStore llmCallStore(JdbcTemplate jdbc) {
 }
 ```
 
-- 表结构见 `ai-lite-store-jdbc/src/main/resources/ai-lite-llm-call.sql`。
-- 记录通过 `ExecutorProvider.io()` 异步写入；写入失败只记日志，不影响主调用。
-- `errorBrief` 会遮蔽 api key，并截断到 200 字符。
-- 重试的每次尝试各写一条记录；统计时按 `callId` 或时间窗口聚合。
+表结构见 `ai-lite-store-jdbc/src/main/resources/ai-lite-llm-call.sql`。
 
 ---
 
-## 8. 常见问题
+## 7. 常见问题
 
 **启动报“需要 ai-lite-http-xxx 提供 HttpExecutor”**
 配了 `ai-lite.http.transport`，但没有引入对应模块。加依赖，或改回 `okhttp`。
@@ -614,23 +484,22 @@ public LlmCallStore llmCallStore(JdbcTemplate jdbc) {
 
 ---
 
-## 9. 不在本文范围
+## 8. 不在本文范围
 
-- `AgentLoop`、`Workflow`、`AgentSessionLoop`、会话持久化、提示词中心；
-- 模型路由、供应商降级、自动故障转移；
-- 限流、熔断、并发预算；
-- 流式重试、`Retry-After` 解析；
-- 回调执行策略与上下文传递。
-
-这些能力需要时，应在网关之上或独立模块中实现。
+- 一次调用的内部旅程（线程接力、取消分层、错误分类、出口保护）→ [单次模型调用入口](desc-单次调用.md)；
+- 重试策略细节 → [重试边界](desc-重试.md)；
+- `AgentLoop`、`Workflow`、`AgentSessionLoop`、会话持久化、提示词中心 → 编排层文档；
+- 执行器/协程/虚拟线程的实现原理 → [用户级线程实现说明](desc-用户级线程.md)；
+- 模型路由、供应商降级、自动故障转移（框架暂未提供，需在网关之上实现）。
 
 ---
 
-## 10. 相关文档
+## 9. 相关文档
 
-- [API 使用指南](上层调用API使用指南.md)
-- [单次模型调用入口](单次模型调用入口.md)
-- [重试边界](重试说明.md)
-- [配置参考](配置说明.md)
-- [架构说明](架构总览.md)
-- [HTTP 传输并发模型评估](HTTP传输并发选型评估.md)
+- [术语表](ref-术语表.md)
+- [上层调用API使用指南](guide-上层调用API.md)（入门与全层 API 字典）
+- [单次模型调用入口](desc-单次调用.md)
+- [重试边界](desc-重试.md)
+- [配置参考](ref-配置.md)
+- [架构说明](desc-架构总览.md)
+- [HTTP 传输并发模型评估](plan/HTTP传输并发选型评估.md)

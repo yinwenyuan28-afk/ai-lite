@@ -1,6 +1,8 @@
 # Workflow 异步执行器使用指南
 
-本文面向业务调用方，说明 `Workflow.runAsync` 的用法、类型模型、取消、重试与性能边界。
+> **本文在哪一层**：编排层（多步骤流程的顺序执行）。
+> **讲什么**：`Workflow.runAsync` 的用法、`SyncStep` / `AsyncStep` 类型模型、取消、重试与性能边界。
+> **不讲什么**：底下单次模型调用怎么跑 → [单次模型调用入口](desc-单次调用.md)；Agent 循环的上下文 → [AgentLoop上下文说明](desc-AgentLoop上下文.md)。生词查 [术语表](ref-术语表.md) §5。
 
 适用范围：`ai-lite` 0.1.0-SNAPSHOT；JDK 8+；Spring Boot 2.1 ~ 2.7。
 设计背景见 [夯实 Workflow 异步执行器](plan/夯实Workflow异步执行器-plan.md)。
@@ -218,8 +220,8 @@ workflow.runAsync(steps, cancel).whenComplete((results, error) -> {
 - **空 future / 空结果**：按步骤失败处理，不会挂起。
 - **异常消息**只包含步骤序号，不复制提示词、图片或密钥。
 - **流式步骤**已产生的部分增量不会进入 `completedResults`。
-- **某步返回 `ABORTED`**：该结果会进入 `completedResults`，随后以 `WorkflowCancelledException`
-  收敛，与同步版一致。
+- **某步返回 `ABORTED`**：该结果会进入 `completedResults`，最终以 `WorkflowCancelledException`
+  抛出收尾，与同步版一致。
 
 `getCompletedResults()` 只用于诊断和部分结果展示，不是断点续跑入口；重跑 `runAsync`
 会重新执行所有步骤并重复计费。
@@ -390,7 +392,7 @@ ai-lite-retry-*（仅 oneStepWithRetryAsync）
 
 - [夯实 Workflow 异步执行器](plan/夯实Workflow异步执行器-plan.md)
 - [夯实 Workflow 顺序执行器](plan/夯实Workflow顺序执行器-plan.md)
-- [API 使用指南](上层调用API使用指南.md)
-- [单次模型调用入口](单次模型调用入口.md)
-- [重试边界](重试说明.md)
-- [架构说明](架构总览.md)
+- [API 使用指南](guide-上层调用API.md)
+- [单次模型调用入口](desc-单次调用.md)
+- [重试边界](desc-重试.md)
+- [架构说明](desc-架构总览.md)

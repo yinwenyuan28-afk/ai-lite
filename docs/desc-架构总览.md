@@ -1,13 +1,18 @@
 # AI Lite 架构说明
 
-本文描述 `ai-lite-spring-boot-starter` 的分层、核心抽象、同步/异步调用链、线程与取消模型、会话持久化和扩展点。面向需要改代码或排查线上问题的开发者。
+> **本文在哪一层**：全景篇（跨所有层，读一次建立地图）。
+> **讲什么**：分层与模块拓扑、核心抽象、同步/异步调用链、线程与取消模型、AgentLoop 状态机、会话与提示词、扩展点——每层的**为什么**。
+> **不讲什么**：每层的**怎么用**，见下面各层的专题文档。生词查 [术语表](ref-术语表.md)。
 
-相关文档：
+按层找文档：
 
-- 使用示例：[上层调用API使用指南.md](上层调用API使用指南.md)
-- 配置项：[配置说明.md](配置说明.md)
-- 出站上下文组成：[AgentLoop上下文说明.md](AgentLoop上下文说明.md)
-- 用户级并发实现：[用户级线程实现说明.md](用户级线程实现说明.md)
+| 层 | 使用（怎么用） | 原理（为什么） |
+| --- | --- | --- |
+| 快速入门 | [上层调用API使用指南](guide-上层调用API.md) §2 | 本文 §1–§4 |
+| HTTP 传输层 | [HTTP客户端使用指南](guide-HTTP客户端.md) | [HTTP传输层原理](desc-HTTP传输.md)、[HTTP传输并发选型评估](plan/HTTP传输并发选型评估.md)（调研留档）、本文 §5 |
+| 网关层 | [单次模型调用入口](desc-单次调用.md)、[重试边界](desc-重试.md) | 本文 §4–§5、[用户级线程实现说明](desc-用户级线程.md) |
+| 编排层 | [Workflow异步执行器使用指南](guide-Workflow异步执行器.md) | [AgentLoop上下文说明](desc-AgentLoop上下文.md)、本文 §6 |
+| 横切（配置/观测） | [配置参考](ref-配置.md) | 本文 §10–§11 |
 
 ---
 
@@ -117,7 +122,7 @@ flowchart LR
 - Anthropic 只有同时存在 thinking 文本和签名时才回传 `thinking` block。
 - OpenAI Responses 不回放 thinking。
 
-详见 [AgentLoop上下文说明.md](AgentLoop上下文说明.md)。
+详见 [desc-AgentLoop上下文.md](desc-AgentLoop上下文.md)。
 
 ### 3.2 网关的三种调用模式
 
@@ -250,11 +255,11 @@ sequenceDiagram
 | 请求线程 | Tomcat / Jetty | 进入 Controller，调用 `*Async` 后释放 |
 | ai-lite io 线程 | `PlatformExecutorProvider` / 虚拟线程 / 协程调度器 | 会话加载、落盘、工具执行、阻塞 SDK |
 | HTTP 回调线程 | OkHttp Dispatcher / Jetty / Netty / Ktor | 完成 future，触发网关/AgentLoop 回调 |
-| 协程载体线程 | `CoroutineExecutorProvider` 固定池 | 运行 `suspend` 续体 |
+| 协程载体线程 | `CoroutineExecutorProvider` 固定池 | 运行协程代码；协程等待时让出、恢复时回来（术语见 [术语表](ref-术语表.md) §4） |
 | ai-lite 重试线程 | `RetryScheduler` 固定 2 个 daemon 线程 | `oneWithRetryAsync` 的退避结束、监听器回调、发起下一次尝试 |
 
-`oneWithRetryAsync` 的完成回调运行在 HTTP 回调线程上，只做 O(1) 分类和
-`scheduler.schedule`；真正的下一次尝试在 `ai-lite-retry-*` 上发起。因此 I/O 线程
+`oneWithRetryAsync` 的完成回调运行在 HTTP 回调线程上，只做固定的几步分类判断和
+`scheduler.schedule`（几十纳秒级，不随并发量增长）；真正的下一次尝试在 `ai-lite-retry-*` 上发起。因此 I/O 线程
 不会因为退避而睡眠，重试也不会掉进 `ExecutorProvider.io()`。
 
 异步链路的线程跳转是设计的一部分，不是偶然结果。排查问题时先确认代码运行在哪个线程上。
@@ -307,7 +312,7 @@ io 线程：toolsFuture.whenComplete
 **不在 `io()` 上执行的工作：**
 
 - 模型网络等待。OkHttp 用 `enqueue`，调用线程不阻塞；响应在 OkHttp Dispatcher 线程上完成 future。每个在途请求占一个 Dispatcher 线程，流式请求占至流结束；默认 `maxRequests=64`、`maxRequestsPerHost=5`。
-- 协程续体。`coroutines` 模式下协程走 `dispatcher()`；`io()` 只是同一个载体池的阻塞视图。
+- 协程（挂起/恢复由编译器改写实现，见 [术语表](ref-术语表.md) §4）。`coroutines` 模式下协程走 `dispatcher()`；`io()` 只是同一个载体池的阻塞视图。
 - 大部分生命周期钩子。`afterModel`、`afterTurn`、`afterRun` 跑在完成 future 的线程上；`beforeRun` 和第一轮 `beforeModel` 跑在调用 `runAsync` 的线程上。只有 `runTools` 内的 `beforeTool` / `afterTool` 跟着工具任务走 `io()`。
 - 网关 `toolLoop` 的默认工具执行。`ToolExecutor.executeAsync` 的默认实现是裸 `CompletableFuture.supplyAsync`，落在 `ForkJoinPool.commonPool()`；只有 `AgentLoop` 的工具路径明确使用 `io()`。走网关 `toolLoop` 且工具有阻塞时，需要自定义 `ToolExecutor.executeAsync`。
 - 使用 `Jdk8HttpExecutor` 默认构造器时，HTTP 阻塞调用跑在它自己的缓存线程池；只有显式把 `io()` 传给它的构造器，才会复用这个池。默认的 OkHttp 实现不占用 `io()`。
@@ -389,7 +394,7 @@ io()               finish：store.save + store.find
 | 主要风险 | 队列拒绝、线程多 | 调用线程被阻塞 | synchronized/native pinning | 阻塞任务饿死载体、`io()` 队列无界 |
 | 典型场景 | JDK 8 通用 | 测试 | JDK 21 + 阻塞 SDK | JDK 8 + Kotlin + 高并发等待 |
 
-参考数据（3000 次调用、50ms 延迟、8 载体）：协程路径约 3.4 万 QPS、26 个线程；1000 线程池约 1.5 万 QPS、1017 个线程；纯 Java 异步约 4.2 万 QPS、18 个线程。这组数据说明的是“等待模型时是否占线程”，不是四种执行器模式的直接排名。详见 [用户级线程实现说明.md](用户级线程实现说明.md)。
+参考数据（3000 次调用、50ms 延迟、8 载体）：协程路径约 3.4 万 QPS、26 个线程；1000 线程池约 1.5 万 QPS、1017 个线程；纯 Java 异步约 4.2 万 QPS、18 个线程。这组数据说明的是“等待模型时是否占线程”，不是四种执行器模式的直接排名。详见 [desc-用户级线程.md](desc-用户级线程.md)。
 
 #### 5.2.4 配置字段与生效范围
 
@@ -445,7 +450,7 @@ future.cancel(true)
 - `LlmGateway.invokeAsync`、`AgentLoop.runAsync`、`AgentSessionLoop.resumeAsync` 都会在没有外部句柄时创建内部句柄。
 - 取消是协作式的：工具或自定义传输如果忽略中断，底层工作可能继续；网关会在正常完成前再检查一次取消状态，保证结果不会越过取消变成正常完成。
 
-完整的入口清单、L1–L4 语义和错误分类见 [单次模型调用入口](单次模型调用入口.md)。
+完整的入口清单、L1–L4 语义和错误分类见 [单次模型调用入口](desc-单次调用.md)。
 
 ### 5.4 协程桥接
 
@@ -455,6 +460,30 @@ future.cancel(true)
 - `LlmCoroutines.one/round/toolLoop`：`suspend` 包装，内部是 `gateway.*Async(...).await()`。其中 `LlmCoroutines.one` 是单次模型调用入口的 Kotlin 形式，`LlmCoroutines.oneAsync` 是它的 Java future 别名。
 
 Kotlin 编译成 JVM 字节码，和 Java 代码运行在同一个 JVM，不存在“两个 JVM”。协程只改变等待时的线程占用方式，不改变网络协议和网关语义。
+
+### 5.5 线程池总清单
+
+排查线程问题、评审容量时用这节对号入座。**框架自己创建的线程池只有 3 个**（`io()` 池、重试调度器、回调池），JDK8 传输自己带 1 个；其余线程都属于 HTTP 客户端库或调用方。
+
+| 线程名（jstack 里长这样） | 谁创建 | 默认规模 | 只干什么 | 绝不干什么 | 在哪配 |
+| --- | --- | --- | --- | --- | --- |
+| （调用线程）Tomcat worker 等 | 调用方 | — | 同步入口的整条链路；异步入口只做校验、解析、递交后返回 | —— | 业务方 |
+| OkHttp Dispatcher | OkHttp 客户端 | 64，每主机 5 | socket I/O、响应解析、完成回调、inline 的 onDelta | 退避等待、慢回调（拖垮全部在途请求） | `ai-lite.http.dispatcher.*` |
+| `ai-lite-jdk8-http-N` | Jdk8HttpExecutor | cached 池（daemon） | 仅 jdk8 传输的异步 I/O | —— | （无配置键） |
+| Jetty selector / reactor-nio / ktor 内部线程 | 各 HTTP 客户端 | 各自默认 | 同 OkHttp 行 | 同 OkHttp 行 | `ai-lite.http.jetty.*` / `ktor.*` |
+| `ai-lite-N`（io 池） | ExecutorProvider（platform 模式） | core=max(2,CPU)、max=max(4,2×CPU)、queue=1000 | 调用记录落盘、工具执行、会话加载/落盘、阻塞 SDK、出口保护排队许可交接后的续跑 | 模型网络等待；长阻塞任务 | `ai-lite.executor.*` |
+| `ai-lite-coroutine-N`（载体线程） | CoroutineExecutorProvider（coroutines 模式） | max(2,CPU)（经 Starter） | 跑协程代码；协程挂起时让出去跑别的 | 任何长阻塞（占住即饿死全部协程） | `ai-lite.executor.core-size` |
+| （虚拟线程） | JDK 21（virtual 模式）/ okhttp-virtual | 每任务一个 | virtual 模式的阻塞任务；okhttp-virtual 的传输回调 | —— | `ai-lite.executor.mode` / `ai-lite.http.transport` |
+| `ai-lite-retry-N` | RetryScheduler | 固定 2（daemon） | `oneWithRetryAsync` 的退避计时、发起下一次尝试、notifyRetry 监听器、出口保护的排队超时定时器 | 慢监听器（它只有 2 条线程，是全局单点） | Bean 名 `aiLiteRetryScheduler` 覆盖 |
+| `ai-lite-callback-N` | CallbackPolicy（io 模式） | core 2 / max 8 / queue 2048 | io 模式的 onDelta、完成事件、Agent 钩子——每个调用独享一个串行队列，按序执行 | 长活（慢回调只阻塞自己的调用，但占池子） | `ai-lite.callback.*` |
+
+三条使用纪律：
+
+- **排队不占线程。** 出口保护排队的异步调用、等待退避的重试调用，在队列里都只是一个小对象，没有任何线程为它们空转；轮到时才有人出站（io 池接力）或定时器叫人（retry 池）。
+- **回调线程快进快出。** OkHttp Dispatcher 和 `ai-lite-callback-*` 都是多调用共享的：在上面做阻塞操作（写库、同步下游、长计算）会拖慢所有调用。onDelta 想做重活就切 `ai-lite.callback.mode=io`。
+- **推进复用，不新建池。** AgentLoop 的推进循环、Workflow 主循环都在完成回调线程上推进；调用记录落盘走 `io()` 池；出口保护的定时器委托给 retry 调度器——没有第 4 个框架池。
+
+同步/异步一次调用在这些线程之间怎么接力，见 [单次模型调用入口](desc-单次调用.md) §2–§5；执行器四种模式（platform / direct / virtual / coroutines）的选择见 §5.2。
 
 ---
 
@@ -507,7 +536,7 @@ flowchart TD
 
 `text` 与 `thinkingText` 是独立字段。同一轮工具循环内，assistant 消息会把 thinking 一起带回下一轮（协议支持时）。跨 `resume` 的会话历史默认 `includeThinking=false`，即持久化的 thinking 不重新发送；需要时调用 `AgentSession.toLlmMessages(true)`。
 
-图片、协议细节和上下文增长示例见 [AgentLoop上下文说明.md](AgentLoop上下文说明.md)。
+图片、协议细节和上下文增长示例见 [desc-AgentLoop上下文.md](desc-AgentLoop上下文.md)。
 
 ---
 

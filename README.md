@@ -19,16 +19,16 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 - 显式重试：`gateway.oneWithRetry`（同步）、`gateway.oneWithRetryAsync`（future）、`LlmCoroutines.oneWithRetry`（suspend）。异步版的退避在专用 `ai-lite-retry-*` 调度器上，不占 HTTP 客户端线程。
 - 网关还提供 `roundAsync` / `toolLoopAsync`，返回 `CompletableFuture`。
 - OkHttp 适配器用 `enqueue` **让调用线程不阻塞**；实际 socket I/O 和响应解析仍在 OkHttp Dispatcher 线程上执行，每个在途请求占一个 Dispatcher 线程，流式请求会占到流结束。
-- `ai-lite-executor-coroutines` 提供 Kotlin 协程调度器和 suspend 桥接，挂起点不占载体线程。
+- `ai-lite-executor-coroutines` 提供 Kotlin 协程调度器和 suspend 桥接，等待时协程挂起、不占线程。
 - JDK 21 下可切换到 `ai-lite-executor-jdk21` 的真虚拟线程，上层 API 不变；它接管的是 `io()`，**不改变 OkHttp Dispatcher 的线程模型**。
 
-这不是"自己造一个假虚拟线程"：JDK 8 的 stackful fiber 需要字节码增强，代价和维护风险都不适合作为 Starter 的基础设施。这里选择的是**异步回调 + 协作式协程**：调用线程和协程载体被释放，传输层仍按所选 HTTP 客户端的模型占线程。
+这不是"自己造一个假虚拟线程"：JDK 8 的 stackful fiber 需要字节码增强，代价和维护风险都不适合作为 Starter 的基础设施。这里选择的是**异步回调 + 协作式协程**：调用线程和协程运行线程都被释放，传输层仍按所选 HTTP 客户端的模型占线程。
 
-实测（3000 次调用、50ms 延迟、8 载体）：协程路径约 3.4 万 QPS、26 个线程；1000 线程池约 1.5 万 QPS、1017 个线程；纯 Java 异步约 4.2 万 QPS、18 个线程。该基准使用独立调度器模拟延迟的 fake transport，测的是业务侧/载体线程，**不包含 OkHttp Dispatcher 线程**；真实 OkHttp 的并发上限见 [docs/用户级线程实现说明.md](docs/用户级线程实现说明.md) 第 10.1 节。实现细节见 [docs/用户级线程实现说明.md](docs/用户级线程实现说明.md)，可复现的 QPS 对比见 [benchmark/qps-benchmark](benchmark/qps-benchmark/README.md)。
+实测（3000 次调用、50ms 延迟、8 条协程线程）：协程路径约 3.4 万 QPS、26 个线程；1000 线程池约 1.5 万 QPS、1017 个线程；纯 Java 异步约 4.2 万 QPS、18 个线程。该基准使用独立调度器模拟延迟的 fake transport，测的是业务侧线程占用，**不包含 OkHttp Dispatcher 线程**；真实 OkHttp 的并发上限见 [docs/desc-用户级线程.md](docs/desc-用户级线程.md) 第 10.1 节。实现细节见 [docs/desc-用户级线程.md](docs/desc-用户级线程.md)，可复现的 QPS 对比见 [benchmark/qps-benchmark](benchmark/qps-benchmark/README.md)。
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环（同步 + 异步泵结构、并行工具、整轮超时、回调执行策略）、会话续聊、提示词中心、异步调用、显式重试、LLM 调用指标（Micrometer）、Workflow 同步/异步顺序执行和自动装配都已落地。当前 758 个测试用例、0 失败（JDK 8 全量构建运行 735 个；Redis 可用时额外运行 18 个集成用例；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态、Workflow 取消/失败定位与蹦床推进、AgentLoop 泵收敛/终态对齐/非合作传输取消、回调策略线程隔离等对抗性场景。虚拟模型路由不在范围内。完整计划见 [PLAN.md](PLAN.md)，配置字段见 [docs/配置说明.md](docs/配置说明.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环（同步 + 异步泵结构、并行工具、整轮超时、回调执行策略）、会话续聊、提示词中心、异步调用、显式重试、LLM 调用指标（Micrometer）、出口自我保护（按供应商并发限流、熔断、`Retry-After` 尊重、多 key 轮换，默认全关）、Workflow 同步/异步顺序执行和自动装配都已落地。当前 805 个测试用例、0 失败（JDK 8 全量构建；Redis 集成用例在无 Redis 环境时跳过，可用时随构建运行；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态、Workflow 取消/失败定位与蹦床（循环代替递归）推进、AgentLoop 异步推进循环的收尾与终态竞态、取消时不会立刻停的传输的兜底、回调策略线程隔离、并发闸门排队、熔断状态机、半开探测、key 轮换等对抗性场景。虚拟模型路由不在范围内。配置字段见 [docs/ref-配置.md](docs/ref-配置.md)。
 
 ## 环境要求
 
@@ -187,7 +187,7 @@ ai-lite:
 </dependency>
 ```
 
-选择未引入的模块或未知值会在启动时失败，并给出缺少的依赖或允许值。完整字段、兼容矩阵和线程模型见 [配置参考](docs/配置说明.md) 第 4 节；六种传输的实测对比见 [HTTP 传输并发基准](benchmark/http-transport-benchmark/README.md)。
+选择未引入的模块或未知值会在启动时失败，并给出缺少的依赖或允许值。完整字段、兼容矩阵和线程模型见 [配置参考](docs/ref-配置.md) 第 4 节；六种传输的实测对比见 [HTTP 传输并发基准](benchmark/http-transport-benchmark/README.md)。
 
 ### 5. 提示词中心
 
@@ -242,25 +242,45 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 
 ## 文档
 
-- [单次调用与 HTTP 客户端使用指南](docs/单次调用与HTTP客户端使用指南.md)：依赖引入、配置、单次调用、取消/重试、传输选择与自定义 HTTP 实现。
-- [上层调用 API 使用指南](docs/上层调用API使用指南.md)：网关、编排、会话、提示词、执行器与扩展点。
-- [单次模型调用入口](docs/单次模型调用入口.md)：同步/异步/协程入口的返回、阻塞、取消矩阵与 L1–L4 契约。
-- [重试边界](docs/重试说明.md)：显式重试入口、429/5xx/超时/取消分类，以及异步重试的调度与取消。
-- [异步重试测试用例](docs/testing/异步重试测试用例.md)：55 条验收清单与对应测试类。
-- [架构说明](docs/架构总览.md)：模块拓扑、调用链、线程与取消模型、扩展点与设计取舍。
-- [夯实单次模型调用入口](docs/plan/夯实单次模型调用入口-plan.md)：单次模型调用入口的 parity、L1/L2 取消、异常与重试边界。
-- [夯实 oneWithRetry](docs/plan/夯实oneWithRetry-plan.md)：单次模型调用的显式重试、错误分类、退避与取消。
-- [夯实 Workflow 顺序执行器](docs/plan/夯实Workflow顺序执行器-plan.md)：顺序执行器的原则、预校验、取消、失败定位与边界契约。
-- [夯实 Workflow 异步执行器](docs/plan/夯实Workflow异步执行器-plan.md)：`SyncStep` / `AsyncStep`、`runAsync`、蹦床推进、取消与显式重试步骤。
-- [Workflow 异步执行器使用指南](docs/Workflow异步执行器使用指南.md)：业务侧的类型选择、`runAsync`、取消、重试、自定义步骤与 Spring MVC 集成。
-- [夯实 AgentLoop 一次性执行](docs/plan/夯实AgentLoop一次性执行-plan.md)：一次性 Agent 循环的终态、钩子、取消、工具语义与行业对照。
-- [Agent Loop 发给 LLM 的上下文](docs/AgentLoop上下文说明.md)：每轮请求组成、thinking 字段和协议差异。
-- [配置参考](docs/配置说明.md)：所有 `ai-lite.*` 字段。
-- [用户级线程实现](docs/用户级线程实现说明.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
-- [HTTP 传输并发模型评估](docs/HTTP传输并发选型评估.md)：OkHttp Dispatcher、JDK 21 虚拟线程与 NIO 传输的取舍。
-- [夯实 HTTP 传输并发（B/C 双路径）](docs/plan/夯实HTTP传输并发-plan.md)：`okhttp-virtual`、Jetty、WebClient/Ktor 的配置选择、模块设计与验收。
-- [夯实回调执行策略](docs/plan/夯实回调执行策略-plan.md)：用户回调与 Agent 钩子的串行执行、队列/取消和 afterRun 终态。
-- [编排层异步对抗性测试设计](docs/testing/测试索引.md)：103 个竞态/异常用例，按 AgentLoop、会话层、网关拆分。
+**命名规范**：`docs/` 下文件名前缀即类型——`desc-` 原理说明（讲为什么这样运作）、`guide-` 使用指南（讲怎么用）、`ref-` 速查工具书，文件列表按前缀自动聚类；`docs/plan/`（计划与调研留档，命名 `夯实X-plan`）与 `docs/testing/`（测试设计）是内部记录。每篇开头都有定位框：属于哪一层、讲什么、不讲什么。生词查 [术语表](docs/ref-术语表.md)；想知道每层看哪些文档，《架构总览》开头有「按层找文档」导航表。
+
+**全景门户**
+
+- [架构说明](docs/desc-架构总览.md)：分层、模块拓扑、调用链、线程与取消模型——每层设计的「为什么」。
+
+**使用指南（怎么用）**
+
+- [上层调用 API 使用指南](docs/guide-上层调用API.md)：入门（五分钟接入）+ 全层 API 字典；日常查 API 从这里走。
+- [HTTP 客户端使用指南](docs/guide-HTTP客户端.md)：六种传输怎么选怎么切、调优、自定义 `HttpExecutor`，附单次调用 API 速查与常见问题。
+- [Workflow 异步执行器使用指南](docs/guide-Workflow异步执行器.md)：多步骤流程的 `SyncStep` / `AsyncStep`、取消、重试与 Spring MVC 集成。
+
+**原理说明（为什么这样运作）**
+
+- [单次模型调用入口](docs/desc-单次调用.md)：一次 `oneWithRetryAsync` 的完整旅程——从发出到结果，含重试环、线程接力、出口保护。想理解内部发生什么，从这读。
+- [HTTP 传输层原理](docs/desc-HTTP传输.md)：三层职责切分、六种传输的线程模型、SSE 逐行解析、取消怎么贯穿到 socket、并发上限的真正决定者。
+- [重试边界](docs/desc-重试.md)：重试口径的唯一权威——可重试分类、策略参数、异步重试的线程与取消、自定义重试怎么接。
+- [用户级线程实现](docs/desc-用户级线程.md)：JDK 21 虚拟线程与 Kotlin 协程桥接的实现原理、ThreadLocal 传递、取消链。
+- [Agent Loop 发给 LLM 的上下文](docs/desc-AgentLoop上下文.md)：Agent 循环每轮实际发出去的请求体——上下文组成、协议差异、什么不进上下文。
+
+**速查（跨类工具书）**
+
+- [术语表](docs/ref-术语表.md)：全部术语的人话解释，按层分组。
+- [配置参考](docs/ref-配置.md)：所有 `ai-lite.*` 配置键，含出口保护 `guard` 的完整字段。
+
+**内部留档（docs/plan/ 设计审查与调研 + docs/testing/ 测试设计）**
+
+- [夯实单次模型调用入口](docs/plan/夯实单次模型调用入口-plan.md)：入口 parity、L1/L2 取消、异常与重试边界。
+- [夯实 oneWithRetry](docs/plan/夯实oneWithRetry-plan.md)：显式重试、错误分类、退避与取消的实现记录。
+- [夯实 Workflow 顺序执行器](docs/plan/夯实Workflow顺序执行器-plan.md) / [夯实 Workflow 异步执行器](docs/plan/夯实Workflow异步执行器-plan.md)：顺序与异步执行器的原则、蹦床（循环代替递归）推进、取消与失败定位。
+- [夯实 AgentLoop 一次性执行](docs/plan/夯实AgentLoop一次性执行-plan.md) / [夯实 AgentLoop 异步执行器](docs/plan/夯实AgentLoop异步执行器-plan.md)：Agent 循环的终态、钩子、异步推进循环（泵）结构与异步加固。
+- [夯实 HTTP 传输并发](docs/plan/夯实HTTP传输并发-plan.md)：传输模块设计与验收；其立项前的[选型评估](docs/plan/HTTP传输并发选型评估.md)（Reactor Netty 为什么不可用、Jetty 9.4 怎么胜出）同目录留档。
+- [夯实回调执行策略](docs/plan/夯实回调执行策略-plan.md)：用户回调与 Agent 钩子的串行执行、队列/取消。
+- [夯实可观测性](docs/plan/夯实可观测性-plan.md)：Micrometer 指标出口。
+- [夯实限流熔断](docs/plan/夯实限流熔断-plan.md)：出口保护（并发限流、熔断、Retry-After、多 key 轮换）的设计与审查记录。
+- [测试索引](docs/testing/测试索引.md)：按主题索引全部对抗性测试设计；另有[异步重试测试用例](docs/testing/异步重试测试用例.md)（oneWithRetryAsync 的 55 条验收清单）与[网关](docs/testing/网关异步对抗性测试设计.md)、[AgentLoop](docs/testing/AgentLoop异步对抗性测试设计.md)、[SessionLoop](docs/testing/SessionLoop异步对抗性测试设计.md)三篇对抗性测试设计。
+
+**基准**
+
 - [QPS 基准](benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
 - [HTTP 传输并发基准](benchmark/http-transport-benchmark/README.md)：六种 HTTP 传输在 100/500/1000 并发下的吞吐、延迟与线程数。
 
@@ -289,7 +309,7 @@ mvn -B verify
 3. **配置驱动。** 新增 OpenAI 兼容供应商只改 YAML；新增协议才加适配器。
 4. **治理优先。** 未登记的 `biz-id` 不发请求、不记记录；调用记录不含提示词和密钥。
 5. **老系统友好。** JDK 8 字节码，Boot 2.1 可用，不使用 `@AutoConfiguration` 等新 API。
-6. **并发不靠堆线程。** JDK 8 用异步回调 + 协程释放调用线程和载体线程；JDK 21 可切到虚拟线程；传输层线程模型取决于 HTTP 客户端。
+6. **并发不靠堆线程。** JDK 8 用异步回调 + 协程释放调用线程和协程运行线程；JDK 21 可切到虚拟线程；传输层线程模型取决于 HTTP 客户端。
 
 ## 许可证
 

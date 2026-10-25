@@ -3,13 +3,16 @@
 > 适用版本：0.1.0-SNAPSHOT
 > 代码基线：JDK 8 字节码，Spring Boot 2.1 ~ 2.7
 > 相关模块：`ai-lite-core`、`ai-lite-http-okhttp`、`ai-lite-executor-coroutines`、`ai-lite-executor-jdk21`
+> **本文在哪一层**：网关层 + 执行器层的实现原理（虚拟线程、Kotlin 协程桥接）。
+> **讲什么**：异步调用链怎么搭、协程怎么挂起和恢复、ThreadLocal 怎么传递——本文术语密度最高的原因就是它讲协程内部实现，生词一律查 [术语表](ref-术语表.md) §4。
+> **不讲什么**：调用入口怎么用 → [单次模型调用入口](desc-单次调用.md)；HTTP 传输本身怎么配 → [HTTP客户端使用指南](guide-HTTP客户端.md)。
 
 ## 0. 一句话结论
 
 AI Lite 的用户级并发不是"自己造一个虚拟线程"，而是两条互相独立、可以组合的路径：
 
-- **JDK 21 原生虚拟线程**：JVM 管理的 stackful 线程，阻塞时自动卸载载体线程。
-- **Kotlin 协程桥接**：编译期 CPS 变换的协作式任务，挂起点不占载体线程。它是 JDK 8 上的重点方案。
+- **JDK 21 原生虚拟线程**：JVM 自带的轻量线程，阻塞时自动把底层线程让出去跑别的任务（官方叫法是"从载体线程卸载"）。
+- **Kotlin 协程桥接**：编译器把 `suspend` 函数改写成"可暂停、可续跑"的任务（即 CPS 变换，见 5.2），等待期间不占着线程。它是 JDK 8 上的重点方案。
 
 两条路径的共同底座是**异步回调**：网关先做到"调用线程不阻塞"，执行器再决定"用什么跑代码"。但调用线程不阻塞不等于传输层不占线程——OkHttp 的 `enqueue` 仍会在 Dispatcher 线程上执行 I/O。
 
@@ -20,7 +23,7 @@ AI Lite 的用户级并发不是"自己造一个虚拟线程"，而是两条互�
 | Kotlin 协程桥接 | 8+ | 否 | 顺序写法 + suspend |
 | JDK 21 虚拟线程 | 21+ | 否（阻塞时卸载载体） | 顺序写法 + 阻塞 API |
 
-> `Java 异步 API` 这一行只承诺“不占调用方线程”。OkHttp `enqueue` 每个在途请求仍占一个 Dispatcher 线程；只有 NIO/event-loop 传输才能把大量等待压到少量线程。详见 [HTTP 传输并发模型评估](HTTP传输并发选型评估.md)。
+> `Java 异步 API` 这一行只承诺“不占调用方线程”。OkHttp `enqueue` 每个在途请求仍占一个 Dispatcher 线程；只有 NIO/event-loop 传输才能把大量等待压到少量线程。详见 [HTTP 传输并发模型评估](plan/HTTP传输并发选型评估.md)。
 
 ---
 
@@ -74,7 +77,7 @@ JDK 8 没有虚拟线程，可选方案只有：
 
 协程桥接和虚拟线程都只解决执行轴；在这个基准里，QPS 主要由 I/O 轴（调用方是否被阻塞）决定。上一节的基准里，纯 Java `CompletableFuture` 和 Kotlin 协程的 QPS 几乎一样，就是这个原因。注意：该基准使用独立调度器模拟响应，不包含 OkHttp Dispatcher 线程。
 
-四种执行器模式（platform / direct / virtual / coroutines）各自执行什么、横向对比和配置字段的生效范围，见 [架构总览.md](架构总览.md) 的 5.2 节和 [配置说明.md](配置说明.md) 第 3 节。本节只展开与“用户级线程”直接相关的 virtual 和 coroutines 两个实现。
+四种执行器模式（platform / direct / virtual / coroutines）各自执行什么、横向对比和配置字段的生效范围，见 [desc-架构总览.md](desc-架构总览.md) 的 5.2 节和 [ref-配置.md](ref-配置.md) 第 3 节。本节只展开与“用户级线程”直接相关的 virtual 和 coroutines 两个实现。
 
 ---
 

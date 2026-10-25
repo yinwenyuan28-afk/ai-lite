@@ -698,7 +698,7 @@ CompletableFuture<LlmResult> oneWithRetryAsync(LlmCall call, RetryPolicy policy,
 ### 9.10 测试矩阵
 
 详细用例（数据、线程、竞态、记录数、断言）见
-[docs/testing/异步重试测试用例.md](testing/异步重试测试用例.md)。
+[docs/testing/异步重试测试用例.md](../testing/异步重试测试用例.md)。
 本表只保留分组总览。
 
 | 分组 | 用例数 | 覆盖 |

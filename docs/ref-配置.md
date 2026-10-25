@@ -1,8 +1,10 @@
 # 配置参考
 
-所有配置都在 `ai-lite` 前缀下。完整示例见 `ai-lite-demo/src/main/resources/application.yml`。
-业务 API 的用法见 [上层调用API使用指南.md](上层调用API使用指南.md)；只关心单次调用和 HTTP 客户端时，见
-[单次调用与 HTTP 客户端使用指南](单次调用与HTTP客户端使用指南.md)。
+> **本文在哪一层**：横切层（不属于某一层，所有配置集中在这里）。
+> **讲什么**：`ai-lite.*` 全部配置键的取值与默认值，按配置段分节（llm / executor / callback / metrics / guard / http / session / prompt）。
+> **不讲什么**：这些配置改变行为后，运行起来是什么样——去看对应层的文档（单次调用 → [单次模型调用入口](desc-单次调用.md)；HTTP 传输 → [HTTP客户端使用指南](guide-HTTP客户端.md)）。生词查 [术语表](ref-术语表.md)。
+
+所有配置都在 `ai-lite` 前缀下。完整示例见 `ai-lite-demo/src/main/resources/application.yml`；业务 API 的用法见 [guide-上层调用API.md](guide-上层调用API.md)。
 
 ## 1. 顶层
 
@@ -51,6 +53,11 @@ providers:
     extra-body: {}
     connect-timeout-ms: 10000
     read-timeout-ms: 120000
+    api-keys:                    # 多 key 池（可省）；元素支持与 api-key 相同的占位符
+      - ${KEY_ONE}
+      - ${KEY_TWO:fallback}
+    guard:
+      concurrency: 8             # 该供应商并发上限（每次模型调用占一个许可）；0=不限
     models: [ ... ]
 ```
 
@@ -60,6 +67,7 @@ providers:
 | `base-url` | 端点根地址，不要带 `/chat/completions`、`/responses`、`/v1/messages` |
 | `api-key` | 支持字面量、`${ENV}`、`${ENV:default}`、`$ENV` |
 | `api-key-env` | `api-key` 为空时从该环境变量读取 |
+| `api-keys` | 多 key 轮换池；配置后优先于 `api-key`/`api-key-env`。429/401 失败时把当前 key 冷却一段时间并换下一把（换 key 的指针只在失败时推进；全部 key 都在冷却中就先用第一把，冷却到期自动恢复） |
 | `headers` | 追加到每个请求的 header |
 | `extra-body` | 深合并进请求体，用于厂商私有字段 |
 | `connect-timeout-ms` | 连接超时 |
@@ -119,7 +127,7 @@ profiles:
 
 ## 3. 执行器 `ai-lite.executor`
 
-`ExecutorProvider.io()` 执行的是**阻塞副作用任务**：会话加载/落盘、工具执行、调用记录落表，以及协程模式下显式提交的阻塞代码。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整说明和对比见 [架构总览.md](架构总览.md) 的 5.2 节。
+`ExecutorProvider.io()` 执行的是**阻塞副作用任务**：会话加载/落盘、工具执行、调用记录落表，以及协程模式下显式提交的阻塞代码。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整说明和对比见 [desc-架构总览.md](desc-架构总览.md) 的 5.2 节。
 
 ```yaml
 executor:
@@ -135,7 +143,7 @@ executor:
 | 字段 | 默认值 | 生效模式 | 说明 |
 | --- | --- | --- | --- |
 | `mode` | `platform` | 全部 | `platform`、`direct`、`virtual`、`coroutines` |
-| `core-size` | `max(2, CPU)` | platform、coroutines | platform 的核心线程数；coroutines 通过 Starter 时的载体线程数 |
+| `core-size` | `max(2, CPU)` | platform、coroutines | platform 的核心线程数；coroutines 的协程载体线程数（运行协程的平台线程，见 [术语表](ref-术语表.md) §4） |
 | `max-size` | `max(4, CPU×2)` | platform | 最大线程数 |
 | `queue-capacity` | `1000` | platform | 有界队列容量；队列满后按拒绝策略处理 |
 | `keep-alive-seconds` | `60` | platform | 空闲线程存活时间 |
@@ -148,8 +156,8 @@ executor:
 | --- | --- | --- | --- |
 | `platform` | 有界 `ThreadPoolExecutor` | 无 | 每个阻塞任务占一个平台线程；并发上限由 `max-size` 和队列控制 |
 | `direct` | 调用线程内联执行 | 无 | 不建池、不切线程；适合测试或确定任务很短、不需要并发的场景 |
-| `virtual` | 每任务一个虚拟线程 | JDK 21 + `ai-lite-executor-jdk21` | 阻塞在可挂起操作时卸载载体；注意 `synchronized`/native pinning |
-| `coroutines` | 固定载体池的阻塞视图 | `ai-lite-executor-coroutines` | 协程续体走 `dispatcher()`；`io()` 与载体池共用，长阻塞会饿死其他协程 |
+| `virtual` | 每任务一个虚拟线程 | JDK 21 + `ai-lite-executor-jdk21` | 阻塞时自动让出底层线程；注意 `synchronized`/native pinning |
+| `coroutines` | 固定协程线程池的阻塞视图 | `ai-lite-executor-coroutines` | 协程代码走 `dispatcher()`（挂起不占线程）；`io()` 与协程线程池共用，长阻塞会拖垮其他协程 |
 
 选型建议：
 
@@ -183,7 +191,7 @@ ai-lite:
 | `io` | 回调经独立回调池上的 per-run 串行执行器执行：单 in-flight FIFO、慢回调只阻塞自己 |
 
 - `io` 模式只对**异步入口**生效（`runAsync`、`*Async` 流式/非流式）；同步入口恒 inline。
-- 队列满 → `LlmCallException`（`Kind.OVERLOAD`，不重试）：流式调用先异常完成再中断传输；`AgentLoop.runAsync` 的泵在提交线程收敛并中止在途请求。
+- 队列满 → `LlmCallException`（`Kind.OVERLOAD`，不重试）：流式调用先把 future 异常完成、再中断传输；`AgentLoop.runAsync` 的推进循环在提交线程完成收尾并中止在途请求。
 - `io` 模式下 AgentLoop 的钩子线程为 `ai-lite-callback-*`；工具本体仍在 `ai-lite.executor` 的载体池。
 - 文档化例外：`beforeRun` 恒在调用方线程；`future.cancel` 路径的 `afterRun` 在取消方线程。
 - 与 `ai-lite.executor.mode=direct` 组合：允许，启动 WARN——钩子隔离由独立回调池保证，但工具本体会内联在回调线程。
@@ -206,6 +214,59 @@ LLM 调用指标经 Micrometer 暴露（可观测性计划）：micrometer-core 
 - 用户自定义 `LlmCallStore` Bean 会被装饰而非替换，记录与指标同时生效。
 - micrometer 不在 classpath 或 `llm-enabled=false` 时行为与旧版完全一致。
 - trace 贯通本轮不做：异步链上 span 传播强绑 Sleuth 且复杂，调用记录里的 `callId` 可作上层关联键。
+
+## 3.3 出口保护 `ai-lite.guard`
+
+网关的出口自我保护（限流熔断计划）：并发限流、熔断、多 key 冷却。**全部默认关闭**——未给供应商配置 `guard.concurrency` 且熔断 `enabled=false` 时，网关不建任何 guard 实例，行为与旧版零差异。
+
+```yaml
+ai-lite:
+  llm:
+    providers:
+      demo:
+        guard:
+          concurrency: 8        # 该供应商并发上限；0=不限（默认）
+  guard:                        # 顶级：跨供应商通用参数
+    concurrency-wait-ms: 2000   # 拿许可的有界等待（同步等待与异步排队共用）
+    async-queue-capacity: 100   # 异步排队容量；超出即拒绝
+    circuit:
+      enabled: false
+      failure-rate: 50          # 窗口失败率阈值（%）
+      window-seconds: 60
+      minimum-calls: 20
+      open-seconds: 30          # 冷却满 30s 进 HALF_OPEN
+      probe-timeout-ms: 30000   # 半开探测超时，超时按探测失败回 OPEN
+    key-cooldown-seconds: 60    # 429/401 失败标记后单把 key 的冷却时长
+```
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `providers.<id>.guard.concurrency` | `0` | 供应商并发上限，按**单次模型调用**计许可（工具循环每轮各占各还，工具执行期间不占）；0=不限 |
+| `concurrency-wait-ms` | `2000` | 拿许可的等待上限；小于等于 0 表示不等待（满即拒绝） |
+| `async-queue-capacity` | `100` | 异步排队容量，超出即 OVERLOAD 拒绝 |
+| `circuit.enabled` | `false` | 熔断总开关；开启后所有供应商都受熔断保护（并发不限的供应商只做熔断） |
+| `circuit.failure-rate` | `50` | 窗口失败率阈值（%） |
+| `circuit.window-seconds` | `60` | 统计窗口（内部 6 片环形滑动，读数为近似值） |
+| `circuit.minimum-calls` | `20` | 触发门槛的最少样本数 |
+| `circuit.open-seconds` | `30` | 拉闸冷却时长，期满后进入 HALF_OPEN（放行 1 个试探请求，带超时） |
+| `circuit.probe-timeout-ms` | `30000` | 半开探测超时，超时按探测失败回 OPEN |
+| `key-cooldown-seconds` | `60` | 429/401 失败标记后 key 冷却时长 |
+
+行为要点：
+
+- **许可按轮**：每次 transport 调用（含重试的每次 attempt）获取一次许可；同步路径有界等待（超时抛 OVERLOAD），异步路径在载体池排队（不阻塞提交线程）。
+- **拒绝语义**：并发/排队拒绝抛 `Kind.OVERLOAD`、熔断拒绝抛新增的 `Kind.CIRCUIT_OPEN`——两者**不可重试**（重试只会空转）。guard 自身的拒绝不计入熔断窗口。
+- **失败口径**：熔断窗口直接采用 `RetryPolicy.defaultRetryable` 判定（429/408/5xx/传输 IO 计失败；PARSE/CONFIG/取消不计）；429 同时计入失败率与 `rate-limited` 指标。
+- **Retry-After**：5 个 HTTP 执行器在 429/503 时带出 `Retry-After`（仅正整数秒），显式重试的下一次退避优先采用该值（clamp 到 `max-backoff-ms` 与总时限内）。
+- **key 脱敏**：轮换与冷却只按 key 值匹配索引，key 永不进日志/记录/指标/异常消息。
+
+指标（micrometer 在 classpath 时）：
+
+| 指标 | 类型 | 标签 |
+| --- | --- | --- |
+| `ailite.llm.guard.rejected` | Counter | `provider`,`reason`（concurrency/circuit） |
+| `ailite.llm.guard.circuit-state` | Gauge | `provider`（0=CLOSED/1=OPEN/2=HALF_OPEN） |
+| `ailite.llm.guard.rate-limited` | Counter | `provider` |
 
 ## 4. HTTP 传输 `ai-lite.http`
 

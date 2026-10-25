@@ -2,9 +2,11 @@
 
 > 适用版本：0.1.0-SNAPSHOT
 > 目标读者：业务开发、平台接入方、需要替换 SPI 实现的团队
-> 配套文档：[配置参考](配置说明.md)、[用户级线程实现](用户级线程实现说明.md)
+> **本文在哪一层**：横切层——入门入口 + 全层 API 字典（网关、Agent 编排、会话、提示词、并发执行器、扩展点各占一节）。
+> **讲什么**：每个 API 怎么调、参数是什么、稳定性约定。想理解调用内部发生什么，看对应层的专题文档（单次调用 → [单次模型调用入口](desc-单次调用.md)）。
+> 配套文档：[配置参考](ref-配置.md)、[用户级线程实现](desc-用户级线程.md)、[术语表](ref-术语表.md)
 
-本文按"业务真正会调用的 API"组织，覆盖网关、Agent 编排、会话、提示词、并发执行器和扩展点。内部工具类（`TransportSupport`、`AgentSessionStoreSupport`、`AsyncLlmCallLogger` 等）不在本文范围内。
+本文按"业务真正会调用的 API"组织。内部工具类（`TransportSupport`、`AgentSessionStoreSupport`、`AsyncLlmCallLogger` 等）不在本文范围内。
 
 ---
 
@@ -44,8 +46,8 @@ ai-lite:
     default-profile: main
     providers:
       my-provider:
-        api: openai-completions
-        base-url: ${AI_LITE_BASE_URL}
+        api: openai-completions        # openai-completions | openai-responses | anthropic-messages
+        base-url: ${AI_LITE_BASE_URL}  # 只写到 /v1，不要带 /chat/completions
         api-key: ${AI_LITE_API_KEY}
         models:
           - id: ${AI_LITE_MODEL}
@@ -56,10 +58,10 @@ ai-lite:
       main:
         provider: my-provider
         model: ${AI_LITE_MODEL}
-        thinking-level: "off"
+        thinking-level: "off"          # 加引号，避免 YAML 解析成布尔值
 ```
 
-字段细节见 [配置说明.md](配置说明.md)。
+字段细节见 [ref-配置.md](ref-配置.md)。密钥建议只走环境变量或 `${ENV}` / `${ENV:default}` / `$ENV` 占位符，不要提交到仓库。
 
 ### 2.3 第一次调用
 
@@ -84,7 +86,19 @@ public class ChatService {
 
 `biz-id` 必须先登记在 `ai-lite.llm.biz-ids`，否则请求不会发出。
 
-### 2.4 常用 API 速查
+`LlmGateway` 是线程安全的共享门面，作为单例注入即可，不要每次请求 `new`。
+
+### 2.4 启动后确认
+
+应用启动时会打印实际使用的 HTTP 传输：
+
+```text
+AI Lite HTTP 传输：transport=okhttp，实现=...OkHttpExecutor
+```
+
+如果同时定义了自定义 `HttpExecutor` Bean，会改为警告，提示 `ai-lite.http.transport` 被覆盖。
+
+### 2.5 常用 API 速查
 
 > ⭐ = 日常业务最常用；其余是进阶、扩展或运维 API。
 
@@ -143,7 +157,7 @@ public class ChatService {
 - 网关默认不做自动重试；需要重试时显式使用 `gateway.oneWithRetry(call, policy, cancel?)`
   或 `gateway.oneWithRetryAsync(call, policy, cancel?)`。两者都只覆盖非流式调用，
   每次尝试独立写一条调用记录；异步版的退避与下一次尝试都在 `ai-lite-retry-*` 线程上，
-  HTTP 客户端线程不 sleep。完整矩阵见 [单次模型调用入口](单次模型调用入口.md) 与 [重试边界](重试说明.md)。
+  HTTP 客户端线程不 sleep。完整矩阵见 [单次模型调用入口](desc-单次调用.md) 与 [重试边界](desc-重试.md)。
 
 #### 3.1.2 工具与多轮方法
 
@@ -311,7 +325,7 @@ cancel.cancel();
 | `isCancelled()` | 是否已取消 |
 | `bindAbort(Runnable)` | 传输层绑定 `Call.cancel()` 等动作；传 `null` 解绑 |
 
-一个句柄只服务一次调用：第一次 abort 后进入终态，不复位。重试或发起新请求时请创建新句柄。
+一个句柄只服务一次调用：第一次 abort 后结果就固定下来（终态），不复位。重试或发起新请求时请创建新句柄。
 
 取消语义：
 
@@ -333,7 +347,7 @@ LlmResult result = gateway.oneByStream(call, new Consumer<String>() {
 }, null);
 ```
 
-`onDelta` 收到的是增量文本（可能包含推理增量，取决于模型和协议）。回调可能在不同线程上执行，不要在里面做长时间阻塞操作，也不要依赖请求线程的 `ThreadLocal`。如果回调里确实有慢操作（打日志、查库），配置 `ai-lite.callback.mode: io` 让回调经独立回调池串行执行（见 `docs/配置说明.md` §3.1），不拖慢共享 I/O 线程上的其他请求。
+`onDelta` 收到的是增量文本（可能包含推理增量，取决于模型和协议）。回调可能在不同线程上执行，不要在里面做长时间阻塞操作，也不要依赖请求线程的 `ThreadLocal`。如果回调里确实有慢操作（打日志、查库），配置 `ai-lite.callback.mode: io` 让回调经独立回调池串行执行（见 `docs/ref-配置.md` §3.1），不拖慢共享 I/O 线程上的其他请求。
 
 ### 3.9 同步 vs 异步
 
@@ -346,7 +360,7 @@ CompletableFuture<LlmResult> future = gateway.oneAsync(call);
 future.thenAccept(r -> System.out.println(r.getContent()));
 ```
 
-详细并发模型见 [用户级线程实现说明.md](用户级线程实现说明.md)。高并发场景优先使用异步方法；协程桥接见第 7 节。
+详细并发模型见 [desc-用户级线程.md](desc-用户级线程.md)。高并发场景优先使用异步方法；协程桥接见第 7 节。
 
 ### 3.10 错误处理
 
@@ -443,7 +457,7 @@ LlmResult result = agentLoop.run(call, tools, lifecycles, maxRounds, cancel);
 CompletableFuture<LlmResult> future =
         agentLoop.runAsync(call, tools, lifecycles, maxRounds, cancel);
 
-// 带整轮超时（毫秒）：覆盖模型轮次 + 工具执行，到点触发取消并收敛 ABORTED
+// 带整轮超时（毫秒）：覆盖模型轮次 + 工具执行，到点触发取消并以 ABORTED 收尾
 CompletableFuture<LlmResult> timed =
         agentLoop.runAsync(call, tools, lifecycles, maxRounds, cancel, 30_000L);
 
@@ -469,10 +483,10 @@ AgentLoop parallel = new AgentLoop(gateway, executor, toolExecutor,
 - 最后一轮仍要求工具、或 `ERROR` 带工具调用时，为未执行的调用补合成 `tool_result`，上下文不留 dangling。
 - 钩子抛异常时：同步版本向上抛，异步版本 future 异常完成；`afterRun` 在成功/取消/异常三条路径都恰好一次（`beforeRun` 失败除外），异常只记录不覆盖结果。
 - 取消：五个检查点（轮首、`beforeModel` 后、模型返回后、每个工具执行前、工具批次后）；`beforeModel` 内取消不产生"幽灵轮"（不计轮次、不调 `afterModel`）。
-- 异步实现为泵结构：完成回调只登记结果，全部推进集中在单一循环里并统一兜底 `Throwable`——future 不会因同步递归爆栈、Error 逃逸或非合作传输而挂起；非合作 transport 的取消由网关取消监听主动收敛为 ABORTED。
+- 异步实现是一个推进循环（泵）：完成回调只登记结果，所有推进集中在单一循环里并统一捕获 `Throwable`——future 不会因为同步递归爆栈、Error 逃逸或「取消时不会立刻停的传输」而永远悬着；这类传输的取消由网关取消监听兜底，最终得到 ABORTED。
 - `future.cancel(true)`：底层请求被 abort，`afterRun` 仍恰好一次（error = `CancellationException`）。
 - 并行工具（`ToolRunMode.PARALLEL`，对 `run` 与 `runAsync` 都生效）：执行器故障即终止 run，已完成工具的 `afterTool` 不再调用。
-- 工具执行器实现 `AsyncToolExecutor`（`executeOneAsync`）时，`runAsync` 自动走异步链、不占载体线程阻塞等待；同步 `run` 仍走 `execute`。
+- 工具执行器实现 `AsyncToolExecutor`（`executeOneAsync`）时，`runAsync` 自动走异步链、不阻塞线程空等；同步 `run` 仍走 `execute`。
 
 ### 4.3 生命周期：`AgentLifecycle`
 
@@ -812,7 +826,7 @@ public interface ExecutorProvider extends Closeable {
 }
 ```
 
-`io()` 用于**阻塞副作用任务**：异步调用日志、`AgentLoop` 的工具执行、会话加载/落盘，以及业务自己的阻塞 SDK。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整对比见 [架构总览.md](架构总览.md) 的 5.2 节。
+`io()` 用于**阻塞副作用任务**：异步调用日志、`AgentLoop` 的工具执行、会话加载/落盘，以及业务自己的阻塞 SDK。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整对比见 [desc-架构总览.md](desc-架构总览.md) 的 5.2 节。
 
 | 实现 | 模块 | 构造/说明 |
 | --- | --- | --- |
@@ -835,7 +849,7 @@ ai-lite:
     rejection-policy: abort   # abort / caller-runs
 ```
 
-不同模式对字段的生效范围不同：`direct` / `virtual` 忽略全部池字段；`coroutines` 只用 `core-size`（载体数）和 `thread-name-prefix`；`platform` 使用全部字段。字段默认值和选型建议见 [配置说明.md](配置说明.md) 第 3 节。
+不同模式对字段的生效范围不同：`direct` / `virtual` 忽略全部池字段；`coroutines` 只用 `core-size`（载体数，即运行协程的平台线程数，见 [术语表](ref-术语表.md) §4）和 `thread-name-prefix`；`platform` 使用全部字段。字段默认值和选型建议见 [ref-配置.md](ref-配置.md) 第 3 节。
 
 ### 7.2 Kotlin 协程桥接
 
@@ -875,7 +889,7 @@ ai-lite:
 
 需要引入 `ai-lite-executor-jdk21`。Starter 通过反射加载，JDK 8 运行时不会解析虚拟线程类。`mode=virtual` 只改变 `io()` 的实现，不会自动把 `gateway.one()` 变成异步；把阻塞调用提交到 `io()` 才会跑在虚拟线程上。
 
-详细原理、取消链和限制见 [用户级线程实现说明.md](用户级线程实现说明.md)。
+详细原理、取消链和限制见 [desc-用户级线程.md](desc-用户级线程.md)。
 
 ---
 
@@ -1244,8 +1258,8 @@ public final class MyTransport implements LlmTransport {
 
 ## 15. 相关文档
 
-- [配置参考](配置说明.md)：所有 `ai-lite.*` 字段。
-- [Agent Loop 发给 LLM 的上下文](AgentLoop上下文说明.md)：每轮请求组成、thinking 字段与协议差异。
-- [用户级线程实现](用户级线程实现说明.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
+- [配置参考](ref-配置.md)：所有 `ai-lite.*` 字段。
+- [Agent Loop 发给 LLM 的上下文](desc-AgentLoop上下文.md)：每轮请求组成、thinking 字段与协议差异。
+- [用户级线程实现](desc-用户级线程.md)：JDK 21 虚拟线程、Kotlin 协程、取消链和实测数据。
 - [QPS 基准](../benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
 - [README](../README.md)：模块列表和快速开始。

@@ -1,5 +1,9 @@
 # 重试边界
 
+> **本文在哪一层**：网关层（重试专题）。
+> **讲什么**：重试的完整口径——哪些错误可重试、策略参数、异步重试的线程与取消、自定义重试框架怎么接。重试的**唯一权威来源**。
+> **不讲什么**：重试在整次调用里的位置（退避、key 轮换怎么配合）→ 看流程图 [单次模型调用入口](desc-单次调用.md) §4。生词查 [术语表](ref-术语表.md)。
+
 本文说明 `ai-lite` 在哪一层做重试、哪些错误可以重试、以及为什么网关本身不自动重试。
 
 ---
@@ -10,7 +14,7 @@
 - **单次入口提供显式重试：同步 `oneWithRetry(call, policy, cancel?)` 与异步
   `oneWithRetryAsync(call, policy, cancel?)`。** 默认关闭，调用方显式选择；只覆盖非流式模型调用。
 - **异步重试不占 I/O 线程。** 退避任务投递到专用 `ai-lite-retry-*` 调度器，
-  HTTP 客户端回调线程只做 O(1) 判断。
+  HTTP 客户端回调线程只做固定的几步判断（几十纳秒级，不随并发量增长）。
 - **`OkHttpExecutor` 关闭了 OkHttp 的连接重试**（`retryOnConnectionFailure(false)`），避免和上层策略叠加。
 - **`oneWithRetry` / `oneWithRetryAsync` 只重试瞬时错误。** 400/401/404/解析/配置/取消不重试。
 - **编排层的重试另立计划。** `AgentLoop` 每轮、`AgentSessionLoop` 整体、`Workflow` 整链的重试不在本文范围内。Workflow 只提供显式的异步步骤重试入口 `Workflow.oneStepWithRetryAsync(call, policy)`；它重试的是该步骤，不是整个 `runAsync`。
@@ -102,8 +106,8 @@ oneWithRetry
 
 实现要点：
 
-- 每次尝试新建 `LlmCancelHandle`；外层句柄只绑定一次取消代理，终态解绑。
-- 所有状态变更在 `synchronized (state)` 内完成；`terminal` CAS 只用于终态收敛，
+- 每次尝试新建 `LlmCancelHandle`；外层句柄只绑定一次取消代理，结果确定后即解绑。
+- 所有状态变更在 `synchronized (state)` 内完成；`terminal` CAS 只用于最终结果的收敛确认（多个并发回调里只有第一个生效），
   完成回调入口不占有它。
 - 零延迟重试也经过调度器，避免同步完成的 transport 形成深递归。
 - 退避 delay 只计算一次；监听器收到的值与真实调度一致。
@@ -217,9 +221,9 @@ LlmResult callWithRetry(LlmGateway gateway, LlmCall call, int maxAttempts,
 
 ## 7. 相关文档
 
-- [单次模型调用入口](单次模型调用入口.md)
-- [单次调用与 HTTP 客户端使用指南](单次调用与HTTP客户端使用指南.md)
-- [架构说明](架构总览.md)
-- [用户级并发与取消](用户级线程实现说明.md)
+- [单次模型调用入口](desc-单次调用.md)
+- [HTTP 客户端使用指南](guide-HTTP客户端.md)
+- [架构说明](desc-架构总览.md)
+- [用户级并发与取消](desc-用户级线程.md)
 - [夯实单次模型调用入口](plan/夯实单次模型调用入口-plan.md)
 - [异步重试实现计划](plan/夯实oneWithRetry-plan.md)
