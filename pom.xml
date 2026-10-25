@@ -48,7 +48,7 @@
         <!-- Boot 2.1 的 BOM 把 kotlin-stdlib 锁在 1.2.x，OkHttp 4.x 需要 1.8+。 -->
         <kotlin.version>1.9.25</kotlin.version>
         <junit.version>4.13.2</junit.version>
-        <assertj.version>3.11.1</assertj.version>
+        <assertj.version>3.27.7</assertj.version>
     </properties>
 
     <modules>
