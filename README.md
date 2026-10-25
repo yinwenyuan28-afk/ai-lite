@@ -266,6 +266,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 
 - [术语表](docs/ref-术语表.md)：全部术语的人话解释，按层分组。
 - [配置参考](docs/ref-配置.md)：所有 `ai-lite.*` 配置键，含出口保护 `guard` 的完整字段。
+- [发布参考](docs/ref-发布.md)：版本策略、发布清单、CI 矩阵、Maven Central 配置。
 
 **内部留档（docs/plan/ 设计审查与调研 + docs/testing/ 测试设计）**
 
@@ -301,6 +302,8 @@ JDK 21 下会自动加入虚拟线程模块：
 ```bash
 mvn -B verify
 ```
+
+版本发布按 [docs/ref-发布.md](docs/ref-发布.md) 的清单执行（翻版本 → tag → release 工作流自动验证、收集制品、部署 Maven Central）；每个版本的行为变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 设计原则
 

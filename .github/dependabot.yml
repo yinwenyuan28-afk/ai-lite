@@ -1,0 +1,14 @@
+# 依赖更新：Maven 依赖与 GitHub Actions 每周检查，PR 由人工审阅合入。
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
