@@ -31,6 +31,7 @@ import org.springframework.beans.factory.BeanFactoryAware;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -51,6 +52,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 /**
  * AI Lite 主自动装配。只做装配，不改变核心模块的行为。
@@ -189,16 +191,10 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
         return RetryScheduler.create();
     }
 
-    /**
-     * 出口保护指标回调（限流熔断计划 §3.5）：registry 在 classpath 且存在时挂
-     * Micrometer，否则 NOOP。core 侧只依赖接口。
-     */
-    @Bean(name = "aiLiteGuardMetrics")
-    @ConditionalOnMissingBean
-    public GuardMetrics aiLiteGuardMetrics(ObjectProvider<MeterRegistry> meterRegistry) {
-        MeterRegistry registry = meterRegistry.getIfAvailable();
-        return registry == null ? GuardMetrics.NOOP : new MicrometerGuardMetrics(registry);
-    }
+    // 出口保护指标回调（aiLiteGuardMetrics）与指标存储装饰器都移入文末的
+    // MicrometerMetricsConfiguration 嵌套类：consumer 的 classpath 不一定有
+    // micrometer，外层 @Bean 方法签名出现 MeterRegistry 会让无 micrometer 的
+    // 应用在装配期直接 ClassNotFoundException（外部真实供应商测试发现的回归）。
 
     /**
      * 供应商出口保护表（限流熔断计划 §3.7）：只为配置了 guard 的 provider 建实例
@@ -255,15 +251,16 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
                                     @Qualifier(RetryScheduler.BEAN_NAME)
                                     ScheduledExecutorService retryScheduler,
                                     ObjectProvider<CallbackPolicy> callbackPolicy,
-                                    ObjectProvider<MeterRegistry> meterRegistry,
+                                    ObjectProvider<Function<LlmCallStore, LlmCallStore>> metricsStoreDecorator,
                                     ObjectProvider<GuardMetrics> guardMetrics,
                                     AiLiteConfig config) {
-        // 可观测性计划：micrometer 在 classpath 且启用时，用指标装饰器包装记录存储
-        //（不替换用户 Bean，装饰只发生在传给网关的引用上）。registry 缺失时零影响。
+        // 可观测性计划：micrometer 在 classpath 且启用时，由嵌套条件类提供的装饰器
+        // 包装记录存储（不替换用户 Bean，装饰只发生在传给网关的引用上）。
+        // micrometer 缺失时该 Bean 不存在，getIfAvailable 返回 null，零影响。
         LlmCallStore effectiveStore = store;
-        MeterRegistry registry = meterRegistry.getIfAvailable();
-        if (registry != null && config.getMetrics().isLlmEnabled()) {
-            effectiveStore = new MicrometerLlmCallStore(store, registry);
+        Function<LlmCallStore, LlmCallStore> decorator = metricsStoreDecorator.getIfAvailable();
+        if (decorator != null) {
+            effectiveStore = decorator.apply(store);
         }
         LlmGateway gateway = new LlmGateway(resolver, transports, effectiveStore, executor,
                 toolExecutor, retryScheduler);
@@ -484,6 +481,61 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
         } catch (Exception ex) {
             throw new IllegalStateException(
                     "ai-lite.executor.mode=coroutines 需要 ai-lite-executor-coroutines 依赖", ex);
+        }
+    }
+
+    /**
+     * Micrometer 存在时的指标装配（可观测性计划 + 限流熔断计划）。
+     *
+     * <p>嵌套独立成类的原因：{@code @ConditionalOnClass} 在评估阶段只通过 ASM 读
+     * 字节码元数据，不会真正加载 {@link MeterRegistry}，因此 consumer 没有引入
+     * micrometer 时整个内部类被安全跳过。若把这些 Bean 放在外层配置类，外层
+     * {@code @Bean} 方法签名里的 {@code ObjectProvider<MeterRegistry>} 会在装配期
+     * 触发类型解析，无 micrometer 的应用直接 ClassNotFoundException（2026-10-25
+     * 外部真实供应商测试发现的发布形态回归，固化为结构约束）。</p>
+     */
+    @Configuration
+    @ConditionalOnClass(MeterRegistry.class)
+    static class MicrometerMetricsConfiguration {
+
+        /**
+         * 出口保护指标回调（限流熔断计划 §3.5）：registry Bean 存在时挂 Micrometer，
+         * 否则 NOOP。嵌套类保证 MeterRegistry 类可加载；ObjectProvider 再容忍
+         * "classpath 有 micrometer 但容器里没有 registry Bean"的应用（无 actuator）。
+         * core 侧只依赖接口。
+         */
+        @Bean(name = "aiLiteGuardMetrics")
+        @ConditionalOnMissingBean
+        public GuardMetrics aiLiteGuardMetrics(ObjectProvider<MeterRegistry> meterRegistry) {
+            MeterRegistry registry = meterRegistry.getIfAvailable();
+            return registry == null ? GuardMetrics.NOOP : new MicrometerGuardMetrics(registry);
+        }
+
+        /**
+         * 记录存储的指标装饰器（可观测性计划）：返回"包装一层的函数"而不是包装好的
+         * store——装饰对象必须等网关解析完用户 store Bean 之后再套（网关负责传入），
+         * 这里只决定"有没有装饰、怎么装饰"。未启用指标或 registry Bean 缺失时返回
+         * 恒等函数（等价于无装饰）。
+         */
+        @Bean(name = "aiLiteMetricsStoreDecorator")
+        @ConditionalOnMissingBean(name = "aiLiteMetricsStoreDecorator")
+        public Function<LlmCallStore, LlmCallStore> aiLiteMetricsStoreDecorator(
+                ObjectProvider<MeterRegistry> meterRegistry, AiLiteConfig config) {
+            final MeterRegistry registry = meterRegistry.getIfAvailable();
+            if (registry == null || !config.getMetrics().isLlmEnabled()) {
+                return new Function<LlmCallStore, LlmCallStore>() {
+                    @Override
+                    public LlmCallStore apply(LlmCallStore store) {
+                        return store;
+                    }
+                };
+            }
+            return new Function<LlmCallStore, LlmCallStore>() {
+                @Override
+                public LlmCallStore apply(LlmCallStore store) {
+                    return new MicrometerLlmCallStore(store, registry);
+                }
+            };
         }
     }
 }

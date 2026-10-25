@@ -104,15 +104,15 @@ public final class ModelResolver {
     public ResolvedModel resolveExplicit(String provider, String modelId, String thinkingLevel) {
         String providerId = Strings.trimToNull(provider);
         if (providerId == null) {
-            throw new LlmCallException("供应商不能为空");
+            throw new LlmCallException("供应商不能为空", null, LlmCallException.Kind.CONFIG);
         }
         AiLiteConfig.Provider p = providers.get(providerId);
         if (p == null) {
-            throw new LlmCallException("未知供应商: " + providerId);
+            throw new LlmCallException("未知供应商: " + providerId, null, LlmCallException.Kind.CONFIG);
         }
         AiLiteConfig.Model m = findModel(p, modelId);
         if (m == null) {
-            throw new LlmCallException("未知模型: " + modelId);
+            throw new LlmCallException("未知模型: " + modelId, null, LlmCallException.Kind.CONFIG);
         }
         return resolve(providerId, p, m, thinkingLevel);
     }
@@ -126,19 +126,19 @@ public final class ModelResolver {
     public ResolvedModel resolveProfile(String profileName) {
         String name = Strings.trimToNull(profileName);
         if (name == null) {
-            throw new LlmCallException("配置档不能为空");
+            throw new LlmCallException("配置档不能为空", null, LlmCallException.Kind.CONFIG);
         }
         AiLiteConfig.Profile profile = profiles.get(name);
         if (profile == null) {
-            throw new LlmCallException("未知配置档: " + name);
+            throw new LlmCallException("未知配置档: " + name, null, LlmCallException.Kind.CONFIG);
         }
         AiLiteConfig.Provider p = providers.get(Strings.trimToNull(profile.getProvider()));
         if (p == null) {
-            throw new LlmCallException("配置档 " + name + " 指向未知供应商: " + profile.getProvider());
+            throw new LlmCallException("配置档 " + name + " 指向未知供应商: " + profile.getProvider(), null, LlmCallException.Kind.CONFIG);
         }
         AiLiteConfig.Model m = findModel(p, profile.getModel());
         if (m == null) {
-            throw new LlmCallException("配置档 " + name + " 指向未知模型: " + profile.getModel());
+            throw new LlmCallException("配置档 " + name + " 指向未知模型: " + profile.getModel(), null, LlmCallException.Kind.CONFIG);
         }
         return resolve(Strings.trimToNull(profile.getProvider()), p, m, profile.getThinkingLevel());
     }
@@ -199,7 +199,7 @@ public final class ModelResolver {
         }
         key = resolvePlaceholder(key);
         if (key == null) {
-            throw new LlmCallException("模型密钥未配置: " + providerId);
+            throw new LlmCallException("模型密钥未配置: " + providerId, null, LlmCallException.Kind.CONFIG);
         }
         return key;
     }
@@ -234,7 +234,7 @@ public final class ModelResolver {
             }
         }
         if (resolved.isEmpty()) {
-            throw new LlmCallException("模型密钥未配置: api-keys 全部无效");
+            throw new LlmCallException("模型密钥未配置: api-keys 全部无效", null, LlmCallException.Kind.CONFIG);
         }
         return resolved;
     }
@@ -383,43 +383,43 @@ public final class ModelResolver {
             String id = entry.getKey();
             AiLiteConfig.Provider p = entry.getValue();
             if (p == null) {
-                throw new LlmCallException("供应商配置不能为空: " + id);
+                throw new LlmCallException("供应商配置不能为空: " + id, null, LlmCallException.Kind.CONFIG);
             }
             if (Strings.isBlank(p.getApi())) {
-                throw new LlmCallException("供应商 " + id + " 缺少 api");
+                throw new LlmCallException("供应商 " + id + " 缺少 api", null, LlmCallException.Kind.CONFIG);
             }
             if (Strings.isBlank(p.getBaseUrl())) {
-                throw new LlmCallException("供应商 " + id + " 缺少 base-url");
+                throw new LlmCallException("供应商 " + id + " 缺少 base-url", null, LlmCallException.Kind.CONFIG);
             }
             if (Strings.isBlank(trimTrailingSlash(p.getBaseUrl()))) {
-                throw new LlmCallException("供应商 " + id + " 的 base-url 无效");
+                throw new LlmCallException("供应商 " + id + " 的 base-url 无效", null, LlmCallException.Kind.CONFIG);
             }
             if (p.getModels() == null || p.getModels().isEmpty()) {
-                throw new LlmCallException("供应商 " + id + " 没有配置模型");
+                throw new LlmCallException("供应商 " + id + " 没有配置模型", null, LlmCallException.Kind.CONFIG);
             }
             for (AiLiteConfig.Model m : p.getModels()) {
                 if (m == null || Strings.isBlank(m.getId())) {
-                    throw new LlmCallException("供应商 " + id + " 存在缺少 id 的模型");
+                    throw new LlmCallException("供应商 " + id + " 存在缺少 id 的模型", null, LlmCallException.Kind.CONFIG);
                 }
             }
         }
         for (Map.Entry<String, AiLiteConfig.Profile> entry : profiles.entrySet()) {
             AiLiteConfig.Profile profile = entry.getValue();
             if (profile == null) {
-                throw new LlmCallException("配置档不能为空: " + entry.getKey());
+                throw new LlmCallException("配置档不能为空: " + entry.getKey(), null, LlmCallException.Kind.CONFIG);
             }
             if (Strings.isBlank(profile.getProvider())) {
-                throw new LlmCallException("配置档 " + entry.getKey() + " 缺少 provider");
+                throw new LlmCallException("配置档 " + entry.getKey() + " 缺少 provider", null, LlmCallException.Kind.CONFIG);
             }
             if (Strings.isBlank(profile.getModel())) {
-                throw new LlmCallException("配置档 " + entry.getKey() + " 缺少 model");
+                throw new LlmCallException("配置档 " + entry.getKey() + " 缺少 model", null, LlmCallException.Kind.CONFIG);
             }
             AiLiteConfig.Provider p = providers.get(profile.getProvider().trim());
             if (p == null) {
-                throw new LlmCallException("配置档 " + entry.getKey() + " 指向未知供应商");
+                throw new LlmCallException("配置档 " + entry.getKey() + " 指向未知供应商", null, LlmCallException.Kind.CONFIG);
             }
             if (findModel(p, profile.getModel()) == null) {
-                throw new LlmCallException("配置档 " + entry.getKey() + " 指向未知模型");
+                throw new LlmCallException("配置档 " + entry.getKey() + " 指向未知模型", null, LlmCallException.Kind.CONFIG);
             }
         }
     }

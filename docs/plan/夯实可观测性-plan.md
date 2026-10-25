@@ -116,3 +116,12 @@ Phase M0–M2 当日完成，starter 回归 53 测试全绿。
 ### 与计划的偏差
 
 - 无实质偏差。
+
+### 后续发现（2026-10-25 晚，外部真实供应商冒烟）
+
+外部消费者工程（ai-lite-external-test，独立 reactor、无 micrometer 依赖）接入 wangxin 网关冒烟时发现两个发布形态问题，均已修复：
+
+1. **无 micrometer 的应用装配崩溃**：本计划与限流熔断计划在顶层 @Configuration 的 @Bean 方法签名里使用了 ObjectProvider<MeterRegistry>，consumer 无 micrometer 时装配期直接 ClassNotFoundException（主仓测试全绿是因为 classpath 始终有 micrometer——典型的「测试类路径 ≠ 消费者类路径」回归）。修复：MeterRegistry 相关 Bean 全部移入嵌套 MicrometerMetricsConfiguration（@ConditionalOnClass 用 ASM 评估、不触发类加载），嵌套类内保留 ObjectProvider 容忍「classpath 有 micrometer 但容器无 registry Bean」（无 actuator 的应用）；网关侧改为注入 Function<LlmCallStore, LlmCallStore> 装饰器。已固化进 AiLiteAutoConfiguration 注释。
+2. **解析类失败被标 UNKNOWN**：ModelResolver 全部 20 处校验异常（未知模型、配置档指向未知供应商等）用双参构造器默认 UNKNOWN，与错误分类承诺（配置类错误 = CONFIG）不符。行为影响有限（无 IOException 根因、默认口径不重试），但调用方按 Kind 区分「我方配置错 vs 供应商故障」会误判。修复：统一标 Kind.CONFIG，ModelResolverTest 补 Kind 断言。
+
+修复后外部冒烟 5/5 通过：同步 one、异步 oneAsync（提交微秒级）、流式 oneByStream、发送前取消 ABORTED、未登记模型本地拦截（CONFIG、零出站、毫秒级）。
