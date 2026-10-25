@@ -36,7 +36,7 @@ jobs:
           mkdir -p staging
           find . -path "*/target/*.jar" ! -name "original-*" -exec cp {} staging/ \;
           ls staging
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ai-lite-${{ github.ref_name }}
           path: staging/
