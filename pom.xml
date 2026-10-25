@@ -44,7 +44,7 @@
 
         <!-- 编译基线是 Boot 2.1；CI 会用 -Dspring-boot.version=2.7.18 再验证一次。 -->
         <spring-boot.version>2.1.10.RELEASE</spring-boot.version>
-        <okhttp.version>4.12.0</okhttp.version>
+        <okhttp.version>5.5.1</okhttp.version>
         <!-- Boot 2.1 的 BOM 把 kotlin-stdlib 锁在 1.2.x，OkHttp 4.x 需要 1.8+。 -->
         <kotlin.version>1.9.25</kotlin.version>
         <junit.version>4.13.2</junit.version>
