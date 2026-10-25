@@ -190,6 +190,23 @@ ai-lite:
 - 自定义 `LlmGateway`/`AgentLoop` Bean：策略不会自动应用（构造时自行传入 `CallbackPolicy`），启动 WARN 提醒。
 - 禁止在钩子里同步等待排在后面的回调任务（单 in-flight 下必然死锁）。
 
+## 3.2 指标 `ai-lite.metrics`
+
+LLM 调用指标经 Micrometer 暴露（可观测性计划）：micrometer-core 在 classpath 且 `llm-enabled=true`（默认）时，网关的每条调用记录自动聚合进四个指标——无新增采集路径，core 模块零改动。
+
+| 指标 | 类型 | 标签 |
+| --- | --- | --- |
+| `ailite.llm.calls` | Counter | `biz`,`provider`,`model`,`api`,`stop`,`outcome`（success/error/aborted） |
+| `ailite.llm.duration` | Timer | `biz`,`provider`,`model`,`api` |
+| `ailite.llm.tokens` | Counter | `biz`,`provider`,`model`,`type`（input/output/total） |
+| `ailite.llm.rounds` | Counter | `biz`,`model`（只计 roundNo>1，即工具轮/重试轮） |
+
+- 标签基数全部有界（biz 白名单、provider/model 来自配置、api 三协议、stop 七种）；错误摘要永不进标签。
+- 指标故障不影响调用结果与记录写入（装饰器全量兜底）。
+- 用户自定义 `LlmCallStore` Bean 会被装饰而非替换，记录与指标同时生效。
+- micrometer 不在 classpath 或 `llm-enabled=false` 时行为与旧版完全一致。
+- trace 贯通本轮不做：异步链上 span 传播强绑 Sleuth 且复杂，调用记录里的 `callId` 可作上层关联键。
+
 ## 4. HTTP 传输 `ai-lite.http`
 
 模型请求的 HTTP 客户端与 `ai-lite.executor` 相互独立：前者决定“等待网络时占哪类线程”，后者决定“工具、日志、会话落盘在哪里跑”。默认 `okhttp`，与旧版本行为一致。

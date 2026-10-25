@@ -65,6 +65,8 @@
 | `SerialCallbackExecutorTest` | core | 4 | 单 in-flight FIFO、队列满返回 false、关闭清空幂等、inline/io 策略 |
 | `AgentLoopIoModeTest` | core | 3 | io 模式钩子在 ai-lite-callback-*、工具本体在载体池、执行器模式 trampoline、取消路径 |
 | `AgentSessionLoopAsyncTest` | core | 8 | 续聊 future 链路：happy path、取消不落盘（含 run 完成/落盘前窗口，SL-03/08）、正常完成后 cancel、并发 resume 不静默丢更新（SL-18） |
+| `MicrometerLlmCallStoreTest` | starter | 6 | 指标映射（calls/duration/tokens/rounds）、outcome 派生、errorBrief 不进标签、指标故障隔离、标签键有界 |
+| `AiLiteMetricsAssemblyTest` | starter | 3 | registry 存在时网关出指标、llm-enabled=false 关闭、用户 store 被装饰而非替换 |
 | `LlmCoroutinesRetryTest` | executor-coroutines | 12 | suspend 重试、`delay()` 退避、`withTimeout`/`job.cancel`、deadline、记录、与异步版 parity |
 | `Utf8LineBufferTest` | core | 8 | CRLF 跨 chunk、多字节字符逐字节切分、空行、末尾无换行、单行上限 |
 | `JettyHttpExecutorTest` | http-jetty | 11 | 同步/异步/原始行、非 2xx、预取消、流中取消、提前 EOF、close |

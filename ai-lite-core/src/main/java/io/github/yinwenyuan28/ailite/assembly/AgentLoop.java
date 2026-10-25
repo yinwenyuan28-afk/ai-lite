@@ -1093,12 +1093,22 @@ public final class AgentLoop {
             });
         }
         CompletableFuture.allOf(inFlight.toArray(new CompletableFuture[0]))
-                .whenComplete((ignored, error) -> converged.complete(null));
+                .whenComplete((ignored, error) -> {
+                    // allOf 的失败必须传播：无条件 complete(null) 会在单 future 的
+                    // 失败回调尚未触发时把故障吞掉（join 正常返回、写回空文本）。
+                    if (error != null) {
+                        converged.completeExceptionally(error);
+                    } else {
+                        converged.complete(null);
+                    }
+                });
         try {
             converged.join();
         } catch (CompletionException ex) {
-            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-            if (cause instanceof CompletionException && cause.getCause() != null) {
+            // 解包任意层 CompletionException 嵌套：多 future 失败竞争时
+            // allOf 与单 future 的失败回调谁先到达不确定，嵌套深度不定。
+            Throwable cause = ex;
+            while (cause instanceof CompletionException && cause.getCause() != null) {
                 cause = cause.getCause();
             }
             if (cause instanceof RuntimeException) {

@@ -20,6 +20,7 @@ import io.github.yinwenyuan28.ailite.llm.ToolExecutor;
 import io.github.yinwenyuan28.ailite.transport.AnthropicMessagesTransport;
 import io.github.yinwenyuan28.ailite.transport.OpenAiCompletionsTransport;
 import io.github.yinwenyuan28.ailite.transport.OpenAiResponsesTransport;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
@@ -188,8 +189,17 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
                                     ToolExecutor toolExecutor,
                                     @Qualifier(RetryScheduler.BEAN_NAME)
                                     ScheduledExecutorService retryScheduler,
-                                    ObjectProvider<CallbackPolicy> callbackPolicy) {
-        LlmGateway gateway = new LlmGateway(resolver, transports, store, executor,
+                                    ObjectProvider<CallbackPolicy> callbackPolicy,
+                                    ObjectProvider<MeterRegistry> meterRegistry,
+                                    AiLiteConfig config) {
+        // 可观测性计划：micrometer 在 classpath 且启用时，用指标装饰器包装记录存储
+        //（不替换用户 Bean，装饰只发生在传给网关的引用上）。registry 缺失时零影响。
+        LlmCallStore effectiveStore = store;
+        MeterRegistry registry = meterRegistry.getIfAvailable();
+        if (registry != null && config.getMetrics().isLlmEnabled()) {
+            effectiveStore = new MicrometerLlmCallStore(store, registry);
+        }
+        LlmGateway gateway = new LlmGateway(resolver, transports, effectiveStore, executor,
                 toolExecutor, retryScheduler);
         gateway.setCallbackPolicy(callbackPolicy.getIfAvailable());
         return gateway;

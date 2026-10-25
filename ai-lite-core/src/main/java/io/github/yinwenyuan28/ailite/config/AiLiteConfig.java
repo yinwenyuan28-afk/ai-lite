@@ -20,6 +20,8 @@ public final class AiLiteConfig {
     private Session session = new Session();
     /** 回调执行策略（回调策略计划）：inline 默认不变，io 启用独立回调池。 */
     private Callback callback = new Callback();
+    /** 指标配置（可观测性计划）：micrometer 在 classpath 时把 LLM 调用记录聚合成指标。 */
+    private Metrics metrics = new Metrics();
 
     public boolean isEnabled() {
         return enabled;
@@ -51,6 +53,14 @@ public final class AiLiteConfig {
 
     public void setCallback(Callback callback) {
         this.callback = callback == null ? new Callback() : callback;
+    }
+
+    public Metrics getMetrics() {
+        return metrics;
+    }
+
+    public void setMetrics(Metrics metrics) {
+        this.metrics = metrics == null ? new Metrics() : metrics;
     }
 
     public Http getHttp() {
@@ -673,6 +683,24 @@ public final class AiLiteConfig {
             public void setThreadNamePrefix(String threadNamePrefix) {
                 this.threadNamePrefix = threadNamePrefix;
             }
+        }
+    }
+
+    /**
+     * 指标配置（可观测性计划）：LLM 调用指标经 Micrometer 暴露，复用
+     * {@code LlmCallStore} 记录，无新增采集路径。micrometer 不在 classpath
+     * 时自动无效果。
+     */
+    public static final class Metrics {
+
+        private boolean llmEnabled = true;
+
+        public boolean isLlmEnabled() {
+            return llmEnabled;
+        }
+
+        public void setLlmEnabled(boolean llmEnabled) {
+            this.llmEnabled = llmEnabled;
         }
     }
 }
