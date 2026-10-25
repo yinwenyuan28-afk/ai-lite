@@ -9,6 +9,7 @@ import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.executor.PlatformExecutorProvider;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.llm.AsyncLlmCallLogger;
+import io.github.yinwenyuan28.ailite.llm.CallbackPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmCallStore;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
 import io.github.yinwenyuan28.ailite.llm.LlmTransport;
@@ -19,7 +20,14 @@ import io.github.yinwenyuan28.ailite.llm.ToolExecutor;
 import io.github.yinwenyuan28.ailite.transport.AnthropicMessagesTransport;
 import io.github.yinwenyuan28.ailite.transport.OpenAiCompletionsTransport;
 import io.github.yinwenyuan28.ailite.transport.OpenAiResponsesTransport;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -31,7 +39,12 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * AI Lite 主自动装配。只做装配，不改变核心模块的行为。
@@ -41,7 +54,16 @@ import java.util.concurrent.ScheduledExecutorService;
  */
 @Configuration
 @ConditionalOnProperty(prefix = "ai-lite", name = "enabled", havingValue = "true", matchIfMissing = true)
-public class AiLiteAutoConfiguration {
+public class AiLiteAutoConfiguration implements BeanFactoryAware {
+
+    private static final Logger log = LoggerFactory.getLogger(AiLiteAutoConfiguration.class);
+
+    private ConfigurableListableBeanFactory beanFactory;
+
+    @Override
+    public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
+        this.beanFactory = (ConfigurableListableBeanFactory) beanFactory;
+    }
 
     /**
      * 配置模型。绑定在 Bean 方法上，核心类不需要 Spring 注解。
@@ -165,9 +187,12 @@ public class AiLiteAutoConfiguration {
                                     LlmCallStore store, ExecutorProvider executor,
                                     ToolExecutor toolExecutor,
                                     @Qualifier(RetryScheduler.BEAN_NAME)
-                                    ScheduledExecutorService retryScheduler) {
-        return new LlmGateway(resolver, transports, store, executor, toolExecutor,
-                retryScheduler);
+                                    ScheduledExecutorService retryScheduler,
+                                    ObjectProvider<CallbackPolicy> callbackPolicy) {
+        LlmGateway gateway = new LlmGateway(resolver, transports, store, executor,
+                toolExecutor, retryScheduler);
+        gateway.setCallbackPolicy(callbackPolicy.getIfAvailable());
+        return gateway;
     }
 
     @Bean
@@ -176,10 +201,77 @@ public class AiLiteAutoConfiguration {
         return new Workflow(gateway);
     }
 
+    /**
+     * 回调策略共享线程池（回调策略 Phase 0）：仅 callback.mode=io 时创建；
+     * Spring 推断 destroyMethod 自动调用 shutdown()。
+     */
+    @Bean(name = "aiLiteCallbackExecutor")
+    @ConditionalOnProperty(prefix = "ai-lite.callback", name = "mode", havingValue = "io")
+    public ThreadPoolExecutor aiLiteCallbackExecutor(AiLiteConfig config) {
+        AiLiteConfig.Callback.ExecutorCfg cfg = config.getCallback().getExecutor();
+        final String prefix = cfg.getThreadNamePrefix() == null
+                ? "ai-lite-callback-" : cfg.getThreadNamePrefix();
+        ThreadFactory factory = new ThreadFactory() {
+            private final AtomicInteger seq = new AtomicInteger();
+
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r, prefix + seq.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            }
+        };
+        return new ThreadPoolExecutor(cfg.getCoreSize(), cfg.getMaxSize(), 60L,
+                TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(cfg.getQueueCapacity()),
+                factory);
+    }
+
+    /**
+     * 回调策略（回调策略 Phase 0/CB-04/D-3）：默认 inline 行为不变；io 时绑定独立回调池。
+     * direct + io 允许组合（泵结构下钩子隔离由独立池保证），打一次 WARN 提示工具本体
+     * 将内联在回调线程；自定义 Gateway/AgentLoop Bean 时策略不会自动应用，同样 WARN
+     * （CB-09/M-5）。
+     */
+    @Bean(name = "aiLiteCallbackPolicy")
+    @ConditionalOnMissingBean
+    public CallbackPolicy aiLiteCallbackPolicy(AiLiteConfig config,
+            ObjectProvider<ThreadPoolExecutor> callbackExecutor) {
+        AiLiteConfig.Callback cfg = config.getCallback();
+        if (!"io".equalsIgnoreCase(cfg.getMode())) {
+            return CallbackPolicy.inline();
+        }
+        ThreadPoolExecutor pool = callbackExecutor.getIfAvailable();
+        if (pool == null) {
+            pool = aiLiteCallbackExecutor(config);
+        }
+        if ("direct".equalsIgnoreCase(config.getExecutor().getMode())) {
+            log.warn("ai-lite.executor.mode=direct 与 ai-lite.callback.mode=io 组合："
+                    + "钩子隔离由独立回调池保证，但工具本体将内联在回调线程执行，"
+                    + "可能阻塞本 run 的回调通道（见回调策略计划 D-3）");
+        }
+        warnIfCustomBean("LlmGateway", "aiLiteLlmGateway", LlmGateway.class);
+        warnIfCustomBean("AgentLoop", "aiLiteAgentLoop", AgentLoop.class);
+        return CallbackPolicy.io(pool, cfg.getQueueCapacity());
+    }
+
+    /** CB-09：mode=io 时用户自定义编排 Bean 不会自动获得回调策略，启动提醒。 */
+    private void warnIfCustomBean(String label, String autoName, Class<?> type) {
+        if (beanFactory == null) {
+            return;
+        }
+        if (!beanFactory.containsBeanDefinition(autoName)
+                && beanFactory.getBeanNamesForType(type, false, false).length > 0) {
+            log.warn("检测到自定义 {} Bean：ai-lite.callback.mode=io 不会自动应用到它，"
+                    + "请自行在构造时传入 CallbackPolicy（CB-09）", label);
+        }
+    }
+
     @Bean
     @ConditionalOnMissingBean
-    public AgentLoop aiLiteAgentLoop(LlmGateway gateway, ExecutorProvider executor) {
-        return new AgentLoop(gateway, executor);
+    public AgentLoop aiLiteAgentLoop(LlmGateway gateway, ExecutorProvider executor,
+            ObjectProvider<CallbackPolicy> callbackPolicy) {
+        return new AgentLoop(gateway, executor, null, null, null,
+                callbackPolicy.getIfAvailable());
     }
 
     /**

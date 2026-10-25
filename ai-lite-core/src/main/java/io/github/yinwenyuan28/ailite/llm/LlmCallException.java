@@ -18,6 +18,8 @@ public class LlmCallException extends RuntimeException {
         HTTP,
         PARSE,
         CANCELLED,
+        /** 回调队列已满等本框架过载保护；不可重试。 */
+        OVERLOAD,
         UNKNOWN
     }
 

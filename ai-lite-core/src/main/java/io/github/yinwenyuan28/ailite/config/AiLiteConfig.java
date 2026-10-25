@@ -18,6 +18,8 @@ public final class AiLiteConfig {
     private Executor executor = new Executor();
     private Http http = new Http();
     private Session session = new Session();
+    /** 回调执行策略（回调策略计划）：inline 默认不变，io 启用独立回调池。 */
+    private Callback callback = new Callback();
 
     public boolean isEnabled() {
         return enabled;
@@ -41,6 +43,14 @@ public final class AiLiteConfig {
 
     public void setExecutor(Executor executor) {
         this.executor = executor == null ? new Executor() : executor;
+    }
+
+    public Callback getCallback() {
+        return callback;
+    }
+
+    public void setCallback(Callback callback) {
+        this.callback = callback == null ? new Callback() : callback;
     }
 
     public Http getHttp() {
@@ -583,6 +593,86 @@ public final class AiLiteConfig {
 
         public void setTtlSeconds(long ttlSeconds) {
             this.ttlSeconds = ttlSeconds;
+        }
+    }
+
+    /**
+     * 回调执行策略配置（回调策略计划 Phase 0）。
+     *
+     * <p>{@code mode=inline}（默认）保持现状——回调跑在触发线程上；
+     * {@code mode=io} 时用户 onDelta 与 Agent 钩子经独立回调池上的 per-run
+     * 串行执行器执行。只对异步入口生效。</p>
+     */
+    public static final class Callback {
+
+        /** inline | io。 */
+        private String mode = "inline";
+        private int queueCapacity = 1024;
+        private ExecutorCfg executor = new ExecutorCfg();
+
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
+        }
+
+        public int getQueueCapacity() {
+            return queueCapacity;
+        }
+
+        public void setQueueCapacity(int queueCapacity) {
+            this.queueCapacity = queueCapacity;
+        }
+
+        public ExecutorCfg getExecutor() {
+            return executor;
+        }
+
+        public void setExecutor(ExecutorCfg executor) {
+            this.executor = executor == null ? new ExecutorCfg() : executor;
+        }
+
+        /** 回调共享线程池配置（ai-lite-callback-*）。 */
+        public static final class ExecutorCfg {
+
+            private int coreSize = 2;
+            private int maxSize = 8;
+            private int queueCapacity = 2048;
+            private String threadNamePrefix = "ai-lite-callback-";
+
+            public int getCoreSize() {
+                return coreSize;
+            }
+
+            public void setCoreSize(int coreSize) {
+                this.coreSize = coreSize;
+            }
+
+            public int getMaxSize() {
+                return maxSize;
+            }
+
+            public void setMaxSize(int maxSize) {
+                this.maxSize = maxSize;
+            }
+
+            public int getQueueCapacity() {
+                return queueCapacity;
+            }
+
+            public void setQueueCapacity(int queueCapacity) {
+                this.queueCapacity = queueCapacity;
+            }
+
+            public String getThreadNamePrefix() {
+                return threadNamePrefix;
+            }
+
+            public void setThreadNamePrefix(String threadNamePrefix) {
+                this.threadNamePrefix = threadNamePrefix;
+            }
         }
     }
 }

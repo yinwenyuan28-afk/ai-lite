@@ -333,7 +333,7 @@ LlmResult result = gateway.oneByStream(call, new Consumer<String>() {
 }, null);
 ```
 
-`onDelta` 收到的是增量文本（可能包含推理增量，取决于模型和协议）。回调可能在不同线程上执行，不要在里面做长时间阻塞操作，也不要依赖请求线程的 `ThreadLocal`。
+`onDelta` 收到的是增量文本（可能包含推理增量，取决于模型和协议）。回调可能在不同线程上执行，不要在里面做长时间阻塞操作，也不要依赖请求线程的 `ThreadLocal`。如果回调里确实有慢操作（打日志、查库），配置 `ai-lite.callback.mode: io` 让回调经独立回调池串行执行（见 `docs/configuration.md` §3.1），不拖慢共享 I/O 线程上的其他请求。
 
 ### 3.9 同步 vs 异步
 

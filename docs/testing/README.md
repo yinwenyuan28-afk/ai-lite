@@ -62,6 +62,8 @@
 | `AgentLoopAsyncHardeningTest` | core | 22 | 泵蹦床（万轮不爆栈）、传输线程 Error 收敛、afterRun 恰好一次、future.cancel 与非合作 transport 收敛、幽灵轮、终态 parity、合成 tool_result、整轮超时、并行工具、异步工具执行器 |
 | `AgentLoopDecisionTest` | core | 2 | 两段式决策（工具阶段 + 终态）全组合矩阵，同步/异步共用 |
 | `LlmCancelHandleListenerTest` | core | 5 | onCancel 恰好一次、已取消后注册立即触发、监听器异常不影响他人、注册/取消竞态 |
+| `SerialCallbackExecutorTest` | core | 4 | 单 in-flight FIFO、队列满返回 false、关闭清空幂等、inline/io 策略 |
+| `AgentLoopIoModeTest` | core | 3 | io 模式钩子在 ai-lite-callback-*、工具本体在载体池、执行器模式 trampoline、取消路径 |
 | `LlmCoroutinesRetryTest` | executor-coroutines | 12 | suspend 重试、`delay()` 退避、`withTimeout`/`job.cancel`、deadline、记录、与异步版 parity |
 | `Utf8LineBufferTest` | core | 8 | CRLF 跨 chunk、多字节字符逐字节切分、空行、末尾无换行、单行上限 |
 | `JettyHttpExecutorTest` | http-jetty | 11 | 同步/异步/原始行、非 2xx、预取消、流中取消、提前 EOF、close |

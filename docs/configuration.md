@@ -161,6 +161,35 @@ executor:
 
 注意：`direct` 和 `virtual` 会忽略所有池字段；`coroutines` 只使用 `core-size` 和 `thread-name-prefix`，`max-size`、`queue-capacity`、`keep-alive-seconds`、`rejection-policy` 不生效。`platform` 默认 `abort`，队列满会拒绝会话加载/落盘；异步调用日志会吞掉拒绝并打 warn，不影响主调用。
 
+## 3.1 回调策略 `ai-lite.callback`
+
+控制用户回调（流式 `onDelta`）与 Agent 钩子跑在哪个线程。默认 `inline`，行为与历史版本完全一致。
+
+```yaml
+ai-lite:
+  callback:
+    mode: inline              # inline | io
+    queue-capacity: 1024      # 每 run 的回调队列上限（io 模式）
+    executor:                 # 仅 io 模式使用
+      core-size: 2
+      max-size: 8
+      queue-capacity: 2048
+      thread-name-prefix: ai-lite-callback-
+```
+
+| mode | 行为 |
+| --- | --- |
+| `inline`（默认） | 回调跑在触发它的线程上（传输/载体/调用方），零额外开销 |
+| `io` | 回调经独立回调池上的 per-run 串行执行器执行：单 in-flight FIFO、慢回调只阻塞自己 |
+
+- `io` 模式只对**异步入口**生效（`runAsync`、`*Async` 流式/非流式）；同步入口恒 inline。
+- 队列满 → `LlmCallException`（`Kind.OVERLOAD`，不重试）：流式调用先异常完成再中断传输；`AgentLoop.runAsync` 的泵在提交线程收敛并中止在途请求。
+- `io` 模式下 AgentLoop 的钩子线程为 `ai-lite-callback-*`；工具本体仍在 `ai-lite.executor` 的载体池。
+- 文档化例外：`beforeRun` 恒在调用方线程；`future.cancel` 路径的 `afterRun` 在取消方线程。
+- 与 `ai-lite.executor.mode=direct` 组合：允许，启动 WARN——钩子隔离由独立回调池保证，但工具本体会内联在回调线程。
+- 自定义 `LlmGateway`/`AgentLoop` Bean：策略不会自动应用（构造时自行传入 `CallbackPolicy`），启动 WARN 提醒。
+- 禁止在钩子里同步等待排在后面的回调任务（单 in-flight 下必然死锁）。
+
 ## 4. HTTP 传输 `ai-lite.http`
 
 模型请求的 HTTP 客户端与 `ai-lite.executor` 相互独立：前者决定“等待网络时占哪类线程”，后者决定“工具、日志、会话落盘在哪里跑”。默认 `okhttp`，与旧版本行为一致。

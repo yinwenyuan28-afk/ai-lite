@@ -2,7 +2,9 @@ package io.github.yinwenyuan28.ailite.assembly;
 
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.llm.AsyncToolExecutor;
+import io.github.yinwenyuan28.ailite.llm.CallbackPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
+import io.github.yinwenyuan28.ailite.llm.SerialCallbackExecutor;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
@@ -43,6 +45,7 @@ public final class AgentLoop {
     private final ToolExecutor toolExecutor;
     private final ToolRunMode toolRunMode;
     private final Executor toolPool;
+    private final CallbackPolicy callbackPolicy;
 
     /**
      * 工具执行模式（AL-A1）：默认串行；PARALLEL 对 run 与 runAsync 都生效，
@@ -101,6 +104,18 @@ public final class AgentLoop {
      */
     public AgentLoop(LlmGateway gateway, ExecutorProvider executor, ToolExecutor toolExecutor,
                      ToolRunMode toolRunMode, Executor toolPool) {
+        this(gateway, executor, toolExecutor, toolRunMode, toolPool, null);
+    }
+
+    /**
+     * 指定工具执行模式、并行执行池与回调执行策略。
+     *
+     * @param callbackPolicy 回调策略（回调策略 Phase 3）；io 模式下 runAsync 的泵与
+     *                       用户钩子经独立回调池上的 per-run 串行执行器执行，
+     *                       null 表示 inline（现状行为）
+     */
+    public AgentLoop(LlmGateway gateway, ExecutorProvider executor, ToolExecutor toolExecutor,
+                     ToolRunMode toolRunMode, Executor toolPool, CallbackPolicy callbackPolicy) {
         if (gateway == null) {
             throw new LlmCallException("网关不能为空");
         }
@@ -109,6 +124,7 @@ public final class AgentLoop {
         this.toolExecutor = toolExecutor == null ? gateway.getToolExecutor() : toolExecutor;
         this.toolRunMode = toolRunMode == null ? ToolRunMode.SEQUENTIAL : toolRunMode;
         this.toolPool = toolPool;
+        this.callbackPolicy = callbackPolicy == null ? CallbackPolicy.inline() : callbackPolicy;
     }
 
     /**
@@ -490,6 +506,8 @@ public final class AgentLoop {
         /** afterRun 恰好一次的闸门，也是 run 终止的统一标志。 */
         private final AtomicBoolean finished = new AtomicBoolean(false);
         private final AtomicInteger wip = new AtomicInteger();
+        /** 回调策略 io 模式的 per-run 串行执行器；inline 为 null。 */
+        private final SerialCallbackExecutor callbackBarrier;
 
         /** 结果槽：外部回调唯一写入点，只有 pump 解释。 */
         private AsyncOutcome pending;
@@ -513,6 +531,8 @@ public final class AgentLoop {
             this.hooks = hooks;
             this.ctx = ctx;
             this.limit = limit;
+            // 回调策略 io 模式：per-run 串行执行器承接泵推进；inline 为 null（就地 drain）。
+            this.callbackBarrier = callbackPolicy.newSerialExecutor();
         }
 
         private CompletableFuture<LlmResult> start() {
@@ -527,11 +547,34 @@ public final class AgentLoop {
             return result;
         }
 
-        /** 回调唤醒入口：wip 抢占 + drain，重入只登记次数不递归（AL-H04 蹦床）。 */
+        /**
+         * 回调唤醒入口：wip 抢占 + drain，重入只登记次数不递归（AL-H04 蹦床）。
+         * 回调策略 io 模式（Phase 3a）：drain 任务投递到 per-run 串行执行器——投递只
+         * 发生在 wip 0→1 转换，队列中至多一个 drain 任务；inline 就地执行。
+         */
         private void advance() {
             if (wip.getAndIncrement() != 0) {
                 return;
             }
+            if (callbackBarrier == null) {
+                drainLoop();
+                return;
+            }
+            if (!callbackBarrier.submit(new Runnable() {
+                @Override
+                public void run() {
+                    drainLoop();
+                }
+            })) {
+                // M-1：投递被拒（队列满/已关闭）必须在提交线程收敛，否则唤醒丢失、run 挂起。
+                convergeFailure(new LlmCallException("回调队列已满", null,
+                        LlmCallException.Kind.OVERLOAD));
+                ctx.getCancel().cancel();
+            }
+        }
+
+        /** drain 循环：消化 wip 计数并推进泵；Error 一并收敛，future 永不悬挂。 */
+        private void drainLoop() {
             int missed = 1;
             try {
                 for (;;) {
@@ -687,7 +730,7 @@ public final class AgentLoop {
             waitingTools = true;
             CompletableFuture<Void> toolsFuture;
             try {
-                toolsFuture = submitToolBatch(ctx, hooks, shown, roundNo);
+                toolsFuture = submitToolBatch(ctx, hooks, shown, roundNo, callbackBarrier);
             } catch (RuntimeException ex) {
                 waitingTools = false;
                 throw ex;
@@ -761,31 +804,43 @@ public final class AgentLoop {
             }
         }
 
-        /** 成功终态收敛：恰好一次 afterRun 后完成 future。 */
+        /** 成功终态收敛：恰好一次 afterRun 后完成 future；回调通道随之关闭。 */
         private void convergeComplete(LlmResult value) {
             if (!finished.compareAndSet(false, true)) {
                 return;
             }
             eachAfterRun(hooks, ctx, value, null);
+            if (callbackBarrier != null) {
+                callbackBarrier.close();
+            }
             result.complete(value);
         }
 
-        /** 异常终态收敛：恰好一次 afterRun 后异常完成 future。 */
+        /** 异常终态收敛：恰好一次 afterRun 后异常完成 future；回调通道随之关闭。 */
         private void convergeFailure(Throwable error) {
             Throwable cause = unwrap(error);
             if (!finished.compareAndSet(false, true)) {
                 return;
             }
             eachAfterRun(hooks, ctx, null, cause);
+            if (callbackBarrier != null) {
+                callbackBarrier.close();
+            }
             result.completeExceptionally(cause);
         }
 
-        /** future.cancel 路径收敛：取消方线程上恰好一次 afterRun，result 保持 cancelled。 */
+        /**
+         * future.cancel 路径收敛：取消方线程上恰好一次 afterRun（D-2 文档化例外），
+         * result 保持 cancelled；回调通道随之关闭。
+         */
         private void convergeCancelledByFuture() {
             if (!finished.compareAndSet(false, true)) {
                 return;
             }
             eachAfterRun(hooks, ctx, null, new CancellationException("run 被调用方取消"));
+            if (callbackBarrier != null) {
+                callbackBarrier.close();
+            }
         }
 
         private LlmResult abortedResultLocked() {
@@ -877,38 +932,52 @@ public final class AgentLoop {
     }
 
     /**
-     * 并行执行本批工具（AL-A1）：beforeTool 全量串行预检（deny-wins、参数改写都在
-     * 并发前确定）→ 允许的调用并发执行（同步入口下单个工具不切线程）→ 汇合后按模型
-     * 原始顺序串行回调 afterTool 并写回 tool_result。执行器故障即抛出终止 run：
-     * 已提交调用的结果丢弃、已完成工具的 afterTool 不再调用（与串行语义对等）。
+     * 并行批次预检结果（同步与异步入口共用）：beforeTool 全量串行预检的产物。
      */
-    private void runToolsParallel(AgentLoopContext ctx, List<AgentLifecycle> hooks,
-                                  List<LlmToolCall> calls, int roundNo) {
-        final int size = calls.size();
-        final boolean[] denied = new boolean[size];
-        final String[] denials = new String[size];
-        final List<AgentToolCall> mutable = new ArrayList<AgentToolCall>(size);
+    private static final class ParallelPrecheck {
 
-        // 1. 串行预检：钩子有序、可拒绝、可改参数；取消时本批不再执行任何工具。
+        final boolean[] denied;
+        final String[] denials;
+        final List<AgentToolCall> mutable;
+        /** 预检中发现取消：拒绝文本与 skipped 已写回，本批无需执行。 */
+        boolean cancelledHandled;
+
+        ParallelPrecheck(int size) {
+            this.denied = new boolean[size];
+            this.denials = new String[size];
+            this.mutable = new ArrayList<AgentToolCall>(size);
+        }
+    }
+
+    /**
+     * 并行批次第 1 段：串行预检。钩子有序、deny-wins、参数改写都在并发前确定；
+     * 取消时已拒绝的写拒绝文本、未处理的合成 skipped（M-6：停止依赖逐工具检查）。
+     */
+    private ParallelPrecheck precheckParallel(AgentLoopContext ctx, List<AgentLifecycle> hooks,
+                                              List<LlmToolCall> calls) {
+        final int size = calls.size();
+        final ParallelPrecheck pre = new ParallelPrecheck(size);
         for (int i = 0; i < size; i++) {
             LlmToolCall call = calls.get(i);
-            mutable.add(new AgentToolCall(call.getId(), call.getName(), call.getArgumentsJson()));
+            pre.mutable.add(new AgentToolCall(call.getId(), call.getName(),
+                    call.getArgumentsJson()));
             if (ctx.isCancelled()) {
                 for (int j = 0; j < i; j++) {
-                    if (denied[j]) {
+                    if (pre.denied[j]) {
                         ctx.getMessages().add(
-                                LlmMessage.toolResult(calls.get(j).getId(), denials[j]));
+                                LlmMessage.toolResult(calls.get(j).getId(), pre.denials[j]));
                     }
                 }
                 appendSkipped(ctx, calls.subList(i, size), "未执行：调用已取消");
-                return;
+                pre.cancelledHandled = true;
+                return pre;
             }
             String denial = null;
             for (AgentLifecycle hook : hooks) {
                 if (hook == null) {
                     continue;
                 }
-                ToolDecision decision = hook.beforeTool(ctx, mutable.get(i));
+                ToolDecision decision = hook.beforeTool(ctx, pre.mutable.get(i));
                 if (decision == null) {
                     decision = ToolDecision.allow();
                 }
@@ -918,13 +987,56 @@ public final class AgentLoop {
                     break;
                 }
                 if (decision.getArgumentsJson() != null) {
-                    mutable.get(i).setArgumentsJson(decision.getArgumentsJson());
+                    pre.mutable.get(i).setArgumentsJson(decision.getArgumentsJson());
                 }
             }
             if (denial != null) {
-                denied[i] = true;
-                denials[i] = denial;
+                pre.denied[i] = true;
+                pre.denials[i] = denial;
             }
+        }
+        return pre;
+    }
+
+    /**
+     * 并行批次第 3 段：按模型原始顺序串行写回——denied 用拒绝文本；否则先过
+     * afterTool 链再生成 tool_result。顺序与完成顺序无关。
+     */
+    private void writeBackParallel(AgentLoopContext ctx, List<AgentLifecycle> hooks,
+                                   List<LlmToolCall> calls, ParallelPrecheck pre,
+                                   String[] texts) {
+        final int size = calls.size();
+        for (int i = 0; i < size; i++) {
+            String text;
+            if (pre.denied[i]) {
+                text = pre.denials[i];
+            } else {
+                text = texts[i] == null ? "" : texts[i];
+                for (AgentLifecycle hook : hooks) {
+                    if (hook == null) {
+                        continue;
+                    }
+                    String changed = hook.afterTool(ctx, pre.mutable.get(i), text);
+                    if (changed != null) {
+                        text = changed;
+                    }
+                }
+            }
+            ctx.getMessages().add(LlmMessage.toolResult(calls.get(i).getId(), text));
+        }
+    }
+
+    /**
+     * 并行执行本批工具（AL-A1，同步入口）：beforeTool 全量串行预检 → 允许的调用
+     * 并发执行（单个工具不切线程）→ 汇合后按模型原始顺序写回。执行器故障即抛出
+     * 终止 run：已提交调用的结果丢弃、已完成工具的 afterTool 不再调用。
+     */
+    private void runToolsParallel(AgentLoopContext ctx, List<AgentLifecycle> hooks,
+                                  List<LlmToolCall> calls, int roundNo) {
+        final int size = calls.size();
+        final ParallelPrecheck pre = precheckParallel(ctx, hooks, calls);
+        if (pre.cancelledHandled) {
+            return;
         }
 
         // 2. 并发执行未被拒绝的调用；只有一个时直接在当前线程执行，避免无谓跳线程。
@@ -933,26 +1045,26 @@ public final class AgentLoop {
         int allowed = 0;
         int onlyAllowed = -1;
         for (int i = 0; i < size; i++) {
-            if (!denied[i]) {
+            if (!pre.denied[i]) {
                 allowed++;
                 onlyAllowed = i;
             }
         }
         if (allowed == 1) {
-            texts[onlyAllowed] = execute(ctx.getTools(), mutable.get(onlyAllowed), roundNo);
+            texts[onlyAllowed] = execute(ctx.getTools(), pre.mutable.get(onlyAllowed), roundNo);
         } else if (allowed > 1) {
             for (int i = 0; i < size; i++) {
-                if (denied[i]) {
+                if (pre.denied[i]) {
                     futures.add(null);
                     continue;
                 }
-                final AgentToolCall call = mutable.get(i);
+                final AgentToolCall call = pre.mutable.get(i);
                 futures.add(CompletableFuture.supplyAsync(
                         () -> execute(ctx.getTools(), call, roundNo), toolPool()));
             }
             joinToolFutures(futures);
             for (int i = 0; i < size; i++) {
-                if (!denied[i]) {
+                if (!pre.denied[i]) {
                     CompletableFuture<String> future = futures.get(i);
                     String text = future.getNow(null);
                     texts[i] = text == null ? "" : text;
@@ -960,25 +1072,7 @@ public final class AgentLoop {
             }
         }
 
-        // 3. 按模型原始顺序串行写回：denied 用拒绝文本；否则先过 afterTool 链。
-        for (int i = 0; i < size; i++) {
-            String text;
-            if (denied[i]) {
-                text = denials[i];
-            } else {
-                text = texts[i] == null ? "" : texts[i];
-                for (AgentLifecycle hook : hooks) {
-                    if (hook == null) {
-                        continue;
-                    }
-                    String changed = hook.afterTool(ctx, mutable.get(i), text);
-                    if (changed != null) {
-                        text = changed;
-                    }
-                }
-            }
-            ctx.getMessages().add(LlmMessage.toolResult(calls.get(i).getId(), text));
-        }
+        writeBackParallel(ctx, hooks, calls, pre, texts);
     }
 
     /**
@@ -1014,40 +1108,59 @@ public final class AgentLoop {
         }
     }
 
-    /** 并行工具用的执行池：未显式指定时复用载体池。 */
+    /** 并行/异步工具共用的执行池：未显式指定时复用载体池。 */
     private Executor toolPool() {
         return toolPool == null ? executor.io() : toolPool;
     }
 
     /**
-     * 提交工具批次（异步入口）：执行器实现了 {@link AsyncToolExecutor} 且未开并行时
-     * 走异步链（AL-A2，不占载体线程阻塞等待）；否则串行/并行循环交给载体池执行。
+     * 回调策略下的"钩子执行器"（Phase 3b）：io 模式把任务投递到 per-run 串行执行器
+     * （submit 失败按 OVERLOAD 异常完成链段）；inline 复用载体池（语义与现状等价）。
      */
-    private CompletableFuture<Void> submitToolBatch(final AgentLoopContext ctx,
-                                                    final List<AgentLifecycle> hooks,
-                                                    final LlmResult shown, final int roundNo) {
-        if (toolRunMode != ToolRunMode.PARALLEL
-                && toolExecutor instanceof AsyncToolExecutor) {
-            return runToolsAsyncChain(ctx, hooks, shown, roundNo);
+    private Executor callbackExec(final SerialCallbackExecutor barrier) {
+        if (barrier == null) {
+            return executor.io();
         }
-        return CompletableFuture.runAsync(new Runnable() {
+        return new Executor() {
             @Override
-            public void run() {
-                runTools(ctx, hooks, shown, roundNo);
+            public void execute(Runnable command) {
+                if (!barrier.submit(command)) {
+                    throw new LlmCallException("回调队列已满", null,
+                            LlmCallException.Kind.OVERLOAD);
+                }
             }
-        }, executor.io());
+        };
     }
 
     /**
-     * 异步工具链（AL-A2）：逐工具串行组合异步执行，取消检查、beforeTool、
-     * executeOneAsync、afterTool、写回穿插在链上；执行器故障沿链传播终止 run。
+     * 提交工具批次（异步入口，Phase 3b 泛化）：串行走统一异步链（beforeTool/afterTool/
+     * 写回在回调执行器、工具本体在 io 池或 {@link AsyncToolExecutor} future）；
+     * 并行走三段异步版。执行器故障沿链传播终止 run。
+     */
+    private CompletableFuture<Void> submitToolBatch(final AgentLoopContext ctx,
+                                                    final List<AgentLifecycle> hooks,
+                                                    final LlmResult shown, final int roundNo,
+                                                    final SerialCallbackExecutor barrier) {
+        if (toolRunMode == ToolRunMode.PARALLEL) {
+            return runToolsParallelAsync(ctx, hooks, shown, roundNo, barrier);
+        }
+        return runToolsAsyncChain(ctx, hooks, shown, roundNo, barrier);
+    }
+
+    /**
+     * 异步工具链（AL-A2 + Phase 3b 泛化）：逐工具串行组合——取消检查、beforeTool 在
+     * 回调执行器；工具本体按来源分流（{@link AsyncToolExecutor} 的 future 直接使用
+     * 不再包 io；普通执行器 supplyAsync 到 io 池）；afterTool 与写回回到回调执行器。
+     * 执行器故障沿链传播终止 run。
      */
     private CompletableFuture<Void> runToolsAsyncChain(final AgentLoopContext ctx,
                                                        final List<AgentLifecycle> hooks,
-                                                       final LlmResult shown, final int roundNo) {
-        final AsyncToolExecutor asyncExecutor = (AsyncToolExecutor) toolExecutor;
+                                                       final LlmResult shown, final int roundNo,
+                                                       final SerialCallbackExecutor barrier) {
+        final boolean asyncExecutor = toolExecutor instanceof AsyncToolExecutor;
         final List<LlmToolCall> calls = shown.getToolCalls();
         final boolean[] skipRest = new boolean[1];
+        final Executor cbExec = callbackExec(barrier);
         CompletableFuture<Void> chain = CompletableFuture.completedFuture(null);
         for (int i = 0; i < calls.size(); i++) {
             final int index = i;
@@ -1085,20 +1198,28 @@ public final class AgentLoop {
                     ctx.getMessages().add(LlmMessage.toolResult(call.getId(), denial));
                     return CompletableFuture.<Void>completedFuture(null);
                 }
-                CompletableFuture<String> one;
-                try {
-                    one = asyncExecutor.executeOneAsync(ctx.getTools(),
-                            new LlmToolCall(mutable.getId(), mutable.getName(),
-                                    mutable.getArgumentsJson()), roundNo);
-                } catch (RuntimeException ex) {
-                    // 按 ToolExecutor SPI 契约，业务异常应由实现自行兜住；走到这里说明是执行器故障。
-                    log.warn("工具执行器故障 round={} callId={} tool={} cause={}",
-                            Integer.valueOf(roundNo), mutable.getId(), mutable.getName(),
-                            ex.toString());
-                    throw new LlmCallException("工具执行器故障", ex);
-                }
-                if (one == null) {
-                    throw new LlmCallException("工具执行器返回了空 future");
+                final CompletableFuture<String> one;
+                if (asyncExecutor) {
+                    CompletableFuture<String> produced;
+                    try {
+                        produced = ((AsyncToolExecutor) toolExecutor).executeOneAsync(
+                                ctx.getTools(), new LlmToolCall(mutable.getId(), mutable.getName(),
+                                        mutable.getArgumentsJson()), roundNo);
+                    } catch (RuntimeException ex) {
+                        // 按 ToolExecutor SPI 契约，业务异常应由实现自行兜住；走到这里说明是执行器故障。
+                        log.warn("工具执行器故障 round={} callId={} tool={} cause={}",
+                                Integer.valueOf(roundNo), mutable.getId(), mutable.getName(),
+                                ex.toString());
+                        throw new LlmCallException("工具执行器故障", ex);
+                    }
+                    if (produced == null) {
+                        throw new LlmCallException("工具执行器返回了空 future");
+                    }
+                    one = produced;
+                } else {
+                    final AgentToolCall callForExecute = mutable;
+                    one = CompletableFuture.supplyAsync(
+                            () -> execute(ctx.getTools(), callForExecute, roundNo), executor.io());
                 }
                 return one.thenAcceptAsync(text -> {
                     String resultText = text == null ? "" : text;
@@ -1112,10 +1233,116 @@ public final class AgentLoop {
                         }
                     }
                     ctx.getMessages().add(LlmMessage.toolResult(call.getId(), resultText));
-                }, executor.io());
-            }, executor.io());
+                }, cbExec);
+            }, cbExec);
         }
         return chain;
+    }
+
+    /**
+     * 并行工具异步版（AL-A1 + Phase 3b）：预检在回调执行器 → 允许的调用并发执行
+     * 在 toolPool（M-4：异步入口不做"单允许就地执行"捷径，避免工具本体落在
+     * 传输/回调线程）→ 汇合去阻塞化（M-3：fail-fast 非阻塞组合，不在回调线程
+     * join）→ 写回在回调执行器。
+     */
+    private CompletableFuture<Void> runToolsParallelAsync(final AgentLoopContext ctx,
+                                                          final List<AgentLifecycle> hooks,
+                                                          final LlmResult shown,
+                                                          final int roundNo,
+                                                          final SerialCallbackExecutor barrier) {
+        final List<LlmToolCall> calls = shown.getToolCalls();
+        final Executor cbExec = callbackExec(barrier);
+        final ParallelPrecheck[] preHolder = new ParallelPrecheck[1];
+        final String[][] textsHolder = new String[1][];
+        return CompletableFuture.runAsync(new Runnable() {
+            @Override
+            public void run() {
+                preHolder[0] = precheckParallel(ctx, hooks, calls);
+            }
+        }, cbExec).thenCompose(new java.util.function.Function<Object, CompletableFuture<Void>>() {
+            @Override
+            public CompletableFuture<Void> apply(Object ignored) {
+                ParallelPrecheck pre = preHolder[0];
+                if (pre.cancelledHandled) {
+                    return CompletableFuture.completedFuture(null);
+                }
+                final int size = calls.size();
+                final String[] texts = new String[size];
+                textsHolder[0] = texts;
+                final List<CompletableFuture<String>> futures =
+                        new ArrayList<CompletableFuture<String>>();
+                boolean anyAllowed = false;
+                for (int i = 0; i < size; i++) {
+                    if (pre.denied[i]) {
+                        continue;
+                    }
+                    anyAllowed = true;
+                    final AgentToolCall call = pre.mutable.get(i);
+                    futures.add(CompletableFuture.supplyAsync(
+                            () -> execute(ctx.getTools(), call, roundNo), toolPool()));
+                }
+                if (!anyAllowed) {
+                    return CompletableFuture.completedFuture(null);
+                }
+                return convergeFailFast(futures).thenApply(new java.util.function.Function<Void, Void>() {
+                    @Override
+                    public Void apply(Void ignored) {
+                        for (int i = 0, f = 0; i < size; i++) {
+                            if (pre.denied[i]) {
+                                continue;
+                            }
+                            String text = futures.get(f++).getNow(null);
+                            texts[i] = text == null ? "" : text;
+                        }
+                        return null;
+                    }
+                });
+            }
+        }).thenRun(new Runnable() {
+            @Override
+            public void run() {
+                if (!preHolder[0].cancelledHandled) {
+                    writeBackParallel(ctx, hooks, calls, preHolder[0], textsHolder[0]);
+                }
+            }
+        });
+    }
+
+    /**
+     * 并行批次汇合（M-3 非阻塞版）：任一失败立即异常完成（fail-fast，不等其余），
+     * 全部成功才正常完成；不在调用线程阻塞等待。
+     */
+    private static CompletableFuture<Void> convergeFailFast(
+            List<CompletableFuture<String>> futures) {
+        final CompletableFuture<Void> converged = new CompletableFuture<Void>();
+        final List<CompletableFuture<String>> inFlight =
+                new ArrayList<CompletableFuture<String>>();
+        for (CompletableFuture<String> future : futures) {
+            if (future == null) {
+                continue;
+            }
+            inFlight.add(future);
+            future.whenComplete(new java.util.function.BiConsumer<String, Throwable>() {
+                @Override
+                public void accept(String text, Throwable error) {
+                    if (error != null) {
+                        converged.completeExceptionally(error);
+                    }
+                }
+            });
+        }
+        CompletableFuture.allOf(inFlight.toArray(new CompletableFuture[0]))
+                .whenComplete(new java.util.function.BiConsumer<Void, Throwable>() {
+                    @Override
+                    public void accept(Void ignored, Throwable error) {
+                        if (error != null) {
+                            converged.completeExceptionally(error);
+                        } else {
+                            converged.complete(null);
+                        }
+                    }
+                });
+        return converged;
     }
 
     /**
