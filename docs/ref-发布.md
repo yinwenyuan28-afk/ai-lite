@@ -72,6 +72,54 @@ namespace 要求：Central 的 `io.github.yinwenyuan28-afk` namespace 需在 Por
 | 部署校验 `Failed to get coordinates from pom file` | 上传了 SNAPSHOT 版本；Central 只收正式版 |
 | 构建 success 但 Portal 上没有任何部署 | 可能给 reactor **最后一个模块**配了 `skipPublishing`——该插件以聚合模式工作，只在最后一个模块执行一次 publish（打包全部模块），跳过它等于跳过整批上传 |
 | 只有部分模块进 bundle（缺 parent/依赖） | 用 `-pl` 单独发布某模块时拿不到父 POM 继承的 url/licenses/scm/developers，必须整批 reactor 发布 |
+| `Javadocs must be provided but not found in entries` | 纯 Kotlin 模块（`sourceDirectory=src/main/kotlin`）产不出 javadoc jar。用 `prepare-package` 把源码复制到 `target/javadoc-src`，再由 `maven-jar-plugin` 打 `-javadoc` 分类制品；**必须显式 `<include>**/*.kt</include>`**，否则该插件按 class 规则过滤，产出空 jar |
+
+### 4.2 首次发布踩坑复盘（2026-10-26，0.1.0 → 0.1.7）
+
+从 0.1.0 到真正通过 Portal 校验，连续失败 5 轮。值得记录的不是每个错误本身，而是**判断方法上的失误**——它们让排查多花了好几倍时间。
+
+**失误一：用一个不会区分对错的探针去验证假设**
+
+当时想确认 Central token 是否有效，用了 `curl -X POST .../publisher/upload`（无请求体）。它返回 401，于是判定「token 失效」，反复让用户重新生成 token、重配 secret。
+
+真相是：该端点只接受 `multipart/form-data`，**任何**缺 bundle 的请求都返 401——好凭证和坏凭证的返回值完全相同。这个探针根本没有区分能力。
+
+> **原则**：验证手段必须先自证能区分。方法是用**已知错误的输入**跑一次，确认它给出「失败」；再用**已知正确的输入**跑一次，确认它给出「成功」。两次结果相同，就说明这个探针无效，不能用来下结论。
+
+**失误二：修复一个现象时，没有确认修复本身没有引入新问题**
+
+v0.1.2 失败时看到 demo 模块报错，判断是「demo 不该发布」，于是给它加了 `skipPublishing=true`。构建从此变成 success——**看起来修好了**。
+
+实际上该插件以聚合模式工作，只在 reactor 最后一个模块上执行一次 publish、打包**全部**模块。demo 正好是最后一个，跳过它等于跳过整批上传，所以 v0.1.4「成功」却什么都没发到 Portal。
+
+> **原则**：「从失败变成功」不等于修好了。发布类操作要核对**外部系统的实际状态**（Portal 上有没有部署、版本对不对），而不是只看命令退出码。
+
+**失误三：把旧记录的结论套到新版本上**
+
+查 GitHub Actions 状态时读到了缓存的旧运行（v0.1.4 的 success），误以为 v0.1.5 成功了，白等一轮。
+
+> **原则**：按 sha 或 tag 校验查询结果，不要只按「最新的那条」取。
+
+**失误四：在错误的前提下加诊断代码，越修越远**
+
+为了定位 401，我在工作流里加了「凭证自检」步骤，用的还是失误一那个无效探针。它给不出有用信息，反而占了两个版本的时间。
+
+> **原则**：诊断代码本身要有明确的判定语义（什么结果代表什么），否则删掉比留着好。
+
+**最终定位到的四个真实原因**（都不是最初怀疑的凭证问题）：
+
+| 版本 | 真实原因 |
+| --- | --- |
+| 0.1.4 | 自检用了无区分能力的探针（伪问题） |
+| 0.1.5 | demo 的 `skipPublishing` 关掉了唯一的聚合上传点 |
+| 0.1.6 | `central-publishing-maven-plugin` 0.6.0 在 Maven 3.10 下 bundle 缺 pom（官方已知，0.12.0 修） |
+| 0.1.7 | 两个纯 Kotlin 模块产不出 javadoc jar |
+
+**下次发布前值得先做的三件事**：
+
+1. 本地跑一遍 `mvn -Prelease verify -Dgpg.skip=true`，确认 javadoc/sources 制品齐全（`target/*-javadoc.jar` 里要有文件）。
+2. 确认 `central-publishing-maven-plugin` 版本 ≥ 0.12.0（Maven 3.10 runner）。
+3. 发布后在 Portal 的 Deployments 页面核对版本号与组件数，而不是只看 CI 绿灯。
 
 ## 5. 签名密钥的生成（本地一次性）
 
