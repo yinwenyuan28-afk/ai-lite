@@ -2,7 +2,7 @@ package io.github.yinwenyuan28.ailite.llm;
 
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import org.junit.After;
 import org.junit.Test;
 
@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * 单次模型调用入口的 parity：同步 one 与异步 oneAsync 在结果、请求、校验、

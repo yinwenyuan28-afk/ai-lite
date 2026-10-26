@@ -7,7 +7,7 @@ import io.github.yinwenyuan28.ailite.llm.LlmGateway
 import io.github.yinwenyuan28.ailite.llm.LlmResult
 import io.github.yinwenyuan28.ailite.llm.LlmTool
 import io.github.yinwenyuan28.ailite.llm.RetryPolicy
-import io.github.yinwenyuan28.ailite.llm.RetrySupport
+import io.github.yinwenyuan28.ailite.internal.llm.RetrySupport
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.future.await
 import java.util.concurrent.CompletableFuture

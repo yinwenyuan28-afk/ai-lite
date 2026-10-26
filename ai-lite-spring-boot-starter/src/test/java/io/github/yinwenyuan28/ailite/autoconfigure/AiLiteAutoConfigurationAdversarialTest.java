@@ -1,7 +1,7 @@
 package io.github.yinwenyuan28.ailite.autoconfigure;
 
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
@@ -13,8 +13,8 @@ import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmTransport;
-import io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore;
-import io.github.yinwenyuan28.ailite.llm.SequentialToolExecutor;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 import io.github.yinwenyuan28.ailite.session.AgentSession;
 import io.github.yinwenyuan28.ailite.session.AgentSessionStore;
 import io.github.yinwenyuan28.ailite.session.InMemoryAgentSessionStore;

@@ -1,4 +1,4 @@
-package io.github.yinwenyuan28.ailite.llm;
+package io.github.yinwenyuan28.ailite.internal.llm;
 
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;

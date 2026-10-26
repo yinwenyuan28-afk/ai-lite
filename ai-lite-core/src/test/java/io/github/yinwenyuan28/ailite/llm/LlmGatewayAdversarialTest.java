@@ -2,7 +2,7 @@ package io.github.yinwenyuan28.ailite.llm;
 
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -13,6 +13,8 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * 网关的对抗性用例：坏 biz-id、坏消息、坏工具、轮数边界、取消和错误脱敏。

@@ -5,6 +5,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import io.github.yinwenyuan28.ailite.internal.session.AgentSessionStoreSupport;
 
 /**
  * 有界内存缓存。用于没有 Redis 的环境，或者测试。

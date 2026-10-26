@@ -25,6 +25,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import io.github.yinwenyuan28.ailite.internal.llm.AsyncLlmCallLogger;
 
 /**
  * 指标装配契约：registry 存在且启用时网关拿到装饰器；关闭或无 registry 时

@@ -1,6 +1,6 @@
 package io.github.yinwenyuan28.ailite.llm;
 
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import org.junit.Test;
 
 import java.util.ArrayDeque;

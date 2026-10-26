@@ -10,6 +10,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.PlatformExecutorProvider;
 
 /**
  * 平台线程池：正常执行、线程命名、拒绝策略和关闭。

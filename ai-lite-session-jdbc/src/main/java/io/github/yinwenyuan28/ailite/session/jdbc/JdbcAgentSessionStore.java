@@ -4,7 +4,7 @@ import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.session.AgentSession;
 import io.github.yinwenyuan28.ailite.session.AgentSessionCodec;
 import io.github.yinwenyuan28.ailite.session.AgentSessionStore;
-import io.github.yinwenyuan28.ailite.session.AgentSessionStoreSupport;
+import io.github.yinwenyuan28.ailite.internal.session.AgentSessionStoreSupport;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;

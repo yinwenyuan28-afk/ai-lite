@@ -18,6 +18,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 
 /**
  * 单次调用和简单工具循环的顺序执行器。步骤不能是 Agent loop。

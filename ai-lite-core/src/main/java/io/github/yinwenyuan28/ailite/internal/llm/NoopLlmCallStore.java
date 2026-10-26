@@ -1,4 +1,8 @@
-package io.github.yinwenyuan28.ailite.llm;
+package io.github.yinwenyuan28.ailite.internal.llm;
+
+import io.github.yinwenyuan28.ailite.llm.LlmCallRecord;
+import io.github.yinwenyuan28.ailite.llm.LlmCallStore;
+
 
 /**
  * 默认的空存储。调用记录只出现在日志里。

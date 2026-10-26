@@ -1,7 +1,8 @@
-package io.github.yinwenyuan28.ailite.llm;
+package io.github.yinwenyuan28.ailite.internal.llm;
 
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 
 /**
  * 重试流程的纯函数工具。同步、协程和异步三个入口共用同一套 deadline、

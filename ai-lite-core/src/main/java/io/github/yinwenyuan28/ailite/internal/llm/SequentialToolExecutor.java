@@ -1,4 +1,4 @@
-package io.github.yinwenyuan28.ailite.llm;
+package io.github.yinwenyuan28.ailite.internal.llm;
 
 import io.github.yinwenyuan28.ailite.json.AiLiteJson;
 import io.github.yinwenyuan28.ailite.util.Strings;
@@ -6,6 +6,9 @@ import io.github.yinwenyuan28.ailite.util.Strings;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import io.github.yinwenyuan28.ailite.llm.LlmTool;
+import io.github.yinwenyuan28.ailite.llm.LlmToolCall;
+import io.github.yinwenyuan28.ailite.llm.ToolExecutor;
 
 /**
  * 串行工具执行器。每个工具按模型给出的顺序执行，异常转成文本回给模型。

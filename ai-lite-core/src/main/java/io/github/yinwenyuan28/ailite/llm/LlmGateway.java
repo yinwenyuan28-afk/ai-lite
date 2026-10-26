@@ -1,9 +1,12 @@
 package io.github.yinwenyuan28.ailite.llm;
 
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.guard.ProviderGuard;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.llm.AsyncLlmCallLogger;
+import io.github.yinwenyuan28.ailite.internal.llm.RetryScheduler;
+import io.github.yinwenyuan28.ailite.internal.llm.RetrySupport;
 import io.github.yinwenyuan28.ailite.util.Strings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +26,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * 模型调用入口。业务只和这个类打交道。

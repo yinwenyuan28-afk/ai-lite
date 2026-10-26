@@ -8,6 +8,9 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * 网关的业务 id 校验、单次调用、工具循环和 round 语义。
@@ -128,7 +131,7 @@ public class LlmGatewayTest {
     private static LlmGateway gateway(GatewayTestSupport.FakeTransport transport,
                                       io.github.yinwenyuan28.ailite.config.ModelResolver resolver) {
         return new LlmGateway(resolver, Collections.<LlmTransport>singletonList(transport),
-                new NoopLlmCallStore(), new io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider(),
+                new NoopLlmCallStore(), new DirectExecutorProvider(),
                 new SequentialToolExecutor());
     }
 

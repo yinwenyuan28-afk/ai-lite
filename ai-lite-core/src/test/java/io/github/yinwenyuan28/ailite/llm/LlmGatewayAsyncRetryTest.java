@@ -1,6 +1,6 @@
 package io.github.yinwenyuan28.ailite.llm;
 
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -20,6 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.llm.RetryScheduler;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * oneWithRetryAsync：异步重试的主路径、deadline、取消、调度与记录。

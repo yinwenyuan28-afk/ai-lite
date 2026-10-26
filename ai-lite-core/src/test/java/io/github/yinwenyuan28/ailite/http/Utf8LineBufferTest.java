@@ -9,6 +9,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.http.Utf8LineBuffer;
 
 /**
  * 字节流切行：CRLF、跨 chunk 的多字节字符、空行和末尾无换行。

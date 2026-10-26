@@ -2,7 +2,7 @@ package io.github.yinwenyuan28.ailite.autoconfigure;
 
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
 import io.github.yinwenyuan28.ailite.llm.LlmCompletion;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
@@ -12,8 +12,9 @@ import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmTransport;
 import io.github.yinwenyuan28.ailite.llm.LlmUsage;
 import io.github.yinwenyuan28.ailite.llm.RetryPolicy;
-import io.github.yinwenyuan28.ailite.llm.RetryScheduler;
-import io.github.yinwenyuan28.ailite.llm.SequentialToolExecutor;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.RetryScheduler;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 import org.junit.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
@@ -113,7 +114,7 @@ public class AsyncRetryAssemblyTest {
     public void e04ManualFiveArgumentConstructorStillWorks() throws Exception {
         RecordingTransport transport = new RecordingTransport();
         LlmGateway gateway = new LlmGateway(resolver(), Collections.<LlmTransport>singletonList(transport),
-                new io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore(),
+                new NoopLlmCallStore(),
                 new DirectExecutorProvider(), new SequentialToolExecutor());
 
         LlmResult result = gateway.oneWithRetryAsync(call(), zeroPolicy())
@@ -131,7 +132,7 @@ public class AsyncRetryAssemblyTest {
             RecordingTransport transport = new RecordingTransport();
             LlmGateway gateway = new LlmGateway(resolver(),
                     Collections.<LlmTransport>singletonList(transport),
-                    new io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore(),
+                    new NoopLlmCallStore(),
                     new DirectExecutorProvider(), new SequentialToolExecutor(), scheduler);
 
             gateway.oneWithRetryAsync(call(), zeroPolicy()).get(5, TimeUnit.SECONDS);

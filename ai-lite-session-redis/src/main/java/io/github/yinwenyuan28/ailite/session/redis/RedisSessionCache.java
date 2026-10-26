@@ -3,7 +3,7 @@ package io.github.yinwenyuan28.ailite.session.redis;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.session.AgentSession;
 import io.github.yinwenyuan28.ailite.session.AgentSessionCodec;
-import io.github.yinwenyuan28.ailite.session.AgentSessionStoreSupport;
+import io.github.yinwenyuan28.ailite.internal.session.AgentSessionStoreSupport;
 import io.github.yinwenyuan28.ailite.session.SessionCache;
 import io.github.yinwenyuan28.ailite.util.Strings;
 import org.slf4j.Logger;

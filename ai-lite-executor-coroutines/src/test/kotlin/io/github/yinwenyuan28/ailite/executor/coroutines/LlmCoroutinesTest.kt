@@ -2,7 +2,7 @@ package io.github.yinwenyuan28.ailite.executor.coroutines
 
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig
 import io.github.yinwenyuan28.ailite.config.ModelResolver
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider
 import io.github.yinwenyuan28.ailite.llm.LlmCall
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle
 import io.github.yinwenyuan28.ailite.llm.LlmCompletion
@@ -15,8 +15,8 @@ import io.github.yinwenyuan28.ailite.llm.LlmTool
 import io.github.yinwenyuan28.ailite.llm.LlmToolCall
 import io.github.yinwenyuan28.ailite.llm.LlmTransport
 import io.github.yinwenyuan28.ailite.llm.LlmUsage
-import io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore
-import io.github.yinwenyuan28.ailite.llm.SequentialToolExecutor
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll

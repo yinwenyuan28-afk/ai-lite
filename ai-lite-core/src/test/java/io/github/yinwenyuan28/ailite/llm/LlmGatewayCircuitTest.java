@@ -2,7 +2,7 @@ package io.github.yinwenyuan28.ailite.llm;
 
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.guard.ProviderGuard;
 import org.junit.After;
 import org.junit.Test;
@@ -20,6 +20,8 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * 网关熔断接入测试（限流熔断计划 G2）：失败口径经 verdict 直调

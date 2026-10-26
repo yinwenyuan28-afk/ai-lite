@@ -1,4 +1,4 @@
-package io.github.yinwenyuan28.ailite.executor;
+package io.github.yinwenyuan28.ailite.internal.executor;
 
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 
@@ -10,6 +10,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 
 /**
  * 基于 JDK ThreadPoolExecutor 的线程池实现。

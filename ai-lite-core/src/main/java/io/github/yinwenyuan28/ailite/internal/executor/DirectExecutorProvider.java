@@ -1,6 +1,7 @@
-package io.github.yinwenyuan28.ailite.executor;
+package io.github.yinwenyuan28.ailite.internal.executor;
 
 import java.util.concurrent.Executor;
+import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 
 /**
  * 调用线程内联执行。用于测试和确定不需要异步的场景。

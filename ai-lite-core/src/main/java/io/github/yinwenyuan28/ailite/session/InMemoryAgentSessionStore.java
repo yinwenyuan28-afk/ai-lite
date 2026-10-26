@@ -7,6 +7,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import io.github.yinwenyuan28.ailite.internal.session.AgentSessionStoreSupport;
 
 /**
  * 有界内存会话存储。默认给 Starter 用，不需要数据库或 Redis 就能跑通续聊。

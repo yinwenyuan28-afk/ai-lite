@@ -6,7 +6,7 @@ import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
-import io.github.yinwenyuan28.ailite.http.Utf8LineBuffer;
+import io.github.yinwenyuan28.ailite.internal.http.Utf8LineBuffer;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
 import org.springframework.core.io.buffer.DataBuffer;

@@ -27,6 +27,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import io.github.yinwenyuan28.ailite.internal.session.AgentSessionStoreSupport;
 
 /**
  * 可续聊封装：组合 AgentLoop + AgentSessionStore。

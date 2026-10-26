@@ -1,6 +1,10 @@
-package io.github.yinwenyuan28.ailite.session;
+package io.github.yinwenyuan28.ailite.internal.session;
 
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
+import io.github.yinwenyuan28.ailite.session.AgentSession;
+import io.github.yinwenyuan28.ailite.session.AgentSessionCodec;
+import io.github.yinwenyuan28.ailite.session.AgentSessionMessage;
+import io.github.yinwenyuan28.ailite.session.AgentSessionStore;
 import io.github.yinwenyuan28.ailite.util.Strings;
 
 import java.util.ArrayList;

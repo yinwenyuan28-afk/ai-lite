@@ -1,7 +1,7 @@
 package io.github.yinwenyuan28.ailite.session;
 
 import io.github.yinwenyuan28.ailite.assembly.AgentLoop;
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.llm.GatewayTestSupport;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
 import io.github.yinwenyuan28.ailite.llm.LlmCompletion;
@@ -11,8 +11,8 @@ import io.github.yinwenyuan28.ailite.llm.LlmRole;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
 import io.github.yinwenyuan28.ailite.llm.LlmUsage;
-import io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore;
-import io.github.yinwenyuan28.ailite.llm.SequentialToolExecutor;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 import org.junit.Test;
 
 import java.util.Collections;

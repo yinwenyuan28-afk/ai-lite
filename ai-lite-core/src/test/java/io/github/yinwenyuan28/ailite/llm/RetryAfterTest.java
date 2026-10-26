@@ -1,6 +1,6 @@
 package io.github.yinwenyuan28.ailite.llm;
 
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import org.junit.Test;
 
 import java.util.Collections;
@@ -12,6 +12,8 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * Retry-After 尊重（限流熔断计划 G3）：头值解析健壮性（只认正整数秒）、

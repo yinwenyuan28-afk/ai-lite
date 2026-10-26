@@ -1,6 +1,6 @@
 package io.github.yinwenyuan28.ailite.assembly;
 
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.llm.CallbackPolicy;
 import io.github.yinwenyuan28.ailite.llm.GatewayTestSupport;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
@@ -15,8 +15,8 @@ import io.github.yinwenyuan28.ailite.llm.LlmTool;
 import io.github.yinwenyuan28.ailite.llm.LlmToolCall;
 import io.github.yinwenyuan28.ailite.llm.LlmTransport;
 import io.github.yinwenyuan28.ailite.llm.LlmUsage;
-import io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore;
-import io.github.yinwenyuan28.ailite.llm.SequentialToolExecutor;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 import org.junit.Test;
 
 import java.util.ArrayList;

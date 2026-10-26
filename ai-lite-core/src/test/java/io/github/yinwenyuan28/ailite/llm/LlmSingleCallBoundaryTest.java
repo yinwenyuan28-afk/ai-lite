@@ -1,6 +1,6 @@
 package io.github.yinwenyuan28.ailite.llm;
 
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import org.junit.After;
 import org.junit.Test;
 
@@ -16,6 +16,8 @@ import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * 单次调用路径的边界收口：适配器违约时必须变成可观察的失败，而不是挂起。

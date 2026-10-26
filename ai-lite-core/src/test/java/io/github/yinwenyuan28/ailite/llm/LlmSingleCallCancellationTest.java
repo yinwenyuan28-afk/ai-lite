@@ -1,6 +1,6 @@
 package io.github.yinwenyuan28.ailite.llm;
 
-import io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import org.junit.After;
 import org.junit.Test;
 
@@ -18,6 +18,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
+import io.github.yinwenyuan28.ailite.internal.llm.SequentialToolExecutor;
 
 /**
  * 单次模型调用入口的取消契约：L1（在途 HTTP 中止）与 L2（取消后不再推进）。

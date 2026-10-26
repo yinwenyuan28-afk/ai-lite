@@ -1,6 +1,9 @@
-package io.github.yinwenyuan28.ailite.llm;
+package io.github.yinwenyuan28.ailite.internal.llm;
 
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.llm.LlmCallRecord;
+import io.github.yinwenyuan28.ailite.llm.LlmCallStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,7 +23,7 @@ public final class AsyncLlmCallLogger {
     private final LlmCallStore store;
 
     public AsyncLlmCallLogger(ExecutorProvider executor, LlmCallStore store) {
-        this.executor = executor == null ? new io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider() : executor;
+        this.executor = executor == null ? new DirectExecutorProvider() : executor;
         this.store = store == null ? new NoopLlmCallStore() : store;
     }
 

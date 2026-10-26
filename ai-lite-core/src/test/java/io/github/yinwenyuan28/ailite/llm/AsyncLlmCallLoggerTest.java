@@ -12,6 +12,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import io.github.yinwenyuan28.ailite.internal.llm.AsyncLlmCallLogger;
 
 /**
  * 异步调用日志：异步落库、异常隔离、线程池拒绝和空实现兜底。

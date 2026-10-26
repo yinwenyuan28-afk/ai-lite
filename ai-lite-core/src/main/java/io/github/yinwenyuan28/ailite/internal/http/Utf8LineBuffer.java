@@ -1,4 +1,4 @@
-package io.github.yinwenyuan28.ailite.http;
+package io.github.yinwenyuan28.ailite.internal.http;
 
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 
