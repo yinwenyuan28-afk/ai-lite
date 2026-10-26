@@ -102,9 +102,10 @@ jobs:
           </settings>
           EOF
 
+      # gpg 插件 1.6 的口令入口是 passphrase 参数（无 gpgPassphraseEnvName），
+      # 直接用 shell 变量展开传入，避免在命令行里明文出现。
       - name: Deploy
         if: steps.check.outputs.ready == 'true'
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: |
-          mvn -B -Prelease deploy -Dgpg.passphrase="$GPG_PASSPHRASE"
+        run: mvn -B -Prelease deploy -Dgpg.passphrase="$GPG_PASSPHRASE"

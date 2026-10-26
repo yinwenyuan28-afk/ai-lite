@@ -268,11 +268,15 @@
                         <version>1.6</version>
                         <configuration>
                             <!--
-                                CI 无 TTY：必须 loopback 模式并把口令以参数形式传入，
-                                否则 gpg-agent 会尝试弹交互式 pinentry 而挂死/失败。
-                                release.yml 通过 -Dgpg.passphrase 传入口令。
+                                CI 无 TTY 必须的两项（gpg 插件 1.6 只有 passphrase /
+                                passphraseServerId 两个口令入口，没有 3.x 才有的
+                                gpgPassphraseEnvName）：
+                                1) --batch：禁止任何交互式提示
+                                2) --pinentry-mode loopback：口令由参数给定，不弹 pinentry
+                                口令本身经 -Dgpg.passphrase 传入（见 release.yml）。
                             -->
                             <gpgArguments>
+                                <arg>--batch</arg>
                                 <arg>--pinentry-mode</arg>
                                 <arg>loopback</arg>
                             </gpgArguments>
