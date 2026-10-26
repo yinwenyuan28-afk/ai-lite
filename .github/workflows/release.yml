@@ -71,6 +71,34 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # 部署前先验一次凭证，避免构建跑完后才发现 401：
+      # 对 Central 的 upload 端点发一个无体的 POST，401/403 即凭证无效。
+      - name: Verify Central credentials
+        if: steps.check.outputs.ready == 'true'
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+        run: |
+          USERNAME="$(printf '%s' "$CENTRAL_USERNAME" | tr -d '[:space:]')"
+          PASSWORD="$(printf '%s' "$CENTRAL_PASSWORD" | tr -d '[:space:]')"
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -u "$USERNAME:$PASSWORD" \
+            -X POST https://central.sonatype.com/api/v1/publisher/upload) || code=000
+          echo "Central credential check HTTP status: $code"
+          case "$code" in
+            401|403)
+              echo "::error::Central 拒绝凭证（HTTP $code）。请确认 CENTRAL_USERNAME 是 Portal 上 User Token 的 Username（短串，如 HvyJmf），CENTRAL_PASSWORD 是紧随其后的长密码；不要填 (base64) 那一行，也不要只填 namecode 之外的部分。若刚重新生成过 token，旧 token 已自动失效。"
+              exit 1
+              ;;
+            000)
+              echo "::error::无法连接 central.sonatype.com。"
+              exit 1
+              ;;
+            *)
+              echo "凭证有效（非 401 即表示 Basic Auth 已通过）。"
+              ;;
+          esac
+
       - uses: actions/setup-java@v4
         if: steps.check.outputs.ready == 'true'
         with:

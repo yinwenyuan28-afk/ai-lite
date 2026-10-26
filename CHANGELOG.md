@@ -3,6 +3,14 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.3] - 2026-10-26
+
+### 修复
+
+- **demo 模块不再参与 Central 发布**：`excludeArtifacts` 只排除制品，模块仍会执行 `central-publishing` 的 publish goal。作为 reactor 最后一个模块，它触发整批上传并在认证失败时中断构建。给 demo 单独配 `skipPublishing=true`。
+- **pom XML 注释非法字符**：注释中出现连续两个减号导致 POM 无法解析，构建直接读不了 pom。
+- **发布前凭证自检**：release 工作流在部署前对 Central upload 端点做一次 Basic Auth 探测，401/403 立即失败并给出可操作提示；同时去除 secret 中可能混入的空白字符。
+
 ## [0.1.2] - 2026-10-26
 
 ### 修复
@@ -79,6 +87,7 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.3]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.3
 [0.1.2]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.2
 [0.1.1]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.1
 [0.1.0]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.0
