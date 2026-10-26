@@ -270,10 +270,11 @@
                             <!--
                                 CI 无 TTY 必须的两项（gpg 插件 1.6 只有 passphrase /
                                 passphraseServerId 两个口令入口，没有 3.x 才有的
-                                gpgPassphraseEnvName）：
-                                1) --batch：禁止任何交互式提示
-                                2) --pinentry-mode loopback：口令由参数给定，不弹 pinentry
-                                口令本身经 -Dgpg.passphrase 传入（见 release.yml）。
+                                gpgPassphraseEnvName）。注意：XML 注释里不能出现连续
+                                两个减号，故参数名在下方 arg 元素中书写。
+                                1) batch 模式：禁止任何交互式提示
+                                2) pinentry-mode loopback：口令由参数给定，不弹 pinentry
+                                口令本身经 gpg.passphrase 属性传入（见 release.yml）。
                             -->
                             <gpgArguments>
                                 <arg>--batch</arg>
