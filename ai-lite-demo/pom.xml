@@ -39,6 +39,19 @@
                     </execution>
                 </executions>
             </plugin>
+            <!--
+                demo 是示例工程，不发布到 Maven Central。父 pom 的 release profile
+                会注入 central-publishing 插件；这里用 skipPublishing 让 demo 模块
+                跳过上传阶段（excludeArtifacts 只排除制品，模块仍会执行 publish goal，
+                导致首个模块失败后整条 reactor 中断）。
+            -->
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <configuration>
+                    <skipPublishing>true</skipPublishing>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>
