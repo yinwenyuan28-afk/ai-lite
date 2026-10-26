@@ -3,6 +3,19 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.1] - 2026-10-26
+
+### 修复
+
+- **`SerialCallbackExecutorTest` 调度竞态导致 CI 在慢机器上稳定失败。** 两个用例隐含假设「worker 已异步取走第一个任务」，但 `submit` 只入队并唤醒 worker，取走前该任务仍占队列位——容量 2 时高负载 runner 上第三次提交即被拒（`expected:<true> but was:<false>`）。改为用 `started` 栅栏等待任务真正进入执行态再断言，不再依赖调度速度。仅测试代码变更，生产行为无影响。
+- **无 micrometer 依赖的宿主应用装配崩溃**（`ClassNotFoundException: MeterRegistry`）：`MeterRegistry` 相关 Bean 移入嵌套 `MicrometerMetricsConfiguration`（`@ConditionalOnClass` 用 ASM 评估，不触发类加载），类内保留 `ObjectProvider` 容忍「有 micrometer 但无 registry Bean」（无 actuator 的应用）。
+- **`ModelResolver` 20 处解析/校验异常由 `UNKNOWN` 归位 `Kind.CONFIG`**：未发出 HTTP、默认不可重试，调用方按 `Kind` 区分「我方配置错 vs 供应商故障」不再误判。
+
+### 工程
+
+- CI 失败时输出失败用例名并上传 surefire 报告，缩短排障路径。
+- Dependabot 禁止 `semver-major` 自动升级（OkHttp 5 / Kotlin 2.x / Actions v6-v7 会打破 JDK 8 + Boot 2.1/2.7 基线），Spring 上游由 BOM 管理不单独升级。
+
 ## [0.1.0] - 2026-10-26
 
 首个公开版本。面向 Spring Boot 2.x / JDK 8 存量系统的轻量 LLM 接入层。
@@ -55,4 +68,5 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.1]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.1
 [0.1.0]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.0

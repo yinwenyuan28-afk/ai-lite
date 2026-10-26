@@ -6,7 +6,7 @@
 
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-qps-benchmark</artifactId>
-    <version>0.1.1-SNAPSHOT</version>
+    <version>0.1.1</version>
     <packaging>jar</packaging>
 
     <name>AI Lite QPS Benchmark</name>
@@ -23,12 +23,12 @@
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-core</artifactId>
-            <version>0.1.1-SNAPSHOT</version>
+            <version>0.1.1</version>
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-executor-coroutines</artifactId>
-            <version>0.1.1-SNAPSHOT</version>
+            <version>0.1.1</version>
         </dependency>
         <dependency>
             <groupId>org.jetbrains.kotlin</groupId>
