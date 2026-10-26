@@ -38,6 +38,25 @@ jobs:
           cache: maven
       - name: Build
         run: mvn -B -Dspring-boot.version=${{ matrix.boot }} verify
+      # 失败时把 surefire 报告与摘要留下来，避免只能翻超长日志找失败用例名。
+      # 失败时把失败用例名直接打到日志末尾（annotation 里一眼可见），
+      # 同时保留完整报告 artifact。
+      - name: Print failure summary
+        if: failure()
+        run: |
+          echo "=== 失败用例 ==="
+          grep -rh -E "<<< (FAILURE|ERROR)!" --include="*.txt" . 2>/dev/null | head -40 || true
+          echo "=== 各模块统计 ==="
+          grep -rh "Tests run:" --include="*.txt" . 2>/dev/null | tail -20 || true
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-${{ matrix.java }}-boot${{ matrix.boot }}
+          path: |
+            **/target/surefire-reports/*.txt
+            **/target/surefire-reports/*.xml
+          retention-days: 7
 
   jdk21:
     name: JDK 21
@@ -61,6 +80,22 @@ jobs:
           cache: maven
       - name: Build including virtual-thread module
         run: mvn -B verify
+      - name: Print failure summary
+        if: failure()
+        run: |
+          echo "=== 失败用例 ==="
+          grep -rh -E "<<< (FAILURE|ERROR)!" --include="*.txt" . 2>/dev/null | head -40 || true
+          echo "=== 各模块统计 ==="
+          grep -rh "Tests run:" --include="*.txt" . 2>/dev/null | tail -20 || true
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-jdk21
+          path: |
+            **/target/surefire-reports/*.txt
+            **/target/surefire-reports/*.xml
+          retention-days: 7
 
   gitleaks:
     name: Secret scan (gitleaks)

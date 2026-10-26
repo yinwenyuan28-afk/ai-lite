@@ -1,4 +1,9 @@
-# 依赖更新：Maven 依赖与 GitHub Actions 每周检查，PR 由人工审阅合入。
+# 依赖更新策略：只接受补丁/小版本，大版本跳跃必须人工评估后手动升级。
+#
+# 为什么收紧：本项目的兼容基线是 JDK 8 + Spring Boot 2.1/2.7，很多库的大版本
+# 会直接打破这个基线（OkHttp 5 要求 JDK 8+ 但改了 API 与默认行为；Kotlin 2.x
+# 需要重写协程桥接；assertj/javadoc 插件的新版与 Boot 2.1 BOM 冲突）。Dependabot
+# 自动开大版本 PR 只会制造一批必然红灯的 PR，故在此禁止。
 version: 2
 updates:
   - package-ecosystem: maven
@@ -6,9 +11,29 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # 只提 patch 更新；minor 也限制为同一小版本内（semver-major 一律不自动提）。
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
+      # Boot 2.x 基线：Boot 相关依赖由 BOM 管理，禁止 Dependabot 单独升级。
+      - dependency-name: "org.springframework.boot:*"
+      - dependency-name: "org.springframework:*"
+    groups:
+      # 同类小更新合并成一个 PR，减少噪音。
+      maven-minor-patch:
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Actions 大版本同样不自动提：v6/v7 要求更高的 runner 基线，
+      # 而本项目的 CI 要为 JDK 8 / Boot 2.1 环境保持兼容。
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
