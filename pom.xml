@@ -49,6 +49,11 @@
         <kotlin.version>1.9.25</kotlin.version>
         <junit.version>4.13.2</junit.version>
         <assertj.version>3.11.1</assertj.version>
+        <!--
+            API 兼容性门禁的对比基线：上一个已发布到 Central 的版本。
+            每次正式发布后手工前移这一行（随 release 提交一起改）。
+        -->
+        <ai-lite.release.version>0.1.7</ai-lite.release.version>
     </properties>
 
     <modules>
@@ -180,8 +185,64 @@
     </dependencyManagement>
 
     <build>
+        <!--
+            API 兼容性门禁（对外契约冻结计划 Phase 2）。
+
+            japicmp 拿当前构建出的 jar 与上一个已发布版本做签名比对：
+            删了 public 方法、改了参数类型、把类降级为包内可见，都会让 verify 失败。
+            没有这道门禁，「冻结」只是文档里的一句承诺，一次误删要到用户升级后
+            抛 NoSuchMethodError 才会暴露。
+
+            基线用 ai-lite.release.version 固定为上一个发布版，而不是 git tag：
+            CI 浅克隆时 tag 不存在，本地也可能没 fetch 全，固定版本号最稳。
+
+            排除规则：
+            - *.internal.*  ：内部实现，允许随意改（这正是迁包的目的）
+            - 迁移过包的 9 个内部类：它们从公开包移走，本次必然被判为"类已删除"，
+              已写进 CHANGELOG 的包名迁移说明；基线版本固定后这条豁免可长期保留，
+              因为旧坐标本来就不该被用户依赖。
+        -->
         <pluginManagement>
             <plugins>
+                <plugin>
+                    <groupId>com.github.siom79.japicmp</groupId>
+                    <artifactId>japicmp-maven-plugin</artifactId>
+                    <version>0.15.7</version>
+                    <configuration>
+                        <!--
+                            基线制品从 Maven Central 直接拉取。
+                            settings.xml 里的 aliyun mirror 对本仓库不生效（mirror 只接管
+                            central），因此新增一个独立 id 的仓库，避免"刚发布的版本在镜像
+                            上还没同步"导致 verify 假失败——这个坑在 0.1.7 发布当天真的踩到了：
+                            ai-lite-core 已同步、ai-lite-prompt 还是 404。
+                        -->
+                        <oldVersion>
+                            <dependency>
+                                <groupId>${project.groupId}</groupId>
+                                <artifactId>${project.artifactId}</artifactId>
+                                <version>${ai-lite.release.version}</version>
+                                <type>jar</type>
+                            </dependency>
+                        </oldVersion>
+                        <newVersion>
+                            <file>
+                                <path>${project.build.directory}/${project.build.finalName}.jar</path>
+                            </file>
+                        </newVersion>
+                        <parameter>
+                            <!-- 只报告破坏性变更；新增方法/新增类不算失败。 -->
+                            <onlyModified>true</onlyModified>
+                            <onlyBinaryIncompatible>true</onlyBinaryIncompatible>
+                            <breakBuildOnBinaryIncompatibleModifications>true</breakBuildOnBinaryIncompatibleModifications>
+                            <breakBuildOnSourceIncompatibleModifications>false</breakBuildOnSourceIncompatibleModifications>
+                            <ignoreMissingClasses>true</ignoreMissingClasses>
+                            <includeSynthetic>false</includeSynthetic>
+                            <accessModifier>public</accessModifier>
+                        </parameter>
+                        <packaging>jar</packaging>
+                        <skip>false</skip>
+                    </configuration>
+                </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
@@ -207,6 +268,86 @@
     </build>
 
     <profiles>
+        <!--
+            API 兼容性门禁（对外契约冻结计划 Phase 2）：mvn verify -Pcontract-check
+
+            默认不激活的原因：SNAPSHOT 开发期的公开 API 本来就在演化，日构建天天红
+            没有意义。发布前（Phase 5 翻版本）跑一次，以及 CI 的 release 工作流里跑。
+            等 1.0 冻结后，可改为默认激活。
+        -->
+        <profile>
+            <id>contract-check</id>
+            <!--
+                基线制品直接走 Maven Central，不经 aliyun 镜像。
+                settings.xml 的 mirrorOf=central 只接管 id 为 central 的仓库，
+                这里用独立 id 绕开它，避免镜像同步延迟把门禁变成假失败。
+            -->
+            <repositories>
+                <repository>
+                    <id>maven-central-direct</id>
+                    <url>https://repo1.maven.org/maven2</url>
+                    <snapshots>
+                        <enabled>false</enabled>
+                    </snapshots>
+                </repository>
+            </repositories>
+            <pluginRepositories>
+                <pluginRepository>
+                    <id>maven-central-direct</id>
+                    <url>https://repo1.maven.org/maven2</url>
+                    <snapshots>
+                        <enabled>false</enabled>
+                    </snapshots>
+                </pluginRepository>
+            </pluginRepositories>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>com.github.siom79.japicmp</groupId>
+                        <artifactId>japicmp-maven-plugin</artifactId>
+                        <configuration>
+                            <parameter>
+                                <onlyModified>true</onlyModified>
+                                <onlyBinaryIncompatible>true</onlyBinaryIncompatible>
+                                <breakBuildOnBinaryIncompatibleModifications>true</breakBuildOnBinaryIncompatibleModifications>
+                                <breakBuildOnSourceIncompatibleModifications>false</breakBuildOnSourceIncompatibleModifications>
+                                <ignoreMissingClasses>true</ignoreMissingClasses>
+                                <includeSynthetic>false</includeSynthetic>
+                                <accessModifier>public</accessModifier>
+                                <excludes>
+                                    <!-- 内部实现：允许随意变更，这正是迁到 .internal 的目的。 -->
+                                    <exclude>io.github.yinwenyuan28.ailite.internal.*</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.internal.**</exclude>
+                                    <!--
+                                        迁移过包的内部类（CHANGELOG 有包名迁移说明）。
+                                        旧坐标从来不是公开契约，被判定为"类删除"属预期。
+                                    -->
+                                    <exclude>io.github.yinwenyuan28.ailite.llm.RetrySupport</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.llm.AsyncLlmCallLogger</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.llm.SequentialToolExecutor</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.llm.NoopLlmCallStore</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.llm.RetryScheduler</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.session.AgentSessionStoreSupport</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.http.Utf8LineBuffer</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.executor.PlatformExecutorProvider</exclude>
+                                    <exclude>io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider</exclude>
+                                </excludes>
+                            </parameter>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>api-compatibility-check</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>cmp</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
         <!-- JDK 21 才编译虚拟线程模块；JDK 8/17 构建时自动跳过。 -->
         <profile>
             <id>jdk21</id>

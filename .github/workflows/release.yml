@@ -29,8 +29,12 @@ jobs:
           distribution: temurin
           java-version: '8'
           cache: maven
-      - name: Build and verify
-        run: mvn -B verify
+      # contract-check：拿本次构建产物与 ai-lite.release.version（上一个发布版）
+      # 做二进制兼容性比对。删 public 方法、改参数类型、把类降级为包内可见都会让
+      # release 直接失败，避免把破坏性变更发到 Central。内部实现（.internal.*）
+      # 已在 japicmp 的 exclude 里，允许自由重构。
+      - name: Build and verify (with API contract check)
+        run: mvn -B verify -Pcontract-check
       - name: Collect artifacts
         run: |
           mkdir -p staging
