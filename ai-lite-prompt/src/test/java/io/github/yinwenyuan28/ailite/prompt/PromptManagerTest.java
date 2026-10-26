@@ -289,6 +289,70 @@ public class PromptManagerTest {
     }
 
     @Test
+    public void auditDetailCarriesExplicitMessage() {
+        PromptManager manager = manager();
+        PromptVersion draft = manager.createDraft("resume-parse",
+                "v1 {{resume}} {{job}}", null, null, "a", "首次起草，等待业务确认");
+        manager.saveDraft(draft.getVersionId(), "v1b {{resume}} {{job}}", null, null, "a",
+                "把要求从本科改为大专");
+
+        List<PromptAudit> audits = manager.audits("resume-parse");
+        assertThat(audits).extracting("detail").containsExactly(
+                "首次起草，等待业务确认", "把要求从本科改为大专");
+    }
+
+    @Test
+    public void auditDetailFallsBackToAutoSummary() {
+        PromptManager manager = manager();
+        PromptVersion first = manager.createDraft("resume-parse",
+                "v1 {{resume}} {{job}}", "u1 {{job}}", "schema", "a");
+        manager.publish(first.getVersionId(), "a");
+
+        PromptVersion second = manager.createDraft("resume-parse", "  ", null, null, "a");
+        manager.saveDraft(second.getVersionId(), "v2 {{resume}} {{job}}", "u1 {{job}}", "schema", "a");
+        manager.publish(second.getVersionId(), "a");
+        manager.rollback(first.getVersionId(), "a");
+
+        List<PromptAudit> audits = manager.audits("resume-parse");
+        assertThat(audits).extracting("detail").containsExactly(
+                "手动填写模板",
+                "首次发布生效",
+                "从第 1 版继承",
+                "系统模板",
+                "接替第 1 版生效",
+                "从第 2 版回滚");
+    }
+
+    @Test
+    public void auditDetailTruncatesOversizedMessage() {
+        PromptManager manager = manager();
+        StringBuilder longMessage = new StringBuilder();
+        for (int i = 0; i < 1200; i++) {
+            longMessage.append('x');
+        }
+
+        manager.createDraft("resume-parse", "v1 {{resume}} {{job}}", null, null, "a",
+                longMessage.toString());
+
+        List<PromptAudit> audits = manager.audits("resume-parse");
+        assertThat(audits.get(0).getDetail()).hasSize(PromptManager.DETAIL_LIMIT);
+    }
+
+    @Test
+    public void auditDetailIsNeverNull() {
+        PromptManager manager = manager();
+        PromptVersion draft = manager.createDraft("resume-parse",
+                "v1 {{resume}} {{job}}", null, null, "a");
+        manager.saveDraft(draft.getVersionId(), "v1 {{resume}} {{job}}", null, null, "a");
+        manager.publish(draft.getVersionId(), "a");
+
+        List<PromptAudit> audits = manager.audits("resume-parse");
+        assertThat(audits).extracting("detail").doesNotContainNull();
+        assertThat(audits.get(0).getDetail()).isEqualTo("手动填写模板");
+        assertThat(audits.get(1).getDetail()).isEqualTo("内容未变化");
+    }
+
+    @Test
     public void createdDraftInheritsActiveWhenSystemBlank() {
         PromptManager manager = manager();
         PromptVersion first = manager.createDraft("resume-parse",

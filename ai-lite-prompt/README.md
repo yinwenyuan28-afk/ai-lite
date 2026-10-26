@@ -7,10 +7,15 @@
 - 目录登记：key、标题、占位符、兜底模板
 - 版本流转：草稿 → 发布 → 回滚
 - 发布前占位符校验
-- 操作审计（起草、修改、发布、回滚）
+- 操作审计（起草、修改、发布、回滚），detail 记录本次改动说明
 - 占位符渲染，直接产出 `LlmMessage`
 - 生效版本短 TTL 缓存，发布/回滚立即失效
 - 存储故障时回退到配置默认模板，不阻断业务
+
+## 边界
+
+- **一个 key 只有一个生效版本**，不做环境隔离（不支持 dev/staging/prod 各自生效）。
+- 模板只产出 system 与 user 两段文本；assistant 预填、多轮历史、多模态图片不在本模块职责内。
 
 ## 用法
 
@@ -22,7 +27,8 @@ PromptManager manager = new PromptManager(
         new PromptCatalog(Collections.singletonList(key)),
         new InMemoryPromptStore(), 60L);
 
-PromptVersion draft = manager.createDraft("resume-parse", null, null, null, "alice");
+PromptVersion draft = manager.createDraft("resume-parse", null, null, null, "alice",
+        "首版，按业务提供的模板录入");
 manager.publish(draft.getVersionId(), "alice");
 
 RenderedPrompt prompt = manager.render("resume-parse", vars);
@@ -41,3 +47,4 @@ List<LlmMessage> messages = prompt.getMessages();
 - 同一 key 的版本号从 1 递增。
 - 存储不可用时 `current` 返回空，`render` 使用默认模板。
 - 内容摘要为 system + user + schema 的 SHA-256。
+- 审计 detail：传了 `message` 就写入，否则自动生成摘要（来源、改动字段、接替关系）；超 1000 字符截断。

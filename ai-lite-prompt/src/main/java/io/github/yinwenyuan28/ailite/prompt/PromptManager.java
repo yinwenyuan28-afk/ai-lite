@@ -26,6 +26,8 @@ public final class PromptManager {
 
     public static final int LIST_LIMIT = 50;
     public static final int TEXT_LIMIT = 100000;
+    /** 审计 detail 列宽（见 ai-lite-prompt.sql 的 DETAIL VARCHAR(1000)）。 */
+    public static final int DETAIL_LIMIT = 1000;
 
     private final PromptCatalog catalog;
     private final PromptStore store;
@@ -124,14 +126,36 @@ public final class PromptManager {
      */
     public PromptVersion createDraft(String promptKey, String systemTemplate, String userTemplate,
                                      String outputSchema, String actor) {
+        return createDraft(promptKey, systemTemplate, userTemplate, outputSchema, actor, null);
+    }
+
+    /**
+     * 创建草稿，并记录这次改动的说明。
+     *
+     * <p>{@code message} 会写进审计记录的 {@code detail}，用于事后回答"这次改了什么、
+     * 为什么改"。不传时自动生成摘要（如"从第 3 版继承"）。审计表的 detail 列历史
+     * 上一直写 null，这个重载是补齐该缺口。</p>
+     *
+     * @param promptKey      提示词 key
+     * @param systemTemplate 系统模板
+     * @param userTemplate   用户模板
+     * @param outputSchema   输出结构描述
+     * @param actor          操作人
+     * @param message        本次改动说明，可为 null
+     * @return 新草稿
+     */
+    public PromptVersion createDraft(String promptKey, String systemTemplate, String userTemplate,
+                                     String outputSchema, String actor, String message) {
         PromptKey spec = catalog.require(promptKey);
         String system = systemTemplate;
         String user = userTemplate;
         String schema = outputSchema;
+        String inheritedFrom = null;
         if (Strings.isBlank(system)) {
             Optional<PromptVersion> active = current(spec.getKey());
             if (active.isPresent()) {
                 system = active.get().getSystemTemplate();
+                inheritedFrom = "从第 " + active.get().getVersionNo() + " 版继承";
                 if (Strings.isBlank(user)) {
                     user = active.get().getUserTemplate();
                 }
@@ -140,15 +164,21 @@ public final class PromptManager {
                 }
             } else {
                 system = spec.getDefaultSystemTemplate();
+                inheritedFrom = "从配置默认模板继承";
                 if (Strings.isBlank(user)) {
                     user = spec.getDefaultUserTemplate();
                 }
             }
         }
+        if (inheritedFrom == null) {
+            // 显式填写了系统模板：没有可继承的来源，给一个能说明"这是手动新建"的摘要。
+            inheritedFrom = "手动填写模板";
+        }
         validateTemplates(system, user, schema);
         final String finalSystem = system;
         final String finalUser = user;
         final String finalSchema = blankToNull(schema);
+        final String detail = auditDetail(message, inheritedFrom);
         synchronized (lockFor(spec.getKey())) {
             int versionNo = call(() -> store.nextVersionNo(spec.getKey()));
             PromptVersion version = new PromptVersion();
@@ -165,7 +195,7 @@ public final class PromptManager {
             call(() -> {
                 store.saveVersion(version);
                 store.audit(audit(spec.getKey(), PromptActions.DRAFT, version.getVersionId(),
-                        actorOf(actor), null));
+                        actorOf(actor), detail));
                 return null;
             });
             return version.copy();
@@ -184,22 +214,44 @@ public final class PromptManager {
      */
     public PromptVersion saveDraft(String versionId, String systemTemplate, String userTemplate,
                                    String outputSchema, String actor) {
+        return saveDraft(versionId, systemTemplate, userTemplate, outputSchema, actor, null);
+    }
+
+    /**
+     * 只修改草稿，并记录这次改动的说明。
+     *
+     * <p>{@code message} 会写进审计记录的 {@code detail}。不传时自动生成摘要，
+     * 说明本次相比修改前改动了哪几段（系统模板 / 用户模板 / 输出结构）。</p>
+     *
+     * @param versionId      版本 id
+     * @param systemTemplate 系统模板
+     * @param userTemplate   用户模板
+     * @param outputSchema   输出结构描述
+     * @param actor          操作人
+     * @param message        本次改动说明，可为 null
+     * @return 修改后的草稿
+     */
+    public PromptVersion saveDraft(String versionId, String systemTemplate, String userTemplate,
+                                   String outputSchema, String actor, String message) {
         PromptVersion version = requireVersion(versionId);
         catalog.require(version.getPromptKey());
         if (version.getStatus() != PromptStatus.DRAFT) {
             throw new PromptException("只能修改草稿");
         }
         validateTemplates(systemTemplate, userTemplate, outputSchema);
+        String changed = changedFields(version.getSystemTemplate(), version.getUserTemplate(),
+                version.getOutputSchema(), systemTemplate, userTemplate, blankToNull(outputSchema));
         version.setSystemTemplate(systemTemplate);
         version.setUserTemplate(userTemplate);
         version.setOutputSchema(blankToNull(outputSchema));
         version.setContentHash(hash(version.getSystemTemplate(), version.getUserTemplate(),
                 version.getOutputSchema()));
         final PromptVersion toSave = version;
+        final String detail = auditDetail(message, changed);
         call(() -> {
             store.saveVersion(toSave);
             store.audit(audit(toSave.getPromptKey(), PromptActions.UPDATE, toSave.getVersionId(),
-                    actorOf(actor), null));
+                    actorOf(actor), detail));
             return null;
         });
         return version.copy();
@@ -220,12 +272,17 @@ public final class PromptManager {
         PromptKey spec = catalog.require(version.getPromptKey());
         requirePlaceholders(version.getSystemTemplate(), version.getUserTemplate(),
                 spec.getPlaceholders());
+        Optional<PromptVersion> previous = current(spec.getKey());
+        final String detail = previous.isPresent() && !previous.get().getVersionId()
+                .equals(version.getVersionId())
+                ? "接替第 " + previous.get().getVersionNo() + " 版生效"
+                : "首次发布生效";
         final PromptVersion toPublish = version;
         final String key = version.getPromptKey();
         call(() -> {
             store.activate(key, toPublish.getVersionId(), actorOf(actor), new Date());
             store.audit(audit(key, PromptActions.PUBLISH, toPublish.getVersionId(),
-                    actorOf(actor), null));
+                    actorOf(actor), detail));
             return null;
         });
         invalidate(key);
@@ -252,10 +309,13 @@ public final class PromptManager {
         }
         final PromptVersion toRollback = version;
         final String key = version.getPromptKey();
+        final String detail = active.isPresent()
+                ? "从第 " + active.get().getVersionNo() + " 版回滚"
+                : "回滚生效";
         call(() -> {
             store.activate(key, toRollback.getVersionId(), actorOf(actor), new Date());
             store.audit(audit(key, PromptActions.ROLLBACK, toRollback.getVersionId(),
-                    actorOf(actor), null));
+                    actorOf(actor), detail));
             return null;
         });
         invalidate(key);
@@ -447,6 +507,62 @@ public final class PromptManager {
             return "unknown";
         }
         return value.length() > 64 ? value.substring(0, 64) : value;
+    }
+
+    /**
+     * 生成审计 detail：调用方给了说明就用它，否则用自动摘要。
+     *
+     * <p>detail 列宽 1000，超出时截断而不是抛错——审计是旁路，不该阻断主操作。</p>
+     *
+     * @param message 调用方说明，可为 null/空白
+     * @param auto    自动摘要，可为 null
+     * @return 写入 detail 的文本，可为 null
+     */
+    private static String auditDetail(String message, String auto) {
+        String value = Strings.trimToNull(message);
+        if (value == null) {
+            value = auto;
+        }
+        if (value == null) {
+            return null;
+        }
+        return value.length() > DETAIL_LIMIT ? value.substring(0, DETAIL_LIMIT) : value;
+    }
+
+    /**
+     * 比较修改前后的模板，列出发生变化的字段名。
+     *
+     * @param oldSystem 原系统模板
+     * @param oldUser   原用户模板
+     * @param oldSchema 原输出结构
+     * @param newSystem 新系统模板
+     * @param newUser   新用户模板
+     * @param newSchema 新输出结构
+     * @return 例如"系统模板、用户模板"；无变化时返回"内容未变化"
+     */
+    private static String changedFields(String oldSystem, String oldUser, String oldSchema,
+                                        String newSystem, String newUser, String newSchema) {
+        StringBuilder changed = new StringBuilder();
+        if (!equalText(oldSystem, newSystem)) {
+            changed.append("系统模板");
+        }
+        if (!equalText(oldUser, newUser)) {
+            appendSeparator(changed).append("用户模板");
+        }
+        if (!equalText(oldSchema, newSchema)) {
+            appendSeparator(changed).append("输出结构");
+        }
+        return changed.length() == 0 ? "内容未变化" : changed.toString();
+    }
+
+    private static StringBuilder appendSeparator(StringBuilder builder) {
+        return builder.length() == 0 ? builder : builder.append("、");
+    }
+
+    private static boolean equalText(String left, String right) {
+        String a = left == null ? "" : left;
+        String b = right == null ? "" : right;
+        return a.equals(b);
     }
 
     private static String blankToNull(String value) {
