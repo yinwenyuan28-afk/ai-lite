@@ -64,12 +64,14 @@ namespace 要求：Central 的 `io.github.yinwenyuan28-afk` namespace 需在 Por
 
 其他常见失败：
 
-| 现象 | 原因 |
+| 现象 | 原因与处理 |
 | --- | --- |
-| `gpg: signing failed: Inappropriate ioctl for device` | CI 无 TTY，插件缺 `--pinentry-mode loopback` + `--batch` |
+| `gpg: signing failed: Inappropriate ioctl for device` | CI 无 TTY。`gpgArguments` 需同时带 `--batch` 与 `--pinentry-mode loopback`，口令经 `gpg.passphrase` 属性传入 |
 | `setup-java` 步骤失败 | `GPG_PRIVATE_KEY` 内容不完整（缺 BEGIN/END 行、CRLF、末尾无换行） |
+| `Bundle has content that does NOT have a .pom file` | `central-publishing-maven-plugin` **0.6.0 在 Maven 3.10 下**把 `maven-metadata-local.xml` / `_remote.repositories` 写进 staging 目录且打包前不清理，bundle 缺 pom。**升级到 0.12.0**（2026-10 修复；仍支持 JDK 8，要求 Maven 3.9+） |
 | 部署校验 `Failed to get coordinates from pom file` | 上传了 SNAPSHOT 版本；Central 只收正式版 |
-| demo 等非发布模块报错 | 该模块仍执行 publish goal，需单独配 `skipPublishing` |
+| 构建 success 但 Portal 上没有任何部署 | 可能给 reactor **最后一个模块**配了 `skipPublishing`——该插件以聚合模式工作，只在最后一个模块执行一次 publish（打包全部模块），跳过它等于跳过整批上传 |
+| 只有部分模块进 bundle（缺 parent/依赖） | 用 `-pl` 单独发布某模块时拿不到父 POM 继承的 url/licenses/scm/developers，必须整批 reactor 发布 |
 
 ## 5. 签名密钥的生成（本地一次性）
 
