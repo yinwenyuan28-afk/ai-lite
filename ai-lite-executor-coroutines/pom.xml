@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.github.yinwenyuan28-afk</groupId>
         <artifactId>ai-lite-parent</artifactId>
-        <version>0.1.7-SNAPSHOT</version>
+        <version>0.1.7</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -77,6 +77,58 @@
                 <configuration>
                     <jvmTarget>1.8</jvmTarget>
                 </configuration>
+            </plugin>
+            <!--
+                纯 Kotlin 模块（sourceDirectory=src/main/kotlin）无法用
+                maven-javadoc-plugin 生成文档：它只扫描 src/main/java。
+                Central 强制要求提供 -javadoc 分类制品，否则发布校验失败
+                （Javadocs must be provided but not found in entries）。
+                做法：prepare-package 阶段把 Kotlin 源码复制到 target 下的临时目录，
+                再由 jar 插件打成 -javadoc 分类制品。注意必须分两步——
+                直接把 classesDirectory 指向源码目录时 jar 插件不收集 **/*.kt
+                （按 class 文件规则处理），会产出空 jar。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>stage-kotlin-for-javadoc-jar</id>
+                        <phase>prepare-package</phase>
+                        <goals>
+                            <goal>copy-resources</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/javadoc-src</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>${project.basedir}/src/main/kotlin</directory>
+                                    <filtering>false</filtering>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>kotlin-javadoc-artifact</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>javadoc</classifier>
+                            <classesDirectory>${project.build.directory}/javadoc-src</classesDirectory>
+                            <includes>
+                                <include>**/*.kt</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

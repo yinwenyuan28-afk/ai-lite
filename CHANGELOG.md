@@ -3,6 +3,12 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.7] - 2026-10-26
+
+### 修复
+
+- **两个纯 Kotlin 模块缺 `-javadoc` 制品导致 Central 校验失败**（`Javadocs must be provided but not found in entries`）：`ai-lite-http-ktor-cio` 与 `ai-lite-executor-coroutines` 的源码只在 `src/main/kotlin`，而 `maven-javadoc-plugin` 只扫描 `src/main/java`，产不出文档 jar。改为 `prepare-package` 阶段把 Kotlin 源码复制到 `target/javadoc-src`，再由 `maven-jar-plugin` 打成 `-javadoc` 分类制品（注意 jar 插件默认只收 class，需显式 `<include>**/*.kt</include>`，否则产出空 jar）。
+
 ## [0.1.6] - 2026-10-26
 
 ### 修复
@@ -109,6 +115,7 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.7]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.7
 [0.1.6]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.6
 [0.1.5]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.5
 [0.1.4]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.4
