@@ -6,7 +6,7 @@
 
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-transport-benchmark</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.8-SNAPSHOT</version>
     <packaging>jar</packaging>
 
     <name>AI Lite HTTP Transport Benchmark</name>
@@ -25,32 +25,32 @@
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-core</artifactId>
-            <version>0.1.7</version>
+            <version>0.1.8-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-http-okhttp</artifactId>
-            <version>0.1.7</version>
+            <version>0.1.8-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-http-jetty</artifactId>
-            <version>0.1.7</version>
+            <version>0.1.8-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-http-webclient</artifactId>
-            <version>0.1.7</version>
+            <version>0.1.8-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-http-ktor-cio</artifactId>
-            <version>0.1.7</version>
+            <version>0.1.8-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
             <artifactId>ai-lite-http-jdk8</artifactId>
-            <version>0.1.7</version>
+            <version>0.1.8-SNAPSHOT</version>
         </dependency>
         <!-- fake LLM 服务端：Jetty Server 的 keep-alive 比 JDK HttpServer 稳定。 -->
         <dependency>
@@ -88,7 +88,7 @@
                 <dependency>
                     <groupId>io.github.yinwenyuan28-afk</groupId>
                     <artifactId>ai-lite-http-okhttp-jdk21</artifactId>
-                    <version>0.1.7</version>
+                    <version>0.1.8-SNAPSHOT</version>
                 </dependency>
             </dependencies>
         </profile>
