@@ -7,7 +7,7 @@
     <!-- groupId 与 GitHub 用户名对应。 -->
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-parent</artifactId>
-    <version>0.1.6-SNAPSHOT</version>
+    <version>0.1.6</version>
     <packaging>pom</packaging>
 
     <name>AI Lite</name>
@@ -295,11 +295,19 @@
                     <plugin>
                         <groupId>org.sonatype.central</groupId>
                         <artifactId>central-publishing-maven-plugin</artifactId>
-                        <version>0.6.0</version>
+                        <!--
+                            0.12.0 修复了 Maven 3.10 下的「Bundle has content that does
+                            NOT have a .pom file」：3.10 会把 maven-metadata-local.xml /
+                            _remote.repositories 写进 staging 目录，旧版打包前不清理，
+                            导致 bundle 缺 pom 被 Central 拒收。
+                            0.12.0 仍以 source/target 8 编译（JDK 8 可用），但要求
+                            Maven 3.9+：日常构建用本地 3.6.2 没问题，发布由 CI 执行。
+                        -->
+                        <version>0.12.0</version>
                         <extensions>true</extensions>
                         <configuration>
                             <publishingServerId>central</publishingServerId>
-                            <!-- 凭证走 -Dcentral.username / -Dcentral.password（release.yml 传入）。 -->
+                            <!-- 凭证来自 runner 上生成的 ~/.m2/settings.xml（见 release.yml）。 -->
                             <excludeArtifacts>
                                 <artifact>ai-lite-demo</artifact>
                             </excludeArtifacts>

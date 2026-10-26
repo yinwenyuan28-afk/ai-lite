@@ -3,6 +3,12 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.6] - 2026-10-26
+
+### 修复
+
+- **Central 拒收 bundle（`Bundle has content that does NOT have a .pom file`）**：`central-publishing-maven-plugin` 0.6.0 在 Maven 3.10 下会把 `maven-metadata-local.xml` / `_remote.repositories` 写进 staging 目录且打包前不清理，导致 bundle 缺 pom 被拒。升级到 **0.12.0**（官方在该版本修复；仍以 source/target 8 编译，JDK 8 可用，要求 Maven 3.9+，发布由 CI 执行）。
+
 ## [0.1.5] - 2026-10-26
 
 ### 修复
@@ -103,6 +109,7 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.6]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.6
 [0.1.5]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.5
 [0.1.4]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.4
 [0.1.3]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.3
