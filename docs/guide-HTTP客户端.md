@@ -4,7 +4,7 @@
 > **讲什么**：五层里最底下那层——六种传输怎么选怎么切、连接池与超时调优、自定义 `HttpExecutor`；以及构造 `LlmCall`、结果字段、常见问题速查。
 > **不讲什么**：传输层为什么这样设计（线程模型、SSE 解析、取消怎么贯穿）→ [HTTP传输层原理](desc-HTTP传输.md)；一次调用的内部旅程（线程接力、重试环、出口保护）→ [单次模型调用入口](desc-单次调用.md)；重试策略细节 → [重试边界](desc-重试.md)；编排层 → [Workflow异步执行器使用指南](guide-Workflow异步执行器.md)。生词查 [术语表](ref-术语表.md)。
 
-适用版本：`0.1.0-SNAPSHOT`；JDK 8+；Spring Boot 2.1 ~ 2.7。
+适用版本：`0.1.7`；JDK 8+；Spring Boot 2.1 ~ 2.7。
 
 本文结构：§1 配置参考；§2 单次调用 API 速查（行为细节在《单次模型调用入口》）；§3–§5 HTTP 客户端层本体（三层关系、切换传输、装配覆盖）；§6 调用记录；§7 常见问题。
 
@@ -305,7 +305,7 @@ Starter 默认引入 OkHttp 4.12：
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-jetty</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.7</version>
 </dependency>
 ```
 

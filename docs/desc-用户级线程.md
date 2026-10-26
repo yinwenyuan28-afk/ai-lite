@@ -1,6 +1,6 @@
 # 用户级线程实现说明
 
-> 适用版本：0.1.0-SNAPSHOT
+> 适用版本：0.1.7
 > 代码基线：JDK 8 字节码，Spring Boot 2.1 ~ 2.7
 > 相关模块：`ai-lite-core`、`ai-lite-http-okhttp`、`ai-lite-executor-coroutines`、`ai-lite-executor-jdk21`
 > **本文在哪一层**：网关层 + 执行器层的实现原理（虚拟线程、Kotlin 协程桥接）。
@@ -220,7 +220,7 @@ ai-lite:
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-executor-jdk21</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.7</version>
 </dependency>
 ```
 

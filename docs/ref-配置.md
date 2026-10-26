@@ -323,7 +323,7 @@ http:
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-okhttp-jdk21</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.7</version>
 </dependency>
 ```
 
@@ -342,7 +342,7 @@ Jetty 作为跨 Boot 2.1/2.7 的 NIO 主路径：
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-jetty</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.7</version>
 </dependency>
 ```
 
@@ -364,7 +364,7 @@ WebClient（真实响应式栈，适合已经使用 WebFlux 的项目）：
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-webclient</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.7</version>
 </dependency>
 ```
 
@@ -385,7 +385,7 @@ Ktor CIO（Kotlin 项目，JDK 8 可用）：
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-ktor-cio</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.7</version>
 </dependency>
 ```
 
@@ -483,7 +483,36 @@ prompt:
 渲染优先级：生效版本 → 调用方兜底 → 配置默认模板。数据库不可用时 `render`
 不会抛异常；只有完全没有系统模板时才报错。
 
-## 7. 密钥处理
+## 7. 调用记录存储 `ai-lite.store.jdbc`
+
+引入 `ai-lite-store-jdbc` 且容器里有 `JdbcTemplate` 时生效，自动注册 `JdbcLlmCallStore`。
+
+```yaml
+store:
+  jdbc:
+    enabled: true                    # 默认 true
+    table-name: AI_LITE_LLM_CALL     # 必填，无默认值
+```
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 关闭后不注册 `LlmCallStore` |
+| `table-name` | - | **必填**。调用记录表名，只允许字母、数字和下划线 |
+
+> **为什么表名没有默认值**：调用记录写失败会被 `AsyncLlmCallLogger` 静默吞掉
+> （只留一行 warn），用户可能几周后才发现账单表一直是空的。强制显式配置是让
+> 用户确认"我知道我在写这张表"的唯一机会，同时确保已执行 `ai-lite-llm-call.sql` 建表。
+>
+> 引入模块但未配置 `table-name` → **应用启动失败**，错误消息会提示建表。
+> 不需要 JDBC 调用记录时设 `ai-lite.store.jdbc.enabled=false`。
+
+**两个开关的区别**：写 `enabled: false` 是"我知道有这个功能但不用"；不配
+`table-name` 是"忘了配"，所以前者安静关闭、后者启动报错。
+
+用户自定义 `LlmCallStore` Bean 时本配置整体让位（`@ConditionalOnMissingBean`），
+不会出现两个实现同时写库。
+
+## 8. 密钥处理
 
 推荐顺序：
 
@@ -493,7 +522,7 @@ prompt:
 
 不推荐把密钥写进 `application.yml` 或代码。开源仓库里不要出现任何真实密钥。
 
-## 8. 常见供应商示例
+## 9. 常见供应商示例
 
 ### vLLM / Qwen
 

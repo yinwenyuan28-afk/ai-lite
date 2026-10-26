@@ -1,6 +1,6 @@
 # 上层调用 API 使用指南
 
-> 适用版本：0.1.0-SNAPSHOT
+> 适用版本：0.1.7
 > 目标读者：业务开发、平台接入方、需要替换 SPI 实现的团队
 > **本文在哪一层**：横切层——入门入口 + 全层 API 字典（网关、Agent 编排、会话、提示词、并发执行器、扩展点各占一节）。
 > **讲什么**：每个 API 怎么调、参数是什么、稳定性约定。想理解调用内部发生什么，看对应层的专题文档（单次调用 → [单次模型调用入口](desc-单次调用.md)）。
@@ -14,12 +14,43 @@
 
 | 类别 | 包/类型 | 约定 |
 | --- | --- | --- |
-| 公开 API | `LlmGateway`、`RetryPolicy`、`LlmCall`、`LlmMessage`、`LlmResult`、`LlmTool`、`Workflow`、`AgentLoop`、`AgentLifecycle`、`AgentSessionLoop`、`PromptManager`、`RenderedPrompt` | 业务直接使用；尽量保持二进制兼容 |
-| 扩展 SPI | `LlmTransport`、`HttpExecutor`、`AsyncHttpExecutor`、`ExecutorProvider`、`ToolExecutor`、`LlmCallStore`、`AgentSessionStore`、`SessionCache`、`PromptStore` | 允许自定义实现；接口方法变更会慎重 |
+| 公开 API | `LlmGateway`、`RetryPolicy`、`LlmCall`、`LlmMessage`、`LlmResult`、`LlmTool`、`Workflow`、`AgentLoop`、`AgentLifecycle`、`AgentSessionLoop`、`PromptManager`、`RenderedPrompt` | 业务直接使用；1.0 起冻结，只增不改 |
+| 扩展 SPI · A 组（允许生长） | `PromptStore`、`SessionCache`、`AgentSessionStore` | 未来**只以 default 方法新增**能力，已有实现类无需改动 |
+| 扩展 SPI · B 组（方法集终态） | `HttpExecutor`、`AsyncHttpExecutor`、`ExecutorProvider`、`LlmTool`、`LlmCallStore` | 1.0 后不再新增方法；新能力走新接口 |
 | 可选模块 | `ai-lite-executor-coroutines`、`ai-lite-executor-jdk21`、`ai-lite-http-jetty`、`ai-lite-http-webclient`、`ai-lite-http-ktor-cio`、`ai-lite-http-jdk8`、`ai-lite-session-redis`、`ai-lite-session-jdbc`、`ai-lite-store-jdbc`、`ai-lite-prompt-jdbc` | 按需引入，不引入不影响核心 |
-| 内部实现 | `TransportSupport`、`AgentSessionStoreSupport`、`AsyncLlmCallLogger`、各协议的私有状态类 | 不保证兼容，不要直接依赖 |
+| 内部实现 | **`io.github.yinwenyuan28.ailite.internal.*` 下的全部类型** | 不保证兼容，不要直接依赖；被 japicmp 排除 |
 
 持久化值以 `wire()` 为准（如 `LlmStopReason.wire()`），不要依赖枚举名。
+
+### 1.1 关于 `.internal` 包
+
+内部实现统一放在 `io.github.yinwenyuan28.ailite.internal.{llm,session,http,executor}` 下：
+
+```text
+io.github.yinwenyuan28.ailite.internal.llm.RetrySupport
+                                    .llm.AsyncLlmCallLogger
+                                    .llm.SequentialToolExecutor
+                                    .llm.NoopLlmCallStore
+                                    .llm.RetryScheduler
+                                    .session.AgentSessionStoreSupport
+                                    .http.Utf8LineBuffer
+                                    .executor.PlatformExecutorProvider
+                                    .executor.DirectExecutorProvider
+```
+
+规则只有一条：**`.internal` 里的任何东西都可能在补丁版本里被改、被删、被移动，不另行通知。** IDE 里看到这个包名就直接跳过。
+
+对应地，**公开包里的一切都受契约保护**，包括 `ModelResolver`、`ProviderGuard`、`SerialCallbackExecutor` —— 它们虽然偏底层，但已经出现在 `LlmGateway` / `CallbackPolicy` 的公开签名里（`LlmGateway` 构造器、`setGuards`、`newSerialExecutor`），所以按公开 API 对待，一并纳入 japicmp 检查。
+
+### 1.2 兼容性门禁
+
+```bash
+mvn verify -Pcontract-check
+```
+
+拿当前构建产物与 `ai-lite.release.version`（上一个发布版，当前 `0.1.7`）做签名比对。删 public 方法、改参数类型、把类降级为包内可见，构建直接失败。`.internal` 包已排除。
+
+这条检查默认不激活（SNAPSHOT 开发期 API 本就在演化），发布流程里必跑。
 
 ---
 
@@ -31,7 +62,7 @@
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-spring-boot-starter</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.7</version>
 </dependency>
 ```
 
@@ -745,7 +776,9 @@ boolean valid = PromptCatalog.validKey("resume-parse");
 | `versions(key)` | 版本列表，版本号倒序，最多 50 条 |  |
 | `audits(key)` | 审计列表，时间正序，最多 50 条 |  |
 | `createDraft(key, system, user, schema, actor)` | 创建草稿；系统模板为空时继承生效版本或配置默认值 | ⭐ |
+| `createDraft(key, system, user, schema, actor, message)` | 同上，并把 `message` 写进审计 detail | ⭐ |
 | `saveDraft(versionId, system, user, schema, actor)` | 只修改草稿 | ⭐ |
+| `saveDraft(versionId, system, user, schema, actor, message)` | 同上，并把 `message` 写进审计 detail | ⭐ |
 | `publish(versionId, actor)` | 发布草稿；校验占位符 | ⭐ |
 | `rollback(versionId, actor)` | 回滚到已发布过的版本 | ⭐ |
 | `render(key, vars)` | 渲染；优先级：生效版本 → 配置默认模板 | ⭐ |
@@ -766,7 +799,20 @@ publish     → DRAFT → PUBLISHED；同 key 其他 PUBLISHED 变 RETIRED
 rollback    → 非 DRAFT 且非当前生效 → PUBLISHED；当前生效变 RETIRED
 ```
 
-常量：`PromptManager.LIST_LIMIT = 50`，`PromptManager.TEXT_LIMIT = 100000`。
+常量：`PromptManager.LIST_LIMIT = 50`，`PromptManager.TEXT_LIMIT = 100000`，`PromptManager.DETAIL_LIMIT = 1000`（审计 detail 列宽）。
+
+审计 detail 规则（`createDraft` / `saveDraft` / `publish` / `rollback` 都会写入）：
+
+- 调用方传了 `message` 就用它；否则自动生成摘要。
+- `createDraft` 未传说明时按来源生成：`手动填写模板` / `从第 N 版继承` / `从配置默认模板继承`。
+- `saveDraft` 未传说明时列出改动字段，如 `系统模板、用户模板`；完全没改则为 `内容未变化`。
+- `publish` 生成 `首次发布生效` 或 `接替第 N 版生效`；`rollback` 生成 `从第 N 版回滚`。
+- 超过 1000 字符截断，不抛异常（审计是旁路，不阻断主操作）。
+
+```java
+PromptVersion draft = promptManager.createDraft("resume-parse", null, null, null, "alice",
+        "放宽学历要求，客户反馈原标准过严");
+```
 
 `render` 规则：
 
@@ -781,6 +827,15 @@ LlmResult result = gateway.one(call.withMessages(prompt.getMessages()));
 ```
 
 `RenderedPrompt`：`getSystem()`、`getUser()`、`getMessages()`（不可变列表，最多 system + user 两条）。
+
+> **边界**：提示词模板只产出 system 与 user 两段文本。assistant 预填（强制 JSON 开头那类）、多轮历史、多模态图片都不在提示词中心职责内。需要时在渲染后自行拼 `LlmMessage` 列表：
+>
+> ```java
+> List<LlmMessage> messages = new ArrayList<>(prompt.getMessages());
+> messages.add(LlmMessage.assistant("{", null));   // 预填充，仅 Anthropic 语义明确
+> ```
+>
+> 多轮会话续聊请用 `AgentSessionLoop`，不要塞进提示词模板。
 
 ### 6.3 `PromptStore`
 

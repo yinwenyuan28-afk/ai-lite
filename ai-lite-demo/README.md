@@ -6,7 +6,7 @@
 export AI_LITE_DEMO_BASE_URL=https://your-endpoint/v1
 export AI_LITE_DEMO_API_KEY=your-key
 export AI_LITE_DEMO_MODEL=your-model
-java -jar ai-lite-demo-0.1.0-SNAPSHOT.jar --ai-lite.demo.run=true
+java -jar ai-lite-demo-0.1.7.jar --ai-lite.demo.run=true
 ```
 
 密钥只存在于当前进程环境，不落文件。
@@ -24,7 +24,7 @@ mvn spring-boot:run -Dspring-boot.run.profiles=local -Dspring-boot.run.arguments
 ## 3. 不联网只验证装配
 
 ```bash
-java -jar ai-lite-demo-0.1.0-SNAPSHOT.jar
+java -jar ai-lite-demo-0.1.7.jar
 ```
 
 默认 `ai-lite.demo.run=false`，只打印已加载的 providers 和 profiles，不发真实请求。

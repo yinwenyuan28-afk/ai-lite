@@ -1,6 +1,6 @@
 # Agent Loop 发给 LLM 的上下文
 
-> 适用版本：0.1.0-SNAPSHOT
+> 适用版本：0.1.7
 > 相关代码：`AgentLoop`、`LlmGateway`、三个协议适配器、`LlmMessage`、`LlmResult`
 > **本文在哪一层**：编排层（Agent 循环与网关的交界）。
 > **讲什么**：AgentLoop 每一轮实际发给模型的请求体长什么样——上下文组成、三种协议的序列化差异、工具循环后上下文怎么增长、什么不会进上下文。

@@ -9,7 +9,7 @@
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-prompt-jdbc</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.7</version>
 </dependency>
 ```
 

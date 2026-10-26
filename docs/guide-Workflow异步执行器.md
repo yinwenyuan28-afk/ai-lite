@@ -4,7 +4,7 @@
 > **讲什么**：`Workflow.runAsync` 的用法、`SyncStep` / `AsyncStep` 类型模型、取消、重试与性能边界。
 > **不讲什么**：底下单次模型调用怎么跑 → [单次模型调用入口](desc-单次调用.md)；Agent 循环的上下文 → [AgentLoop上下文说明](desc-AgentLoop上下文.md)。生词查 [术语表](ref-术语表.md) §5。
 
-适用范围：`ai-lite` 0.1.0-SNAPSHOT；JDK 8+；Spring Boot 2.1 ~ 2.7。
+适用范围：`ai-lite` 0.1.7；JDK 8+；Spring Boot 2.1 ~ 2.7。
 设计背景见 [夯实 Workflow 异步执行器](plan/夯实Workflow异步执行器-plan.md)。
 
 一句话理解：

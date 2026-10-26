@@ -3,6 +3,50 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.8] - 未发布（对外契约冻结）
+
+### 新增
+
+- **API 兼容性门禁**：接入 `japicmp-maven-plugin`，`mvn verify -Pcontract-check` 会拿当前产物与上一个发布版（`ai-lite.properties` 里的 `ai-lite.release.version`）做二进制签名比对。删除 public 方法、修改参数类型、把类降级为包内可见都会让构建失败。`.internal` 包已排除，内部实现可自由重构。已做反向验证：删掉 `LlmResult.getRawContent()` 后构建变红并准确报出 `REMOVED METHOD`。
+- **提示词审计 detail**：`createDraft` / `saveDraft` 新增带 `message` 参数的重载，把改动说明写进审计表 `DETAIL` 列（此前四处审计调用全部传 `null`，该列从未被写入过）。不传 `message` 时自动生成摘要：来源（`从第 N 版继承` / `手动填写模板`）、改动字段（`系统模板、用户模板` / `内容未变化`）、接替关系（`接替第 N 版生效`）。超 1000 字符截断，不阻断主操作。
+- **`ai-lite-store-jdbc` 自动装配**：引入模块并在容器中有 `JdbcTemplate` 时自动注册 `JdbcLlmCallStore`，与 `session-jdbc` / `prompt-jdbc` 保持一致，不必再手写 `@Bean`。
+
+### 变更（破坏性，升级前务必阅读）
+
+- **`ai-lite-store-jdbc` 现在要求显式配置表名**。`ai-lite.store.jdbc.table-name` 无默认值；引入模块但未配置会导致**应用启动失败**，错误消息会提示执行 `ai-lite-llm-call.sql` 建表。不需要 JDBC 调用记录的请设置 `ai-lite.store.jdbc.enabled=false`。
+
+  ```yaml
+  ai-lite:
+    store:
+      jdbc:
+        enabled: true                    # 默认 true
+        table-name: AI_LITE_LLM_CALL     # 必填
+  ```
+
+- **9 个内部实现类迁出公开包**，统一到 `io.github.yinwenyuan28.ailite.internal.{llm,session,http,executor}`：
+
+  | 旧坐标 | 新坐标 |
+  | --- | --- |
+  | `ailite.llm.RetrySupport` | `ailite.internal.llm.RetrySupport` |
+  | `ailite.llm.AsyncLlmCallLogger` | `ailite.internal.llm.AsyncLlmCallLogger` |
+  | `ailite.llm.SequentialToolExecutor` | `ailite.internal.llm.SequentialToolExecutor` |
+  | `ailite.llm.NoopLlmCallStore` | `ailite.internal.llm.NoopLlmCallStore` |
+  | `ailite.llm.RetryScheduler` | `ailite.internal.llm.RetryScheduler` |
+  | `ailite.session.AgentSessionStoreSupport` | `ailite.internal.session.AgentSessionStoreSupport` |
+  | `ailite.http.Utf8LineBuffer` | `ailite.internal.http.Utf8LineBuffer` |
+  | `ailite.executor.PlatformExecutorProvider` | `ailite.internal.executor.PlatformExecutorProvider` |
+  | `ailite.executor.DirectExecutorProvider` | `ailite.internal.executor.DirectExecutorProvider` |
+
+  这些类从未被文档承诺为公开 API。若你的代码直接引用了它们，请改 import；`.internal` 包不保证跨版本兼容。
+
+  以下 3 个类**留在原包**：`ModelResolver`、`ProviderGuard`、`SerialCallbackExecutor` —— 它们出现在 `LlmGateway` 构造器、`setGuards`、`CallbackPolicy.newSerialExecutor` 的公开签名里，属于事实契约。
+
+### 工程
+
+- 明确 SPI 演化承诺：A 组（`PromptStore` / `SessionCache` / `AgentSessionStore`）未来只以 default 方法新增；B 组（`HttpExecutor` / `AsyncHttpExecutor` / `ExecutorProvider` / `LlmTool` / `LlmCallStore`）方法集终态。约定写进各接口 javadoc 与 [上层调用API](docs/guide-上层调用API.md) 的稳定性表。
+- 用户可见文档中的依赖示例版本号由过期的 `0.1.0-SNAPSHOT` 更新为 `0.1.7`（21 处）。
+- `release.yml` 的构建步骤改为 `mvn -B verify -Pcontract-check`。
+
 ## [0.1.7] - 2026-10-26
 
 ### 修复
