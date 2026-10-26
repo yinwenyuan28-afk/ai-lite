@@ -71,40 +71,28 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # 部署前先验一次凭证，避免构建跑完后才发现 401：
-      # 对 Central 的 upload 端点发一个无体的 POST，401/403 即凭证无效。
-      - name: Verify Central credentials
+      # 部署前验一次凭证。判据说明（实测得出，勿改回无体探测）：
+      #   * Central Portal 接受 Authorization: Bearer <base64(user:pass)>，
+      #     插件 0.6.0 用的 UserToken 头同样被接受；
+      #   * 但 /upload 只认 multipart，缺少上传体的请求一律返回 401/500，
+      #     **不能**用来判断凭证好坏（曾据此误判 token 失效）。
+      #   * 唯一可靠判据是带 bundle 的完整上传，因此这里只做连通性检查，
+      #     凭证有效性交给真实的 mvn deploy 结论。
+      - name: Verify Central endpoint reachable
         if: steps.check.outputs.ready == 'true'
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
-          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
         run: |
-          USERNAME="$(printf '%s' "$CENTRAL_USERNAME" | tr -d '[:space:]')"
-          PASSWORD="$(printf '%s' "$CENTRAL_PASSWORD" | tr -d '[:space:]')"
           code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -u "$USERNAME:$PASSWORD" \
-            -X POST https://central.sonatype.com/api/v1/publisher/upload) || code=000
-          echo "Central credential check HTTP status: $code"
-          # 只打印长度与是否为纯可见 ASCII，不泄露内容：
-          # 常见故障是 secret 里混入换行/空格、或贴成了 base64 整串。
-          printf 'username: len=%s alnum=%s\n' "${#USERNAME}" \
-            "$(printf '%s' "$USERNAME" | grep -qE '^[A-Za-z0-9]+$' && echo yes || echo NO)"
-          printf 'password: len=%s alnum=%s hasNewline=%s\n' "${#PASSWORD}" \
-            "$(printf '%s' "$PASSWORD" | grep -qE '^[A-Za-z0-9+/=._-]+$' && echo yes || echo NO)" \
-            "$(printf '%s' "$CENTRAL_PASSWORD" | grep -q $'\n' && echo YES || echo no)"
+            --max-time 30 https://central.sonatype.com/api/v1/publisher/upload) || code=000
+          echo "central.sonatype.com reachable: HTTP $code"
           case "$code" in
-            401|403)
-              echo "::error::Central 拒绝凭证（HTTP $code）。请确认 CENTRAL_USERNAME 是 Portal 上 User Token 的 Username（短串，如 HvyJmf），CENTRAL_PASSWORD 是紧随其后的长密码；不要填 (base64) 那一行，也不要只填 namecode 之外的部分。若刚重新生成过 token，旧 token 已自动失效。"
-              exit 1
-              ;;
             000)
-              echo "::error::无法连接 central.sonatype.com。"
+              echo "::error::无法连接 central.sonatype.com（网络或代理问题）。"
               exit 1
-              ;;
-            *)
-              echo "凭证有效（非 401 即表示 Basic Auth 已通过）。"
               ;;
           esac
+          printf 'username length: %s\n' "${#CENTRAL_USERNAME}"
 
       - uses: actions/setup-java@v4
         if: steps.check.outputs.ready == 'true'

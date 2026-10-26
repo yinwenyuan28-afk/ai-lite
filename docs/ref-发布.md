@@ -43,6 +43,34 @@ namespace 要求：Central 的 `io.github.yinwenyuan28-afk` namespace 需在 Por
 
 发布方式：`autoPublish=false`，部署后到 Portal 的 Publish 阶段人工确认再上线（可发现签名/元数据问题后重试）。
 
+## 4.1 排障笔记：Central 返回 401 时怎么判断
+
+排查发布失败时很重要的一点：**不要用「无上传体的 POST」去验证 token**。Central 的 `/api/v1/publisher/upload` 只接受 `multipart/form-data`，任何缺少 bundle 的请求都会返回 401 或 500，**与凭证好坏无关**。曾据此误判「token 失效」，白花了半天。
+
+可靠的判断顺序：
+
+1. **看 Maven 日志里的名字**：`Using Usertoken auth, with namecode: xxx` —— 这里的 namecode 就是 `CENTRAL_USERNAME` 的值，能直接确认 secret 有没有传错。
+2. **造一个最小 bundle 做真实上传**（唯一可靠判据）：
+   ```bash
+   U='你的Username'; P='你的Password'
+   TOKEN=$(printf '%s:%s' "$U" "$P" | base64 | tr -d '\n')
+   printf 'x\n' > /tmp/x && (cd /tmp && jar cf bundle.zip x)
+   curl -s -w '\nHTTP %{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+     -F "bundle=@/tmp/bundle.zip;type=application/octet-stream" \
+     "https://central.sonatype.com/api/v1/publisher/upload?name=probe"
+   ```
+   **201/400/422 都表示认证通过**（400/422 只是 bundle 内容不合规）；只有 401 才是凭证问题。
+3. **Portal 上的 Accepted 认证方式**：`Authorization: Bearer <base64(user:pass)>` 是官方推荐；插件 0.6.0 用的 `UserToken <base64(...)>` 目前仍被接受。
+
+其他常见失败：
+
+| 现象 | 原因 |
+| --- | --- |
+| `gpg: signing failed: Inappropriate ioctl for device` | CI 无 TTY，插件缺 `--pinentry-mode loopback` + `--batch` |
+| `setup-java` 步骤失败 | `GPG_PRIVATE_KEY` 内容不完整（缺 BEGIN/END 行、CRLF、末尾无换行） |
+| 部署校验 `Failed to get coordinates from pom file` | 上传了 SNAPSHOT 版本；Central 只收正式版 |
+| demo 等非发布模块报错 | 该模块仍执行 publish goal，需单独配 `skipPublishing` |
+
 ## 5. 签名密钥的生成（本地一次性）
 
 ```bash

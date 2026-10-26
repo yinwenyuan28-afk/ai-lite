@@ -3,6 +3,16 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.4] - 2026-10-26
+
+### 修复
+
+- **发布流水线的凭证自检改为连通性检查**：此前用「无上传体的 POST」探测凭证，而 Central 的 upload 端点只接受 multipart —— 任何缺 bundle 的请求都返回 401，导致误判 token 失效、白跑数轮。凭证与上传链路的实测方法记入 [发布参考](docs/ref-发布.md) §4.1。
+
+### 工程
+
+- 已用真实凭证在本地跑通完整发布链路：GPG 签名 → 打包 → 上传（`Uploaded bundle successfully`）。仅因测试用的是 SNAPSHOT 版本未过 Portal 校验（Central 只收正式版，属预期）。
+
 ## [0.1.3] - 2026-10-26
 
 ### 修复
@@ -87,6 +97,7 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.4]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.4
 [0.1.3]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.3
 [0.1.2]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.2
 [0.1.1]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.1
