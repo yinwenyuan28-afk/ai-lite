@@ -58,12 +58,17 @@ public class SerialCallbackExecutorTest {
     public void submitReturnsFalseWhenQueueIsFull() throws Exception {
         ExecutorService pool = Executors.newSingleThreadExecutor();
         SerialCallbackExecutor serial = new SerialCallbackExecutor(pool, 2);
-        CountDownLatch block = new CountDownLatch(1);
+        final CountDownLatch started = new CountDownLatch(1);
+        final CountDownLatch block = new CountDownLatch(1);
         try {
-            // 第一个任务阻塞 worker；随后 2 个占满队列，第 4 个应被拒。
+            // 第一个任务被 worker 取走后阻塞在 worker 上（in-flight，不占队列位）。
+            // started 栅栏必须有：worker 是异步唤醒的，取走之前这个任务仍占着队列位，
+            // 此时容量 2 只剩 1 个空位，后面的断言会随机器负载随机失败
+            //（2026-10-26 CI 在负载较高的 runner 上就因此报 expected true but was false）。
             assertThat(serial.submit(new Runnable() {
                 @Override
                 public void run() {
+                    started.countDown();
                     try {
                         block.await(3L, TimeUnit.SECONDS);
                     } catch (InterruptedException ignored) {
@@ -71,8 +76,12 @@ public class SerialCallbackExecutorTest {
                     }
                 }
             })).isTrue();
+            assertThat(started.await(5L, TimeUnit.SECONDS)).isTrue();
+
+            // 此刻 worker 正在跑第一个任务、队列为空：再排 2 个刚好占满 capacity=2。
             assertThat(serial.submit(new Runnable() { public void run() { } })).isTrue();
             assertThat(serial.submit(new Runnable() { public void run() { } })).isTrue();
+            // 第 4 个超出容量，被拒。
             assertThat(serial.submit(new Runnable() { public void run() { } })).isFalse();
         } finally {
             block.countDown();
@@ -84,12 +93,14 @@ public class SerialCallbackExecutorTest {
     public void closeStopsAcceptingAndClearsQueue() throws Exception {
         ExecutorService pool = Executors.newSingleThreadExecutor();
         SerialCallbackExecutor serial = new SerialCallbackExecutor(pool, 100);
-        CountDownLatch first = new CountDownLatch(1);
+        final CountDownLatch started = new CountDownLatch(1);
+        final CountDownLatch first = new CountDownLatch(1);
         final AtomicInteger executed = new AtomicInteger();
         try {
             serial.submit(new Runnable() {
                 @Override
                 public void run() {
+                    started.countDown();
                     try {
                         first.await(3L, TimeUnit.SECONDS);
                     } catch (InterruptedException ignored) {
@@ -98,6 +109,9 @@ public class SerialCallbackExecutorTest {
                     executed.incrementAndGet();
                 }
             });
+            // 等第一个任务真正进入执行态，再提交排队任务并 close，
+            // 否则「排队的任务被清空、不执行」可能因 worker 尚未取走而失去意义。
+            assertThat(started.await(5L, TimeUnit.SECONDS)).isTrue();
             serial.submit(new Runnable() { public void run() { executed.incrementAndGet(); } });
             serial.close();
             serial.close(); // 幂等
