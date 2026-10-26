@@ -80,14 +80,31 @@ jobs:
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
 
-      - name: Deploy
+      # central-publishing-maven-plugin 按 publishingServerId=central 从
+      # settings.xml 的 <servers> 读凭证（不认 -Dcentral.username 这类系统属性）。
+      # 生成到 ~/.m2/settings.xml，文件只存在于本次 job 的 runner 上。
+      - name: Configure Maven settings for Central
         if: steps.check.outputs.ready == 'true'
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<EOF
+          <settings>
+            <servers>
+              <server>
+                <id>central</id>
+                <username>${CENTRAL_USERNAME}</username>
+                <password>${CENTRAL_PASSWORD}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
+      - name: Deploy
+        if: steps.check.outputs.ready == 'true'
+        env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          mvn -B -Prelease deploy \
-            -Dgpg.passphrase="$GPG_PASSPHRASE" \
-            -Dcentral.username="$CENTRAL_USERNAME" \
-            -Dcentral.password="$CENTRAL_PASSWORD"
+          mvn -B -Prelease deploy -Dgpg.passphrase="$GPG_PASSPHRASE"

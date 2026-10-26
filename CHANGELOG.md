@@ -3,6 +3,17 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.2] - 2026-10-26
+
+### 修复
+
+- **CI 发布流水线签名失败（`gpg: signing failed: Inappropriate ioctl for device`）**：`maven-gpg-plugin` 在无终端的 CI 环境会尝试交互式 pinentry。加 `--pinentry-mode loopback`，口令经 `-Dgpg.passphrase` 传入。
+- **Central 凭证传递方式**：`central-publishing-maven-plugin` 按 `publishingServerId` 从 `settings.xml` 的 `<servers>` 读凭证，不认 `-Dcentral.username` 系统属性。release 工作流改为在 runner 上生成 `~/.m2/settings.xml`。
+
+### 工程
+
+- release 工作流缺少发布凭证时打 warning 并跳过部署（而不是像先前那样因 `setup-java` 导入空密钥而整体失败）。
+
 ## [0.1.1] - 2026-10-26
 
 ### 修复
@@ -68,5 +79,6 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.2]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.2
 [0.1.1]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.1
 [0.1.0]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.0
