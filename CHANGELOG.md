@@ -3,6 +3,12 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.5] - 2026-10-26
+
+### 修复
+
+- **发布静默失效**：0.1.4 的 release 工作流显示 success，但 Central Portal 上没有任何部署。原因是我在 0.1.3 给 demo 模块加的 `skipPublishing=true`——`central-publishing-maven-plugin` 以聚合模式工作，只在 **reactor 最后一个模块**上执行一次 publish goal（从 `target/central-staging` 打包含全部模块的 bundle），而 demo 正是最后一个模块，跳过它等于跳过整批上传，构建照样返回成功。已移除该配置，demo 制品仍由父 pom 的 `excludeArtifacts` 排除。
+
 ## [0.1.4] - 2026-10-26
 
 ### 修复
@@ -97,6 +103,7 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.5]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.5
 [0.1.4]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.4
 [0.1.3]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.3
 [0.1.2]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.2

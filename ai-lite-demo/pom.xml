@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.github.yinwenyuan28-afk</groupId>
         <artifactId>ai-lite-parent</artifactId>
-        <version>0.1.5-SNAPSHOT</version>
+        <version>0.1.5</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -40,19 +40,13 @@
                 </executions>
             </plugin>
             <!--
-                demo 是示例工程，不发布到 Maven Central。父 pom 的 release profile
-                会注入 central-publishing 插件；这里用 skipPublishing 让 demo 模块
-                跳过上传阶段（excludeArtifacts 只排除制品，模块仍会执行 publish goal，
-                导致首个模块失败后整条 reactor 中断）。
+                demo 是示例工程，不发布到 Maven Central —— 但**不要**在这里配
+                skipPublishing。central-publishing 插件以聚合模式工作：只在
+                reactor 最后一个模块上执行一次 publish goal，从 target/central-staging
+                打包含全部模块的 bundle。demo 正好是最后一个模块，跳过它等于跳过
+                整批上传（构建仍返回 success，但 Portal 上不会有任何部署记录）。
+                排除 demo 自己的制品用父 pom release profile 的 excludeArtifacts。
             -->
-            <plugin>
-                <groupId>org.sonatype.central</groupId>
-                <artifactId>central-publishing-maven-plugin</artifactId>
-                <version>0.6.0</version>
-                <configuration>
-                    <skipPublishing>true</skipPublishing>
-                </configuration>
-            </plugin>
         </plugins>
     </build>
 </project>
