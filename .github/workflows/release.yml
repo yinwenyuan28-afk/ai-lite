@@ -47,23 +47,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # 先判断凭证是否齐备。不能把 gpg-private-key 直接写进 setup-java 的参数：
+      # 未配置 secret 时该参数为空，setup-java 导入密钥失败会让整个 job 变红，
+      # 走不到下面的「跳过部署」分支。
+      - name: Check publishing prerequisites
+        id: check
+        env:
+          GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$GPG_KEY" ] && missing="$missing GPG_PRIVATE_KEY"
+          [ -z "$GPG_PASSPHRASE" ] && missing="$missing GPG_PASSPHRASE"
+          [ -z "$CENTRAL_USERNAME" ] && missing="$missing CENTRAL_USERNAME"
+          [ -z "$CENTRAL_PASSWORD" ] && missing="$missing CENTRAL_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::warning::缺少发布凭证:$missing 。本次只验证并保留制品，不部署 Central（配置方法见 docs/ref-发布.md）。"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-java@v4
+        if: steps.check.outputs.ready == 'true'
         with:
           distribution: temurin
           java-version: '8'
           cache: maven
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
+
       - name: Deploy
+        if: steps.check.outputs.ready == 'true'
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          if [ -z "$CENTRAL_USERNAME" ] || [ -z "$GPG_PASSPHRASE" ]; then
-            echo "::warning::未配置 Maven Central 凭证（CENTRAL_USERNAME / CENTRAL_PASSWORD / GPG_PRIVATE_KEY / GPG_PASSPHRASE），跳过 Central 部署。tag 与制品仍有效，配置方法见 docs/ref-发布.md。"
-            exit 0
-          fi
           mvn -B -Prelease deploy \
             -Dgpg.passphrase="$GPG_PASSPHRASE" \
             -Dcentral.username="$CENTRAL_USERNAME" \
