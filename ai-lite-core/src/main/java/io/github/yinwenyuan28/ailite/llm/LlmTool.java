@@ -7,6 +7,9 @@ import java.util.Map;
  *
  * <p>参数结构用 {@code Map<String, Object>} 表示 JSON Schema，执行入参也是 Map，
  * 这样公开 API 不绑定任何 JSON 库，业务侧也不依赖 fastjson 或 Jackson。</p>
+ *
+ * <p><b>演化承诺（B 组：方法集终态）</b>：一个工具就是"名字 + 说明 + 参数 schema
+ * + 执行"四件事，形状不会再变，1.0 后不再新增方法。</p>
  */
 public interface LlmTool {
 

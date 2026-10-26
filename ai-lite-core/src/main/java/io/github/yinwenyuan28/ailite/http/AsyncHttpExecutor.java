@@ -8,6 +8,9 @@ import java.util.concurrent.CompletableFuture;
  * <p>JDK 8 没有虚拟线程，用户级并发的关键在于不要在等待响应时占住线程。
  * OkHttp 通过 {@code enqueue} 把等待交给连接和回调，天然满足这一点；
  * 基于 {@code HttpURLConnection} 的实现则退化为把阻塞调用交给线程池。</p>
+ *
+ * <p><b>演化承诺（B 组：方法集终态）</b>：与 {@link HttpExecutor} 同属技术底层，
+ * 1.0 后不再新增方法；新能力走新接口。</p>
  */
 public interface AsyncHttpExecutor extends HttpExecutor {
 
