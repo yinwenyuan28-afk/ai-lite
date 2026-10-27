@@ -559,16 +559,32 @@ public final class AgentSessionLoop {
         if (!budget.compactionEnabled()) {
             throw LlmCallException.contextOverflow(estimated, trigger, "自动压缩已关闭");
         }
-        CompactionOutcome outcome = compact(call, session, projected, historyCount, estimated, trigger);
-        if (outcome.compacted) {
+        // 压缩次数上限：正常情况一次就够（切点按 keepRecentTokens 保留足够余量）；
+        // 若一次压不下来说明配置或数据异常，继续压只会反复花钱，直接报错更清晰。
+        int maxPerRun = Math.max(1, budget.maxPerRun());
+        int attempts = 0;
+        int before = estimated;
+        while (attempts < maxPerRun) {
+            attempts++;
+            CompactionOutcome outcome = compact(call, session, projected, historyCount,
+                    before, trigger);
+            if (!outcome.compacted) {
+                throw LlmCallException.contextOverflow(before, trigger, outcome.reason);
+            }
             int after = estimateTokens(projected);
             if (after <= trigger) {
                 return;
             }
-            throw LlmCallException.contextOverflow(after, trigger,
-                    "压缩后仍超限（压缩前 " + estimated + "）");
+            if (after >= before) {
+                // 压缩后没变短：再压一次也是同样结果，明确报错而不是循环烧钱。
+                throw LlmCallException.contextOverflow(after, trigger,
+                        "压缩后 token 未下降（压缩前 " + before + "），已达 max-per-run="
+                                + maxPerRun);
+            }
+            before = after;
         }
-        throw LlmCallException.contextOverflow(estimated, trigger, outcome.reason);
+        throw LlmCallException.contextOverflow(before, trigger,
+                "连续压缩 " + attempts + " 次仍超限，已达 max-per-run 上限");
     }
 
     /**

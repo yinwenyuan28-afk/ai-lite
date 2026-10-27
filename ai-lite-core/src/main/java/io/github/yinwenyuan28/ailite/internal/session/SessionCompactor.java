@@ -3,6 +3,7 @@ package io.github.yinwenyuan28.ailite.internal.session;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
+import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmResult;
@@ -18,6 +19,8 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 会话压缩：挑切点、生成摘要、产出 {@link CompactionEntry}。
@@ -339,7 +342,7 @@ public final class SessionCompactor {
                 prompt.add(toLlm(message));
             }
             LlmCall summaryCall = summaryCall(call, prompt);
-            LlmResult result = gateway.round(summaryCall, null);
+            LlmResult result = invokeWithTimeout(summaryCall);
             String text = result == null ? null : Strings.defaultString(result.getContent()).trim();
             if (Strings.isBlank(text)) {
                 throw new LlmCallException("摘要模型返回空内容");
@@ -365,6 +368,43 @@ public final class SessionCompactor {
         }
         summaryCall.maxTokens(Integer.valueOf(budget.summaryMaxTokens()));
         return summaryCall;
+    }
+
+    /**
+     * 发起一次摘要调用，并施加独立超时。
+     *
+     * <p><b>为什么用取消句柄而不是 future 超时</b>：摘要走同步 {@code round}，
+     * 真正的耗时在 socket 上；只有 {@link LlmCancelHandle} 能中止在途请求。
+     * 用调度器到点 cancel，既限制住耗时，也能让传输层关掉连接。</p>
+     *
+     * <p><b>为什么不绑主 run 的取消</b>：摘要是一次独立、短时的辅助调用。
+     * 若绑定主 run，用户取消主请求会连带把已花掉一半钱的摘要也中止，
+     * 下次续聊还得重新生成。因此这里用独立句柄，只受 {@code timeout-ms} 约束。</p>
+     *
+     * @param summaryCall 摘要调用参数
+     * @return 模型结果
+     * @throws LlmCallException 超时或调用失败
+     */
+    private LlmResult invokeWithTimeout(LlmCall summaryCall) {
+        long timeoutMs = budget.summaryTimeoutMs();
+        if (timeoutMs <= 0L) {
+            return gateway.round(summaryCall, null);
+        }
+        final LlmCancelHandle handle = new LlmCancelHandle();
+        ScheduledFuture<?> timeoutTask = gateway.retryScheduler().schedule(new Runnable() {
+            @Override
+            public void run() {
+                handle.cancel();
+            }
+        }, timeoutMs, TimeUnit.MILLISECONDS);
+        try {
+            return gateway.round(summaryCall, null, handle);
+        } finally {
+            timeoutTask.cancel(false);
+            if (handle.isCancelled()) {
+                throw new LlmCallException("摘要调用超时（" + timeoutMs + "ms）");
+            }
+        }
     }
 
     /**

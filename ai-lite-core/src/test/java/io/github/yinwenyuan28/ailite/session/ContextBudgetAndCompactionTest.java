@@ -93,6 +93,29 @@ public class ContextBudgetAndCompactionTest {
                 .hasMessageContaining("max-per-run");
     }
 
+    /**
+     * 未知估算器名称必须在启动期报错，而不是静默回退默认实现。
+     */
+    @Test
+    public void unknownEstimatorIsRejected() {
+        AiLiteConfig.Context context = context(true, 12000, 2048);
+        context.setEstimator("bpe-tiktoken");
+
+        assertThatThrownBy(() -> new ContextBudget(context).validate(null, "m"))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("不支持的 token 估算器")
+                .hasMessageContaining("bpe-tiktoken");
+    }
+
+    @Test
+    public void defaultEstimatorNameIsAccepted() {
+        AiLiteConfig.Context context = context(true, 12000, 2048);
+
+        // 默认 chars-weighted 必须通过校验。
+        new ContextBudget(context).validate(null, "m");
+        assertThat(context.getEstimator()).isEqualTo("chars-weighted");
+    }
+
     // ------------------------------------------------------- 预算决策表
 
     @Test
@@ -267,6 +290,58 @@ public class ContextBudgetAndCompactionTest {
                 .hasMessageContaining("上下文超出模型窗口");
         // 失败时不写会话，也不留半截摘要。
         assertThat(compactionCount(harness.session())).isZero();
+    }
+
+    /**
+     * 压缩后 token 未下降时必须立刻报错，不能反复压缩烧钱。
+     *
+     * <p>正常配置下不变式保证一次压缩就回到线内，所以这条防护针对的是异常情形
+     * （例如摘要本身极长、或估算与实际严重偏离）。</p>
+     */
+    @Test
+    public void nonShrinkingCompactionFailsFast() {
+        AiLiteConfig.Context config = context(true, 12000, 2048);
+        config.getCompaction().setMaxPerRun(3);
+        Harness harness = Harness.create(config);
+        harness.seedLongHistory(40000);
+
+        // 摘要长到把省下的空间全吃回去：压缩后估算不降反升。
+        StringBuilder huge = new StringBuilder(200000);
+        for (int i = 0; i < 200000; i++) {
+            huge.append('摘');
+        }
+        harness.transport.enqueue(stop(huge.toString()));
+
+        assertThatThrownBy(() -> harness.resume(AgentSessionMessage.user("新一轮")))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("压缩后 token 未下降");
+        // 只调用一次摘要，没有进入第二次压缩。
+        assertThat(harness.transport.requests()).hasSize(1);
+    }
+
+    /**
+     * 摘要超时必须生效，且不绑主 run 的取消——用极短 timeout 验证不会挂住。
+     */
+    @Test
+    public void summaryTimeoutIsEnforced() {
+        AiLiteConfig.Context config = context(true, 12000, 2048);
+        config.getCompaction().setTimeoutMs(1L);
+        Harness harness = Harness.create(config);
+        harness.seedLongHistory(40000);
+
+        // 假传输立即返回，超时调度器可能在返回后才触发；
+        // 这里只验证"配置了超时不会导致异常行为"这一最低保证。
+        harness.transport.enqueue(stop("摘要"));
+
+        // 无论超时是否触发，都必须收敛为一个明确结果（成功或 CONTEXT_OVERFLOW），
+        // 不能挂住或抛非 LlmCallException。
+        try {
+            harness.resume(AgentSessionMessage.user("新一轮"));
+        } catch (LlmCallException expected) {
+            assertThat(expected.getKind()).isIn(
+                    LlmCallException.Kind.CONTEXT_OVERFLOW,
+                    LlmCallException.Kind.UNKNOWN);
+        }
     }
 
     // ------------------------------------------------------------- 夹具

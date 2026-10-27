@@ -21,6 +21,9 @@ import io.github.yinwenyuan28.ailite.util.Strings;
  */
 public final class ContextBudget {
 
+    /** 当前唯一支持的估算器标识。 */
+    static final String ESTIMATOR_CHARS_WEIGHTED = "chars-weighted";
+
     private final AiLiteConfig.Context config;
 
     /**
@@ -78,6 +81,12 @@ public final class ContextBudget {
     public void validate(Integer contextWindow, String modelLabel) {
         if (config == null || !config.isEnabled()) {
             return;
+        }
+        // 估算器目前只有一个实现。未知取值说明配置写错或版本不匹配，
+        // 静默回退默认实现会让调用方以为换成了别的算法，因此启动期直接报错。
+        if (!ESTIMATOR_CHARS_WEIGHTED.equals(config.getEstimator())) {
+            throw new LlmCallException("不支持的 token 估算器: " + config.getEstimator()
+                    + "（当前仅支持 " + ESTIMATOR_CHARS_WEIGHTED + "）");
         }
         AiLiteConfig.Context.Compaction compaction = config.getCompaction();
         if (compaction == null || !compaction.isEnabled()) {
