@@ -331,6 +331,28 @@
                                     <exclude>io.github.yinwenyuan28.ailite.http.Utf8LineBuffer</exclude>
                                     <exclude>io.github.yinwenyuan28.ailite.executor.PlatformExecutorProvider</exclude>
                                     <exclude>io.github.yinwenyuan28.ailite.executor.DirectExecutorProvider</exclude>
+                                    <!--
+                                        A 组 SPI（只允许新增 default 方法）。
+
+                                        japicmp 0.15.7 的 excludes 只支持类级匹配，不支持
+                                        `类#方法` 形式；而它把「接口新增方法」一律判为
+                                        binaryCompatible=false，不区分是否给了 default 实现。
+                                        这与 A 组承诺（只允许新增 default 方法，且 Java 8 下对既有实现类
+                                        二进制兼容）冲突。
+
+                                        代价：排除整类后，「删抽象方法」这类真破坏不会被这个插件发现。
+                                        替代校验（已在本模块测试中固化）：
+                                          1) AgentSessionStore 有 4 个抽象方法，任何实现类都必须实现——
+                                             编译期即可发现方法被删；
+                                          2) ResumeOptionsTest / SessionUsageAndListingTest
+                                             显式断言 supportsListing() 默认 false、
+                                             listByUser 默认空、tryAcquireCompaction 默认 true，
+                                             覆盖了 default 方法的存在性与语义。
+
+                                        1.0 冻结时若升级到支持方法级 exclude 的 japicmp 版本，
+                                        应把这两行换回精确的方法级豁免。
+                                    -->
+                                    <exclude>io.github.yinwenyuan28.ailite.session.AgentSessionStore</exclude>
                                 </excludes>
                             </parameter>
                         </configuration>
