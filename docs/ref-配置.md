@@ -125,6 +125,50 @@ profiles:
 > `off` / `on` / `yes` / `no` 解析成布尔值，绑定后变成字符串 `"false"` / `"true"`。
 > 库对这两个值做了兼容（`false` → off，`true` → high），但显式加引号最清楚。
 
+### 2.4 目录模式（管理页）
+
+引入 `ai-lite-admin`，并且容器里有 `JdbcTemplate`、目录表和提示词表时，模型列表和业务绑定改由数据库提供。配置文件只留供应商连接信息和业务 id。不引入这个模块时，上面的 `profiles` 和 `providers.*.models` 仍按原规则生效。
+
+```yaml
+ai-lite:
+  admin:
+    enabled: false                 # 默认关闭。打开后在应用端口注册 /ai-lite/admin
+  catalog:
+    cache-seconds: 5
+    provider-table: AI_LITE_PROVIDER_OVERLAY
+    model-table: AI_LITE_MODEL
+    biz-table: AI_LITE_BIZ_BINDING
+  llm:
+    biz-ids: [demo-chat]           # 新业务只加这里；编码规则同提示词 key
+    providers:
+      demo:
+        api: openai-completions
+        base-url: http://127.0.0.1:8000/v1
+        api-key: ${AI_LITE_API_KEY}
+        # 目录模式下不再写 models
+```
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `admin.enabled` | `false` | `true` 且进程是 Servlet Web 应用时，才注册 `/ai-lite/admin/api/**`。自带页面不是这项依赖的一部分 |
+| `admin.page-enabled` | `false` | 为 `true` 时才提供自带页面 `GET /ai-lite/admin`。自己做前端时保持 `false`，只调 [管理 API](ref-管理API.md) |
+| `catalog.cache-seconds` | `5` | 目录读缓存秒数；写入后立刻清本机缓存 |
+| `catalog.provider-table` | `AI_LITE_PROVIDER_OVERLAY` | 覆盖地址、密钥、两个超时；空字段沿用配置文件 |
+| `catalog.model-table` | `AI_LITE_MODEL` | 从 `GET {baseUrl}/models` 增量同步，或手工添加 |
+| `catalog.biz-table` | `AI_LITE_BIZ_BINDING` | 一个业务 id 对应一个供应商、模型和思考档 |
+
+建表脚本是 `ai-lite-admin/src/main/resources/ai-lite-catalog.sql`。提示词仍用 `ai-lite-prompt.sql`，调用日志仍用 `ai-lite-llm-call.sql`。
+
+目录模式下的规则：
+
+- 业务 id 必须能当作提示词 key：小写字母、数字和短横线，最长 64。启动时不合法直接失败。
+- 配了 `ai-lite.prompt.keys` 也会被忽略，并打一条警告。提示词 key 就是业务 id，一个业务一份提示词。
+- 供应商可以不写 `models`。调用用 `LlmCall.biz(bizId, messages)`。没有绑定时报「业务未配置模型」，不回退 `default-profile`。
+- 管理页的修改写入数据库，不改配置文件。接口不回密钥明文。覆盖密钥只替换单把 `api-key`，不编辑 `api-keys` 池。
+- 同步模型只返回远端 id。用户勾选后才插入新 id，已有行不改，消失的 id 不删。删除只能由用户发起。协议是 `anthropic-messages` 时不能列模型，要手工添加。
+- 调用记录默认不保存模型输入输出。`none` / `failure` / `all` 三档可在管理接口里改，正文写入 `AI_LITE_LLM_CALL_BODY`。
+- 模型要补齐推理开关、上下文窗口、输出上限和思考格式之后才能被业务选中。思考格式的可选值和说明见 `GET /ai-lite/admin/api/thinking-formats`。
+
 ## 3. 执行器 `ai-lite.executor`
 
 `ExecutorProvider.io()` 执行的是**阻塞副作用任务**：会话加载/落盘、工具执行、调用记录落表，以及协程模式下显式提交的阻塞代码。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整说明和对比见 [desc-架构总览.md](desc-架构总览.md) 的 5.2 节。
@@ -549,6 +593,8 @@ prompt:
 | `keys[].default-system-template` | - | 没有生效版本或存储不可用时使用的系统模板 |
 | `keys[].default-user-template` | - | 兜底用户模板 |
 | `keys[].biz-id` / `profile` | - | 业务侧关联信息，库不强制使用 |
+
+目录模式（见 2.4 节）下这些 `keys` 不生效，提示词 key 改为业务 id。
 
 渲染优先级：生效版本 → 调用方兜底 → 配置默认模板。数据库不可用时 `render`
 不会抛异常；只有完全没有系统模板时才报错。

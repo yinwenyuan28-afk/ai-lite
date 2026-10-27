@@ -60,6 +60,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 | `ai-lite-session-redis` | Redis 会话缓存 |
 | `ai-lite-session-jdbc` | JDBC 会话存储 |
 | `ai-lite-store-jdbc` | JDBC 调用记录 |
+| `ai-lite-admin` | 运行时目录和管理页：模型、提示词、调用摘要 |
 | `ai-lite-executor-coroutines` | Kotlin 协程执行器与 suspend 桥接 |
 | `ai-lite-spring-boot-starter` | 自动装配与默认 Bean |
 | `ai-lite-executor-jdk21` | 虚拟线程执行器（JDK 21 才编译） |
@@ -90,30 +91,24 @@ export AI_LITE_DEMO_MODEL=your-model
 也可以复制 `ai-lite-demo/src/main/resources/application-local.yml.example` 为
 `application-local.yml` 再填。该文件已在 `.gitignore` 中，**不要提交，也不要发给别人**。
 
-最小配置：
+最小配置（目录模式，模型和提示词在数据库里维护）：
 
 ```yaml
 ai-lite:
+  admin:
+    enabled: false
   llm:
     biz-ids: [my-biz]
-    default-profile: main
     providers:
       my-provider:
         api: openai-completions          # 或 openai-responses / anthropic-messages
         base-url: ${AI_LITE_BASE_URL}
         api-key: ${AI_LITE_API_KEY}
-        models:
-          - id: ${AI_LITE_MODEL}
-            reasoning: false
-            input: [text]
-            context-window: 32768
-            max-tokens: 4096
-    profiles:
-      main:
-        provider: my-provider
-        model: ${AI_LITE_MODEL}
-        thinking-level: "off"
 ```
+
+不引入 `ai-lite-admin` 时，旧路径仍然可用：在供应商下写 `models`，用 `profiles` 配合 `LlmCall.profile`。
+
+目录模式还要引入 `ai-lite-admin`、`ai-lite-prompt-jdbc`、`ai-lite-store-jdbc` 和一个 JDBC 数据源，并执行 `ai-lite-catalog.sql`、`ai-lite-prompt.sql`、`ai-lite-llm-call.sql`。业务 id 同时是提示词 key。管理页默认关闭，调试时把 `ai-lite.admin.enabled` 设为 `true`，浏览器打开 `http://localhost:8080/ai-lite/admin`。
 
 > `thinking-level` 的 `off` / `on` 建议加引号，否则 YAML 会把它解析成布尔值。
 > 库已兼容 `"false"` → off、`"true"` → high，但显式引号更清楚。
@@ -121,7 +116,7 @@ ai-lite:
 ### 3. 调用
 
 ```java
-LlmResult result = gateway.one(LlmCall.profile("my-biz", "main",
+LlmResult result = gateway.one(LlmCall.biz("my-biz",
         Collections.singletonList(LlmMessage.user("你好"))));
 System.out.println(result.getContent());
 ```

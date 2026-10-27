@@ -45,7 +45,7 @@ public class AiLiteDemoRunner implements CommandLineRunner {
             log.info("ai-lite.demo.run=false，跳过真实请求");
             return;
         }
-        LlmResult result = gateway.one(LlmCall.profile("demo-chat", "demo",
+        LlmResult result = gateway.one(LlmCall.biz("demo-chat",
                 Collections.singletonList(LlmMessage.user(prompt))));
         log.info("回答：{}", result.getContent());
         log.info("模型={} 停止原因={} 用量={}",

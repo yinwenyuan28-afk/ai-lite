@@ -3,6 +3,8 @@ package io.github.yinwenyuan28.ailite.autoconfigure;
 import io.github.yinwenyuan28.ailite.assembly.AgentLoop;
 import io.github.yinwenyuan28.ailite.assembly.Workflow;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
+import io.github.yinwenyuan28.ailite.catalog.NoopRuntimeCatalog;
+import io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog;
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
 import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
@@ -14,6 +16,7 @@ import io.github.yinwenyuan28.ailite.internal.llm.AsyncLlmCallLogger;
 import io.github.yinwenyuan28.ailite.internal.assembly.ToolResultTruncator;
 import io.github.yinwenyuan28.ailite.llm.CallbackPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmCallStore;
+import io.github.yinwenyuan28.ailite.llm.CallBodyPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
 import io.github.yinwenyuan28.ailite.llm.LlmTransport;
 import io.github.yinwenyuan28.ailite.internal.llm.NoopLlmCallStore;
@@ -142,8 +145,17 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
     @ConditionalOnMissingBean
     public ModelResolver aiLiteModelResolver(AiLiteConfig config) {
         // key 冷却时长来自出口保护配置（限流熔断计划 §3.4），默认 60s。
+        // 目录从 BeanFactory 取，不给这个公开方法加参数，避免 japicmp 把签名变更判成方法删除。
+        RuntimeCatalog catalog = NoopRuntimeCatalog.INSTANCE;
+        if (beanFactory != null) {
+            try {
+                catalog = beanFactory.getBean(RuntimeCatalog.class);
+            } catch (BeansException ex) {
+                catalog = NoopRuntimeCatalog.INSTANCE;
+            }
+        }
         return new ModelResolver(config.getLlm(),
-                config.getGuard().getKeyCooldownSeconds() * 1000L);
+                config.getGuard().getKeyCooldownSeconds() * 1000L, catalog);
     }
 
     @Bean
@@ -266,6 +278,10 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
         LlmGateway gateway = new LlmGateway(resolver, transports, effectiveStore, executor,
                 toolExecutor, retryScheduler);
         gateway.setCallbackPolicy(callbackPolicy.getIfAvailable());
+        if (beanFactory != null) {
+            CallBodyPolicy bodyPolicy = beanFactory.getBeanProvider(CallBodyPolicy.class).getIfAvailable();
+            gateway.setCallBodyPolicy(bodyPolicy);
+        }
         GuardMetrics metrics = guardMetrics.getIfAvailable();
         gateway.setGuards(buildProviderGuards(config,
                 metrics == null ? GuardMetrics.NOOP : metrics, retryScheduler));

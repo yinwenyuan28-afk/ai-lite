@@ -23,6 +23,10 @@ env/
 *.key
 auth.json
 
+# Demo SQLite。目录保留，库文件不入库。
+ai-lite-demo/data/*.db
+ai-lite-demo/data/*.db-*
+
 # Logs
 *.log
 logs/

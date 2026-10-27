@@ -1,33 +1,32 @@
+spring:
+  profiles:
+    include: local
+  datasource:
+    url: jdbc:sqlite:data/ai-lite-demo.db
+    driver-class-name: org.sqlite.JDBC
+    initialization-mode: always
+  sql:
+    init:
+      mode: always
+
 ai-lite:
   enabled: true
+  admin:
+    enabled: true
+    page-enabled: true
   llm:
-    # 允许调用的业务 id。未登记会在发请求前被拒绝。
     biz-ids:
       - demo-chat
-    default-profile: demo
     providers:
-      demo:
+      wangxin:
         api: openai-completions
-        base-url: ${AI_LITE_DEMO_BASE_URL:http://127.0.0.1:8000/v1}
-        api-key: ${AI_LITE_DEMO_API_KEY:demo}
-        models:
-          - id: ${AI_LITE_DEMO_MODEL:demo-model}
-            reasoning: false
-            input: [text]
-            context-window: 32768
-            max-tokens: 4096
-    profiles:
-      demo:
-        provider: demo
-        model: ${AI_LITE_DEMO_MODEL:demo-model}
-        thinking-level: "off"
+        base-url: https://tq.insigma-dev.com/doapi/insigma-ddd-ops/open/access/ai/v1
+        connect-timeout-ms: 10000
+        read-timeout-ms: 120000
   executor:
     mode: platform
   session:
     enabled: true
-  # 上下文治理：预算检测 + 自动压缩 + 工具结果截断。
-  # 默认值已自洽（12000 + 2048 < 32768 - 8192）；改这些值要同时满足该不等式，
-  # 否则启动会直接失败并报出三个实际数值。
   context:
     enabled: true
     budget:
@@ -36,16 +35,15 @@ ai-lite:
       enabled: true
       keep-recent-tokens: 12000
       summary-max-tokens: 2048
-      # 留空表示摘要沿用主调用的供应商与模型；成本敏感时可指向更便宜的模型。
-      # summary-provider: cheap
-      # summary-model: small-model
       timeout-ms: 60000
       max-per-run: 3
     tool-result:
       enabled: true
       max-chars: 2000
+  store:
+    jdbc:
+      table-name: AI_LITE_LLM_CALL
 
-# 只有显式打开时才会真正发请求，避免 demo 启动就联网。
 ai-lite.demo:
   run: false
   prompt: 用一句话介绍你自己

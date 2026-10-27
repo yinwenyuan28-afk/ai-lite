@@ -225,6 +225,9 @@ AI Lite HTTP 传输：transport=okhttp，实现=...OkHttpExecutor
 // 使用配置里的预置组合
 LlmCall call = LlmCall.profile("my-biz", "main", messages);
 
+// 目录模式：只传业务 id，模型从数据库绑定解析
+LlmCall call = LlmCall.biz("my-biz", messages);
+
 // 显式指定供应商、模型和思考档
 LlmCall call = LlmCall.explicit("my-biz", "my-provider", "my-model", "high", messages);
 
@@ -238,13 +241,14 @@ LlmCall next = call.withMessages(newMessages);
 | 方法/字段 | 说明 | 常用 |
 | --- | --- | --- |
 | `profile(bizId, profile, messages)` | 使用 `ai-lite.llm.profiles` 中的组合 | ⭐ |
+| `biz(bizId, messages)` | 目录模式下按业务 id 读数据库绑定 | ⭐ |
 | `explicit(bizId, provider, modelId, thinkingLevel, messages)` | 直接指定供应商和模型 | ⭐ |
 | `timeouts(connectMs, readMs)` | 修改当前实例的超时并返回 `this` |  |
 | `withMessages(messages)` | 返回新实例，消息替换，其余保持 | ⭐ |
 | `getBizId()`、`getProvider()`、`getModelId()`、`getThinkingLevel()`、`getProfile()`、`getMessages()` | 只读访问 |  |
 | `getConnectTimeoutMs()`、`getReadTimeoutMs()` | 本次覆盖值，可能为 `null` |  |
 
-`profile` 的优先级高于 `explicit`。如果两者都为空，网关会使用 `default-profile`。
+`profile` 的优先级高于 `explicit`。如果两者都为空：没有运行时目录时，网关使用 `default-profile`；目录生效时，按业务 id 读数据库绑定，不再回退 `default-profile`。没有绑定时报「业务未配置模型」。
 
 ### 3.3 `LlmMessage`
 
@@ -971,12 +975,16 @@ PromptVersion draft = promptManager.createDraft("resume-parse", null, null, null
 
 - 生效版本存在时用它的 system/user；即使 user 为空也保持为空。
 - 没有生效版本时用调用方兜底；兜底为空再用配置默认值。
-- 系统模板最终为空时抛 `PromptException`。
+- 系统模板最终为空时抛 `PromptException`。目录模式下这种情况的文案是「提示词未发布: {key}」，key 就是业务 id。
 - 未知占位符原样保留；变量值为 `null` 按空串处理。
 
 ```java
 RenderedPrompt prompt = promptManager.render("resume-parse", vars);
 LlmResult result = gateway.one(call.withMessages(prompt.getMessages()));
+
+// 目录模式：提示词 key 与业务 id 相同
+RenderedPrompt prompt = promptManager.render("demo-chat", vars);
+LlmResult result = gateway.one(LlmCall.biz("demo-chat", prompt.getMessages()));
 ```
 
 `RenderedPrompt`：`getSystem()`、`getUser()`、`getMessages()`（不可变列表，最多 system + user 两条）。

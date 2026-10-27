@@ -1,41 +1,42 @@
 # Demo 配置说明
 
-## 1. 最省事的方式：环境变量
+Demo 是一个带管理页的 Spring Boot 进程。数据库是 SQLite 文件 `data/ai-lite-demo.db`，相对启动时的工作目录。首次启动会执行 `schema.sql` 建表。
 
-```bash
-export AI_LITE_DEMO_BASE_URL=https://your-endpoint/v1
-export AI_LITE_DEMO_API_KEY=your-key
-export AI_LITE_DEMO_MODEL=your-model
-java -jar ai-lite-demo-0.1.7.jar --ai-lite.demo.run=true
+管理页开关在 `application.yml` 里是打开的（调试用）：
+
+```yaml
+ai-lite:
+  admin:
+    enabled: true
 ```
 
-密钥只存在于当前进程环境，不落文件。
+启动后打开 `http://localhost:8080/ai-lite/admin`。供应商默认收起，点名字再展开。同步模型只列出远端结果，勾选后才加入；删除只能在页面上做。调用日志可以选择不记输入输出、只记失败，或全部记录。
 
-## 2. 本地文件方式
+## 1. 填密钥
+
+`application.yml` 已经写了供应商地址，密钥放在本地文件里，不要提交。
 
 ```bash
 cp src/main/resources/application-local.yml.example src/main/resources/application-local.yml
-# 编辑 application-local.yml，填入 base-url / api-key / model
-mvn spring-boot:run -Dspring-boot.run.profiles=local -Dspring-boot.run.arguments=--ai-lite.demo.run=true
+# 编辑 application-local.yml，填入 api-key
+mvn spring-boot:run
 ```
 
-`application-local.yml` 已被 `.gitignore` 忽略。**填好之后不要提交，也不要让其他人读取。**
+`application.yml` 会带上 `local` 配置。`application-local.yml` 已在 `.gitignore` 中。
 
-## 3. 不联网只验证装配
+## 2. 不发真实请求，只看页面
 
-```bash
-java -jar ai-lite-demo-0.1.7.jar
-```
+默认 `ai-lite.demo.run=false`，启动后不调用模型。页面仍可打开，用来同步模型、补齐能力参数、发布提示词。
 
-默认 `ai-lite.demo.run=false`，只打印已加载的 providers 和 profiles，不发真实请求。
+业务 id 是 `demo-chat`。在页面上把它绑定到一个已就绪的模型并发布提示词之后，可以加 `--ai-lite.demo.run=true` 发一次 `LlmCall.biz`。
 
 ## 配置字段
 
 | 字段 | 说明 |
 | --- | --- |
-| `ai-lite.llm.biz-ids` | 允许调用的业务 id，未登记会被拒绝 |
-| `ai-lite.llm.providers.<id>.api` | 协议：`openai-completions` / `openai-responses` / `anthropic-messages` |
-| `base-url` | 端点根地址，不要带 `/chat/completions` |
-| `api-key` | 优先用 `${ENV}` 占位符 |
-| `models[].thinking-format` | `reasoning-effort` / `chat-template` / `deepseek` / `none` |
-| `profiles.<id>` | 业务使用的预置组合 |
+| `ai-lite.admin.enabled` | 管理页开关。demo 里为 `true`，库默认 `false` |
+| `ai-lite.llm.biz-ids` | 允许调用的业务 id。目录模式下它也是提示词 key |
+| `ai-lite.llm.providers.<id>.base-url` | 端点根地址，不要带 `/chat/completions` |
+| `ai-lite.store.jdbc.table-name` | 调用摘要表，demo 使用 `AI_LITE_LLM_CALL` |
+
+模型列表不写在配置文件里。在管理页同步 `GET {baseUrl}/models`，或手工添加后再补齐能力参数。
