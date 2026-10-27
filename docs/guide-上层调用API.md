@@ -492,6 +492,16 @@ CompletableFuture<LlmResult> future =
 CompletableFuture<LlmResult> timed =
         agentLoop.runAsync(call, tools, lifecycles, maxRounds, cancel, 30_000L);
 
+// 同步流式：增量在调用方线程回调，区分正文与推理
+LlmResult streamed = agentLoop.runStream(call, tools, lifecycles, maxRounds, cancel,
+        (round, kind, text) -> {
+            if (kind == DeltaKind.CONTENT) {
+                answer.append(text);
+            } else {
+                thinking.append(text);
+            }
+        });
+
 // 并行工具（默认串行）：beforeTool 串行预检 → 并发执行 → 按模型原始顺序写回
 AgentLoop parallel = new AgentLoop(gateway, executor, toolExecutor,
         AgentLoop.ToolRunMode.PARALLEL /*, 可选专用线程池 */);
@@ -505,6 +515,8 @@ AgentLoop parallel = new AgentLoop(gateway, executor, toolExecutor,
 | `maxRounds` | 最大轮数；`null` 表示 8；必须大于 0 |
 | `cancel` | 取消句柄；可为 `null`（内部会创建） |
 | `timeoutMs` | 整轮预算毫秒数；`null` 或 `<=0` 不限制。会消费传入的句柄（one-shot） |
+| `listener` | 同步流式回调；`DeltaKind.CONTENT` 拼接 == `getContent()`，`REASONING` == `getThinkingText()` |
+| `maxToolResultChars` | 单条工具结果字符上限；`null` 跟随配置，`0` 不限，正数覆盖 |
 
 行为（同步 / 异步共用同一套决策）：
 
@@ -518,6 +530,8 @@ AgentLoop parallel = new AgentLoop(gateway, executor, toolExecutor,
 - `future.cancel(true)`：底层请求被 abort，`afterRun` 仍恰好一次（error = `CancellationException`）。
 - 并行工具（`ToolRunMode.PARALLEL`，对 `run` 与 `runAsync` 都生效）：执行器故障即终止 run，已完成工具的 `afterTool` 不再调用。
 - 工具执行器实现 `AsyncToolExecutor`（`executeOneAsync`）时，`runAsync` 自动走异步链、不阻塞线程空等；同步 `run` 仍走 `execute`。
+- **工具结果截断**：单条结果超过上限时截断并追加 `…[输出过长已截断，原始 N 字符，保留前 M]`。截断发生在 `afterTool` 钩子之前，因此钩子看到、最终落盘的都是截断文本。串行 / 并行 / 异步三条路径行为一致。
+- **流式只支持同步入口**：`runStream` 的增量恒在调用方线程；异步流式本轮未做（`resumeAsync` 收到 `deltaListener` 会显式抛异常）。
 
 ### 4.3 生命周期：`AgentLifecycle`
 
@@ -597,8 +611,10 @@ public interface Assembly<I, O> {
 | 方法 | 说明 | 常用 |
 | --- | --- | --- |
 | `ensureSession(userId, sessionId, bizId)` | 不存在则创建空会话并返回；已存在直接返回 | ⭐ |
-| `resume(userId, sessionId, call, tools, lifecycles, maxRounds, cancel, newUserTurns)` | 同步续聊一轮 | ⭐ |
+| `resume(userId, sessionId, call, tools, lifecycles, maxRounds, cancel, newUserTurns)` | 同步续聊一轮（旧签名，永久保留） | ⭐ |
+| `resume(userId, sessionId, call, options)` | 同步续聊一轮（推荐，参数走 `ResumeOptions`） | ⭐ |
 | `resumeAsync(...)` | 异步续聊一轮，返回 `CompletableFuture<ResumeResult>` | ⭐ |
+| `projectEntries(session)` | 计算"本轮要发给模型的条目"，纯计算、不落盘 | |
 
 `resumeAsync` 的会话加载和落盘都在注入的 `ExecutorProvider.io()` 上执行；取消返回的
 future 会同时取消内层 `AgentLoop` 和正在进行的 HTTP 请求。<code>AgentSessionLoop</code>
@@ -615,27 +631,80 @@ String answer = result.getResult().getContent();
 AgentSession saved = result.getSession();
 ```
 
+推荐用 `ResumeOptions` 代替 8 个位置参数（旧签名仍在，内部转调同一实现）：
+
+```java
+AgentSessionLoop.ResumeResult result = sessionLoop.resume(userId, sessionId, call,
+        ResumeOptions.builder()
+                .tools(tools)
+                .maxRounds(8)
+                .newUserTurns(Collections.singletonList(AgentSessionMessage.user("继续")))
+                .maxToolResultChars(4000)     // null=跟随配置，0=不限，正数=覆盖
+                .build());
+```
+
+**流式续聊**（同步，增量在调用方线程回调）：
+
+```java
+AgentSessionLoop.ResumeResult result = sessionLoop.resume(userId, sessionId, call,
+        ResumeOptions.builder()
+                .newUserTurns(Collections.singletonList(AgentSessionMessage.user("继续")))
+                .deltaListener((round, kind, text) -> {
+                    if (kind == DeltaKind.CONTENT) {
+                        answer.append(text);          // 正文
+                    } else {
+                        thinking.append(text);        // 推理
+                    }
+                })
+                .build());
+```
+
+`DeltaKind.CONTENT` 的拼接结果恒等于 `getResult().getContent()`，
+`DeltaKind.REASONING` 恒等于 `getThinkingText()`，两者都不含 `"\n\n"` 分隔符。
+异步入口暂不支持流式（会显式抛异常，不会静默忽略）。
+
 规则：
 
 - `call.getMessages()` 会被会话历史替换；本轮新增消息放在 `newUserTurns`。
+- `newUserTurns` 按消息 id 幂等去重：与已有条目 id 相同的会被跳过，便于调用方安全重试；
+  同一批次内部重复仍是错误。
 - `resume` 要求会话已存在；不存在抛 `LlmCallException`。
 - 结果 `ABORTED` 时不落盘。
 - 循环抛异常时不落盘。
 - 保存使用读到的 `version`；并发写冲突抛 `LlmCallException("会话版本冲突")`。
 - `ResumeResult.getSession()` 是保存后重新读取的快照。
+- **上下文超限且无法压缩**时抛 `LlmCallException`，`getKind()` 为 `CONTEXT_OVERFLOW`，
+  消息里含估算值与上限。不做静默截断或丢历史。
 
 ### 5.2 `AgentSession`
 
 | 成员 | 说明 |
 | --- | --- |
 | `userId`、`sessionId`、`bizId` | 会话标识 |
-| `messages` | `List<AgentSessionMessage>` |
+| `entries` | `List<AgentSessionEntry>` 全量条目（消息 + 压缩 + 用量 + 会话信息） |
+| `messages` | `List<AgentSessionMessage>` 只读过滤视图，语义与旧版一致 |
 | `version` | 乐观锁版本；成功 `save` 后存储侧为 `version + 1` |
+| `totalTokens` | 会话累计 token；只统计成功轮次 |
+| `title` | 会话标题；首轮由首条用户消息推导，之后不再覆盖 |
 | `updatedAt` | 更新时间 |
 | `toLlmMessages()` | 转成网关消息；默认丢弃 `thinkingText` 和消息 id |
 | `toLlmMessages(includeThinking)` | true 时把 `thinkingText` / `thinkingSignature` 放进独立字段，不拼回正文 |
 | `messagesToLlm(source, includeThinking)` | 静态版本 |
-| `copyOf(session)` | 浅拷贝消息列表的副本 |
+| `copyOf(session)` | 复制会话，条目列表独立 |
+| `mergeMessages(messages)` | 按 id 对齐合并消息，非消息条目保持原位 |
+| `sumUsageTokens()` | 从 `UsageEntry` 汇总 token |
+
+> **注意**：`getMessages()` 返回只读副本。修改它不会影响会话——写消息请用
+> `setMessages(...)`（内部走 `mergeMessages`）。这是刻意设计：绕过合并会丢掉压缩条目。
+
+条目类型：
+
+| 类型 | 类 | 说明 |
+| --- | --- | --- |
+| `message` | `AgentSessionMessage` | 对话消息 |
+| `compaction` | `CompactionEntry` | 压缩摘要 + 保留区起点 |
+| `session_info` | `SessionInfoEntry` | 会话元信息（标题等） |
+| `usage` | `UsageEntry` | 单轮用量 |
 
 `AgentSession` 是可变对象，不是线程安全的；把它当快照使用。
 
@@ -677,6 +746,14 @@ public interface AgentSessionStore {
     default void appendMessage(String userId, String sessionId, AgentSessionMessage message);
     default void replaceMessage(String userId, String sessionId, AgentSessionMessage message);
     default void deleteMessage(String userId, String sessionId, String messageId);
+
+    // 列举（A 组：default 新增）
+    default List<AgentSessionSummary> listByUser(String userId, int offset, int limit);
+    default boolean supportsListing();
+
+    // 压缩并发租约（A 组：default 新增）
+    default boolean tryAcquireCompaction(String userId, String sessionId, long leaseMillis);
+    default void releaseCompaction(String userId, String sessionId);
 }
 ```
 
@@ -684,9 +761,23 @@ public interface AgentSessionStore {
 
 - 入参 `version` 是调用方读到的当前版本；成功后存储侧为 `version + 1`。
 - `version = 0` 且没有记录时创建；已有记录但版本不匹配时抛冲突。
-- 消息 id 必须非空且在同一会话内唯一。
+- **条目 id** 必须非空且在同一会话内唯一（消息与压缩条目共用同一 id 空间）。
 
-消息级方法默认是"读出整包 → 改列表 → 带版本写回"，并发写会触发版本冲突。
+消息级方法默认是"读出整包 → 按 id 对齐合并 → 带版本写回"，并发写会触发版本冲突。
+合并时非消息条目保持原位——这是压缩不被破坏的前提。
+
+列举的几个约定：
+
+- 默认实现返回空列表、`supportsListing()` 返回 `false`，**不抛异常**。旧实现升级后仍能启动。
+- 分页用 `offset` + `limit`，实现必须附加第二排序键（推荐 `sessionId`）：
+  `updatedAt` 相同的情况很常见，只有时间一个键会让翻页丢行。
+- `CachingAgentSessionStore` 已显式委托，自定义包装类也要记得委托。
+
+租约的几个约定：
+
+- 默认实现恒返回 `true`（无租约概念，单机不做限制）。
+- 抢不到时调用方**跳过压缩继续发请求**，不报错。租约是省钱手段，不是正确性依赖。
+- 租约必须可过期抢占：节点崩溃不能让压缩永久卡死。
 
 ### 5.5 内置实现
 
@@ -724,12 +815,23 @@ void delete(String userId, String sessionId);
 | 方法 | 说明 |
 | --- | --- |
 | `encodeMessages(List<AgentSessionMessage>)` | 消息列表转 JSON |
-| `decodeMessages(String)` | JSON 转消息列表 |
-| `encodeSession(AgentSession)` | 会话转 JSON |
+| `decodeMessages(String)` | JSON 转消息列表（非消息条目会被过滤掉） |
+| `encodeEntries(List<AgentSessionEntry>)` | 全量条目转 JSON |
+| `decodeEntries(String)` | JSON 转全量条目；未知 type 跳过，缺 type 抛异常 |
+| `encodeSession(AgentSession)` | 会话转 JSON（写全量条目） |
 | `decodeSession(String)` | JSON 转会话 |
 | `validateMessageIds(List<AgentSessionMessage>)` | 校验空消息、空 id、重复 id |
+| `validateEntryIds(List<AgentSessionEntry>)` | 同上，作用于全量条目 |
+| `registeredTypes()` | 已注册的条目类型 |
 
 兼容性：`updatedAt` 使用毫秒时间戳，角色使用枚举名，工具参数保留为字符串。自定义存储直接复用这个 codec 即可保持兼容。
+
+**两类兼容必须分开看**：
+
+- **向前兼容（保留）**：未知 `type`（未来新增类型或业务自定义 `x-` 条目）跳过并打
+  DEBUG 日志，不报错。旧 jar 读到新数据不会崩。
+- **老数据兼容（不做）**：缺 `type` 字段视为非法数据并抛异常。`MESSAGES_JSON` 从 0.1.7
+  的纯消息数组改为条目数组后，**0.1.x 存的数据无法读取**。
 
 ---
 

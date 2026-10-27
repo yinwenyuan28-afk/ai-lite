@@ -3,13 +3,40 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
-## [0.1.8] - 未发布（对外契约冻结）
+## [0.1.8] - 未发布（对外契约冻结 + Agent 运行时能力）
 
 ### 新增
 
 - **API 兼容性门禁**：接入 `japicmp-maven-plugin`，`mvn verify -Pcontract-check` 会拿当前产物与上一个发布版（`ai-lite.properties` 里的 `ai-lite.release.version`）做二进制签名比对。删除 public 方法、修改参数类型、把类降级为包内可见都会让构建失败。`.internal` 包已排除，内部实现可自由重构。已做反向验证：删掉 `LlmResult.getRawContent()` 后构建变红并准确报出 `REMOVED METHOD`。
 - **提示词审计 detail**：`createDraft` / `saveDraft` 新增带 `message` 参数的重载，把改动说明写进审计表 `DETAIL` 列（此前四处审计调用全部传 `null`，该列从未被写入过）。不传 `message` 时自动生成摘要：来源（`从第 N 版继承` / `手动填写模板`）、改动字段（`系统模板、用户模板` / `内容未变化`）、接替关系（`接替第 N 版生效`）。超 1000 字符截断，不阻断主操作。
 - **`ai-lite-store-jdbc` 自动装配**：引入模块并在容器中有 `JdbcTemplate` 时自动注册 `JdbcLlmCallStore`，与 `session-jdbc` / `prompt-jdbc` 保持一致，不必再手写 `@Bean`。
+
+#### Agent 运行时能力
+
+- **typed entries 会话模型**：会话内部改为"带类型的条目流"，已冻结四种类型 `message` / `compaction` / `session_info` / `usage`。`AgentSession.getEntries()` 返回全量条目，`getMessages()` 保持原有"只返回消息"语义（签名不变，二进制兼容）。编解码用注册表按 `type` 分发；**未知 type 跳过并打 DEBUG 日志**（向前兼容），**缺 type 视为非法数据抛异常**（不兼容 0.1.x 的纯消息数组格式）。
+- **上下文预算检测**：每轮发送前按字符类型加权估算 token（ASCII 0.25、CJK 0.6 tokens/字符），超过触发线（`contextWindow - reserveTokens`）时抛 `LlmCallException.Kind.CONTEXT_OVERFLOW`，错误消息含估算值与上限。窗口未配置（null/0）或小于等于 `reserveTokens` 时视为"窗口未知"，跳过检查。
+- **自动压缩（默认开启）**：超限时调用 LLM 生成摘要并追加 `CompactionEntry`，**原始消息一条不删**。投影时按"前缀区 + [最后一条压缩的摘要] + firstKeptEntryId 之后的消息"现场计算，不缓存、不落盘；关掉开关立刻恢复完整历史。摘要按消息边界分块迭代，避免摘要请求自身超窗口。
+- **会话级系统提示（前缀区）**：数组开头连续的 SYSTEM 条目被视为前缀区，永不参与压缩。投影时原样放最前；摘要输入不含前缀区内容。
+- **工具结果截断**：单条工具结果超过上限时截断并追加标记 `…[输出过长已截断，原始 N 字符，保留前 M]`。覆盖串行、并行、异步三条写回路径；**截断发生在 `afterTool` 钩子之前**，因此落盘内容也是截断文本。
+- **同步流式**：`AgentLoop.runStream` + `AgentDeltaListener` + `DeltaKind`（CONTENT / REASONING）。CONTENT 拼接结果恒等于 `getContent()`，REASONING 恒等于 `getThinkingText()`，两者都不含 `"\n\n"` 分隔符。增量回调恒在调用方线程。会话层通过 `ResumeOptions.deltaListener` 使用，未新增 `resumeStream` 方法。
+- **会话用量记账**：每轮成功调用追加 `UsageEntry`，会话级 `totalTokens` 由条目汇总。取消/失败轮不产生条目（账单口径由 `LlmCallRecord` 覆盖）。
+- **会话列举**：`AgentSessionStore.listByUser(userId, offset, limit)` + `AgentSessionSummary`，按 `updatedAt DESC, sessionId DESC` 稳定排序。`CachingAgentSessionStore` 已显式委托；JDBC 与内存实现均支持。
+- **压缩并发租约**：`AgentSessionStore.tryAcquireCompaction` / `releaseCompaction`，多节点同时判定超限时只有一个执行摘要。租约过期可抢占；抢不到的一方跳过压缩继续，不报错。
+- **入口参数收敛**：新增 `ResumeOptions` builder。旧 8 参 `resume` / `resumeAsync` 永久保留并转调，等价值由 `ResumeOptionsTest` 逐字段守门。
+- **`LlmCall.maxTokens(Integer)`**：单次调用覆盖输出上限，供摘要调用使用。
+- **`LlmGateway.resolveFor(LlmCall)`**：只解析模型元数据，不发请求、不占 guard、不写记录。
+
+### 修复
+
+- **压缩条目会被静默丢弃（三处）**。这是本轮最关键的修复，缺任何一处压缩都会"每轮算、每轮花钱、每轮被丢掉"且不报任何错：
+  1. `AgentSessionStoreSupport` 的 `appendMessage` / `replaceMessage` / `deleteMessage` 只写回消息列表；
+  2. `AgentSessionCodec.encodeSession` 只序列化消息（Redis 缓存命中一次再写回就丢）；
+  3. **`AgentSessionLoop.finish` 用 `new AgentSession()` 重建对象**，只复制消息——而 `finish` 是每轮续聊的必经路径。
+
+  修法：`AgentSession.mergeMessages` 按 id 对齐合并，非消息条目保持原位；`encodeSession` 改为写全量条目；`finish` 改为 `copyOf` + `mergeMessages`。
+- **JDBC 会话读写不对称**：`save` 写全量条目但 `ROW_MAPPER` 用 `decodeMessages` 读，非消息条目读回即消失。已改为 `decodeEntries`。
+- **压缩对本次请求无效**：`prepare` 里先算好发送用消息列表再做预算检查，导致压缩改的是历史、发出去的是压缩前的列表。现在先跑预算检查（可能压缩），再生成消息列表。
+- **压缩切点越界**：切点可能落在本轮尚未落盘的新消息上，`firstKeptEntryId` 指向不存在的 id，投影退化成"压缩条目之后空历史"。现在切点上限被限制在已落盘历史内。
 
 ### 变更（破坏性，升级前务必阅读）
 
@@ -23,6 +50,8 @@
         table-name: AI_LITE_LLM_CALL     # 必填
   ```
 
+- **会话数据格式不向后兼容**：`MESSAGES_JSON` 从"纯消息数组"改为"带 `type` 的条目数组"。**0.1.x 存过的会话在升级后读取会抛异常**。本轮明确不做老数据兼容（项目尚未正式使用）；如需保留历史会话，请在升级前导出或清空 `AI_LITE_SESSION`。
+- **`AI_LITE_SESSION` 表结构变更**：新增 `TITLE`、`MESSAGE_COUNT`、`TOTAL_TOKENS`、`COMPACTION_LEASE_UNTIL` 四列与索引 `IDX_AI_LITE_SESSION_USER_UPDATED`。只提供完整建表语句，**不提供 ALTER 迁移段**。
 - **9 个内部实现类迁出公开包**，统一到 `io.github.yinwenyuan28.ailite.internal.{llm,session,http,executor}`：
 
   | 旧坐标 | 新坐标 |

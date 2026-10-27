@@ -454,6 +454,57 @@ session:
 `ai-lite.session.jdbc.table-name` 指定。引入 `ai-lite-session-redis` 后，
 自行提供一个 `SessionCache` Bean，并用 `CachingAgentSessionStore` 包装持久层。
 
+## 5.1 上下文治理 `ai-lite.context`
+
+```yaml
+context:
+  enabled: true
+  estimator: chars-weighted
+  budget:
+    reserve-tokens: 8192
+  compaction:
+    enabled: true
+    keep-recent-tokens: 12000
+    summary-max-tokens: 2048
+    summary-provider:        # 留空 = 用当前主调用的供应商
+    summary-model:           # 留空 = 用当前主调用的模型
+    timeout-ms: 60000
+    max-per-run: 3
+  tool-result:
+    enabled: true
+    max-chars: 2000
+```
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 预算检测总开关；关闭后不做 token 估算与超限判断 |
+| `estimator` | `chars-weighted` | 估算器实现标识，目前只有这一个 |
+| `budget.reserve-tokens` | `8192` | 留给模型回复的余量；触发线 = `context-window - reserve-tokens` |
+| `compaction.enabled` | `true` | 自动压缩开关；关闭后超限直接抛 `CONTEXT_OVERFLOW` |
+| `compaction.keep-recent-tokens` | `12000` | 压缩后保留的最近 token 数 |
+| `compaction.summary-max-tokens` | `2048` | 摘要正文的目标上限（同时作为摘要请求的 `max_tokens`） |
+| `compaction.summary-provider` | 空 | 摘要调用的供应商；空表示沿用主调用 |
+| `compaction.summary-model` | 空 | 摘要调用的模型；空表示沿用主调用 |
+| `compaction.timeout-ms` | `60000` | 摘要调用独立超时（不绑定主 run 的取消） |
+| `compaction.max-per-run` | `3` | 单次 run 内压缩次数上限，防止不收敛时无限循环 |
+| `tool-result.enabled` | `true` | 工具结果截断开关 |
+| `tool-result.max-chars` | `2000` | 单条工具结果保留的最大字符数 |
+
+**启动期校验**：`keep-recent-tokens + summary-max-tokens` 必须小于
+`context-window - reserve-tokens`。不满足会导致**启动失败**，错误消息给出三个实际数值。
+理由：压缩后估算值仍高于触发线时，每轮都会重新压缩、每轮都花钱，而这种故障在运行期
+只表现为账单异常，不会报错。
+
+**窗口未知时跳过检查**：模型的 `context-window` 未配置（null/0）或小于等于
+`reserve-tokens` 时视为"无法判断"，不做预算检查也不压缩，行为与未接入本能力时一致。
+
+**三组独立开关的理由**：拆成 `budget` / `compaction` / `tool-result` 才能表达
+"只要截断、不要压缩"这类组合。
+
+**估算精度**：按字符类型加权（ASCII 0.25、中文 0.6 tokens/字符）。这是一个
+中文为主的库，常见的"字符数 / 2.5"对中文低估 40%~60%，会让压缩判断失效。
+精确 token 数以供应商返回的 usage 为准，估算只用于判断"该不该压缩"。
+
 ## 6. 提示词 `ai-lite.prompt`
 
 ```yaml
