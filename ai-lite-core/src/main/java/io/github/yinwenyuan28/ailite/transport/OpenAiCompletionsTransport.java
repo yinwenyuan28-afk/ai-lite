@@ -130,7 +130,7 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
     private ObjectNode body(LlmRequest request, ResolvedModel model) {
         ObjectNode body = TransportSupport.object();
         body.put("model", model.getModelId());
-        body.put("max_tokens", model.getMaxTokens());
+        body.put("max_tokens", request.effectiveMaxTokens());
         body.put("stream", request.isStream());
         body.set("messages", messages(request.getMessages(), model));
         if (request.isStream()) {
@@ -401,15 +401,15 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
         String content = TransportSupport.text(delta, "content");
         if (Strings.isNotEmpty(reasoning)) {
             state.reasoning.append(reasoning);
-            TransportSupport.emit(request.getOnDelta(), reasoning);
+            TransportSupport.emitReasoning(request, reasoning);
         }
         if (Strings.isNotEmpty(content)) {
             if (state.reasoning.length() > 0 && !state.blankEmitted) {
-                TransportSupport.emit(request.getOnDelta(), "\n\n");
+                TransportSupport.emitSeparator(request);
                 state.blankEmitted = true;
             }
             state.content.append(content);
-            TransportSupport.emit(request.getOnDelta(), content);
+            TransportSupport.emitContent(request, content);
         }
         mergeToolDeltas(state.tools, delta.path("tool_calls"));
     }

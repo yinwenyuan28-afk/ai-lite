@@ -1,12 +1,14 @@
 package io.github.yinwenyuan28.ailite.assembly;
 
 import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.assembly.ToolResultTruncator;
 import io.github.yinwenyuan28.ailite.llm.AsyncToolExecutor;
 import io.github.yinwenyuan28.ailite.llm.CallbackPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
 import io.github.yinwenyuan28.ailite.llm.SerialCallbackExecutor;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
+import io.github.yinwenyuan28.ailite.llm.LlmDeltaSink;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
 import io.github.yinwenyuan28.ailite.llm.LlmResult;
@@ -46,6 +48,14 @@ public final class AgentLoop {
     private final ToolRunMode toolRunMode;
     private final Executor toolPool;
     private final CallbackPolicy callbackPolicy;
+    /**
+     * 全局工具结果截断上限；0 表示不限。
+     *
+     * <p>放在构造期固定，而不是每轮读配置：AgentLoop 是无状态执行器，
+     * 让它持有可变配置会让并发 run 之间的行为依赖外部状态。
+     * 单轮覆盖走 {@link #run} 的 {@code maxToolResultChars} 参数。</p>
+     */
+    private final int defaultToolResultMaxChars;
 
     /**
      * 工具执行模式（AL-A1）：默认串行；PARALLEL 对 run 与 runAsync 都生效，
@@ -116,6 +126,18 @@ public final class AgentLoop {
      */
     public AgentLoop(LlmGateway gateway, ExecutorProvider executor, ToolExecutor toolExecutor,
                      ToolRunMode toolRunMode, Executor toolPool, CallbackPolicy callbackPolicy) {
+        this(gateway, executor, toolExecutor, toolRunMode, toolPool, callbackPolicy, 0);
+    }
+
+    /**
+     * 指定工具执行模式、并行执行池、回调执行策略与工具结果截断上限。
+     *
+     * @param callbackPolicy           回调策略，null 表示 inline
+     * @param defaultToolResultMaxChars 全局工具结果字符上限；0 表示不限
+     */
+    public AgentLoop(LlmGateway gateway, ExecutorProvider executor, ToolExecutor toolExecutor,
+                     ToolRunMode toolRunMode, Executor toolPool, CallbackPolicy callbackPolicy,
+                     int defaultToolResultMaxChars) {
         if (gateway == null) {
             throw new LlmCallException("网关不能为空");
         }
@@ -125,6 +147,7 @@ public final class AgentLoop {
         this.toolRunMode = toolRunMode == null ? ToolRunMode.SEQUENTIAL : toolRunMode;
         this.toolPool = toolPool;
         this.callbackPolicy = callbackPolicy == null ? CallbackPolicy.inline() : callbackPolicy;
+        this.defaultToolResultMaxChars = Math.max(0, defaultToolResultMaxChars);
     }
 
     /**
@@ -132,6 +155,13 @@ public final class AgentLoop {
      */
     public ExecutorProvider getExecutor() {
         return executor;
+    }
+
+    /**
+     * @return 底层网关，供会话层做模型解析与摘要调用
+     */
+    public LlmGateway getGateway() {
+        return gateway;
     }
 
     /**
@@ -152,6 +182,17 @@ public final class AgentLoop {
      */
     public LlmResult run(LlmCall call, List<LlmTool> tools, List<AgentLifecycle> lifecycles,
                          Integer maxRounds, LlmCancelHandle cancel) {
+        return run(call, tools, lifecycles, maxRounds, cancel, null);
+    }
+
+    /**
+     * 跑一次 Agent 循环，并指定本轮工具结果截断上限。
+     *
+     * @param maxToolResultChars 单条工具结果字符上限；null 跟随配置，0 不限，正数覆盖
+     * @return 最后一轮结果
+     */
+    public LlmResult run(LlmCall call, List<LlmTool> tools, List<AgentLifecycle> lifecycles,
+                         Integer maxRounds, LlmCancelHandle cancel, Integer maxToolResultChars) {
         if (call == null) {
             throw new LlmCallException("调用不能为空");
         }
@@ -165,6 +206,7 @@ public final class AgentLoop {
                 : new ArrayList<AgentLifecycle>(lifecycles);
         final AgentLoopContext ctx = AgentLoopContext.copy(call.getBizId(), call.getMessages(),
                 tools, cancel);
+        ctx.setToolResultMaxChars(resolveToolResultLimit(maxToolResultChars));
 
         // beforeRun 失败代表 run 未开始：不打 afterRun，直接抛出。
         eachBeforeRun(hooks, ctx);
@@ -187,10 +229,137 @@ public final class AgentLoop {
     }
 
     /**
+     * 按是否传入 listener 选择流式或非流式单轮调用。
+     *
+     * <p>流式时把类型化 sink 桥接成 {@link AgentDeltaListener}：推理归 REASONING、
+     * 正文归 CONTENT，且不产生 {@code "\n\n"} 分隔符事件。</p>
+     *
+     * @param call     调用参数
+     * @param tools    工具
+     * @param cancel   取消句柄
+     * @param listener 增量回调，null 表示非流式
+     * @param roundNo  轮次，从 1 开始
+     * @return 本轮结果
+     */
+    private LlmResult roundWithOptionalStream(LlmCall call, List<LlmTool> tools,
+                                              LlmCancelHandle cancel,
+                                              final AgentDeltaListener listener,
+                                              final int roundNo) {
+        if (listener == null) {
+            return gateway.round(call, tools, cancel);
+        }
+        LlmDeltaSink sink = new LlmDeltaSink() {
+            @Override
+            public void reasoning(String text) {
+                listener.onDelta(roundNo, DeltaKind.REASONING, text);
+            }
+
+            @Override
+            public void content(String text) {
+                listener.onDelta(roundNo, DeltaKind.CONTENT, text);
+            }
+        };
+        return gateway.roundByStream(call, tools, sink, cancel);
+    }
+
+    /**
+     * 同步流式跑一次 Agent 循环。
+     *
+     * <p>增量回调恒在调用方线程执行。{@link DeltaKind#CONTENT} 的拼接结果等于
+     * {@code getContent()}，{@link DeltaKind#REASONING} 的拼接结果等于
+     * {@code getThinkingText()}——两者互不污染，也不包含分隔符。</p>
+     *
+     * <p>工具循环下每轮都会推增量（{@code round} 从 1 开始递增）；工具执行期间不会有
+     * 任何增量事件。</p>
+     *
+     * @param call       调用参数
+     * @param tools      工具列表
+     * @param lifecycles 生命周期，可为 null
+     * @param maxRounds  最大轮数，null 表示 8
+     * @param cancel     取消句柄，可为 null
+     * @param listener   增量回调，非 null
+     * @return 最后一轮结果
+     */
+    public LlmResult runStream(LlmCall call, List<LlmTool> tools, List<AgentLifecycle> lifecycles,
+                               Integer maxRounds, LlmCancelHandle cancel,
+                               AgentDeltaListener listener) {
+        return runStream(call, tools, lifecycles, maxRounds, cancel, listener, null);
+    }
+
+    /**
+     * 同步流式跑一次 Agent 循环，并指定本轮工具结果截断上限。
+     *
+     * @param maxToolResultChars 单条工具结果字符上限；null 跟随配置，0 不限，正数覆盖
+     * @return 最后一轮结果
+     */
+    public LlmResult runStream(LlmCall call, List<LlmTool> tools, List<AgentLifecycle> lifecycles,
+                               Integer maxRounds, LlmCancelHandle cancel,
+                               AgentDeltaListener listener, Integer maxToolResultChars) {
+        if (call == null) {
+            throw new LlmCallException("调用不能为空");
+        }
+        if (listener == null) {
+            throw new LlmCallException("流式回调不能为空");
+        }
+        int limit = maxRounds == null ? LlmGateway.DEFAULT_MAX_ROUNDS : maxRounds.intValue();
+        if (limit <= 0) {
+            throw new LlmCallException("最大轮数必须大于 0");
+        }
+        final List<AgentLifecycle> hooks = lifecycles == null
+                ? Collections.<AgentLifecycle>emptyList()
+                : new ArrayList<AgentLifecycle>(lifecycles);
+        final AgentLoopContext ctx = AgentLoopContext.copy(call.getBizId(), call.getMessages(),
+                tools, cancel);
+        ctx.setToolResultMaxChars(resolveToolResultLimit(maxToolResultChars));
+
+        eachBeforeRun(hooks, ctx);
+
+        LlmResult outcome = null;
+        Throwable failure = null;
+        try {
+            outcome = runRounds(call, hooks, ctx, limit, listener);
+            return outcome;
+        } catch (RuntimeException ex) {
+            failure = ex;
+            throw ex;
+        } catch (Error ex) {
+            failure = ex;
+            throw ex;
+        } finally {
+            eachAfterRun(hooks, ctx, outcome, failure);
+        }
+    }
+
+    /**
+     * 解析本轮生效的工具结果截断上限。
+     *
+     * <p>AgentLoop 自身不持有配置，全局默认值由构造时传入（见
+     * {@link #AgentLoop(LlmCall, List, List, Integer, LlmCancelHandle, Integer)} 的
+     * {@code defaultToolResultMaxChars}），单轮覆盖优先。</p>
+     *
+     * @param override 单轮覆盖值，三态语义
+     * @return 生效上限；0 表示不限
+     */
+    private int resolveToolResultLimit(Integer override) {
+        if (override != null) {
+            return override.intValue();
+        }
+        return defaultToolResultMaxChars;
+    }
+
+    /**
      * 同步轮次推进。所有终止分支只返回结果，由 {@link #run} 的 finally 统一收口 afterRun。
      */
     private LlmResult runRounds(LlmCall call, List<AgentLifecycle> hooks, AgentLoopContext ctx,
                                 int limit) {
+        return runRounds(call, hooks, ctx, limit, null);
+    }
+
+    /**
+     * @param listener 流式增量回调；null 表示非流式
+     */
+    private LlmResult runRounds(LlmCall call, List<AgentLifecycle> hooks, AgentLoopContext ctx,
+                                int limit, AgentDeltaListener listener) {
         int completed = 0;
         int inputTokens = 0;
         int outputTokens = 0;
@@ -209,8 +378,8 @@ public final class AgentLoop {
                 return aborted(last, inputTokens, outputTokens, totalTokens, latencyMs, completed);
             }
 
-            LlmResult round = gateway.round(call.withMessages(ctx.getMessages()),
-                    ctx.getTools(), ctx.getCancel());
+            LlmResult round = roundWithOptionalStream(call.withMessages(ctx.getMessages()),
+                    ctx.getTools(), ctx.getCancel(), listener, completed + 1);
             completed++;
             inputTokens += round.getUsage().getInputTokens();
             outputTokens += round.getUsage().getOutputTokens();
@@ -433,6 +602,20 @@ public final class AgentLoop {
                                                  List<AgentLifecycle> lifecycles,
                                                  Integer maxRounds, LlmCancelHandle cancel,
                                                  Long timeoutMs) {
+        return runAsync(call, tools, lifecycles, maxRounds, cancel, timeoutMs, null);
+    }
+
+    /**
+     * 带整轮超时与工具结果截断上限的非阻塞 Agent 循环。
+     *
+     * @param timeoutMs          整轮预算毫秒数；null 或 &lt;=0 表示不限制
+     * @param maxToolResultChars 单条工具结果字符上限；null 跟随配置，0 不限，正数覆盖
+     * @return 结果 future
+     */
+    public CompletableFuture<LlmResult> runAsync(LlmCall call, List<LlmTool> tools,
+                                                 List<AgentLifecycle> lifecycles,
+                                                 Integer maxRounds, LlmCancelHandle cancel,
+                                                 Long timeoutMs, Integer maxToolResultChars) {
         if (call == null) {
             throw new LlmCallException("调用不能为空");
         }
@@ -448,6 +631,7 @@ public final class AgentLoop {
         final LlmCancelHandle effectiveCancel = cancel == null ? new LlmCancelHandle() : cancel;
         AgentLoopContext ctx = AgentLoopContext.copy(call.getBizId(), call.getMessages(),
                 tools, effectiveCancel);
+        ctx.setToolResultMaxChars(resolveToolResultLimit(maxToolResultChars));
 
         // beforeRun 失败代表 run 未开始：不打 afterRun；异步入口统一用 future 表达异常。
         try {
@@ -916,6 +1100,9 @@ public final class AgentLoop {
                 }
             }
             String text = denial != null ? denial : execute(ctx.getTools(), mutable, roundNo);
+            // 截断必须在 afterTool 之前：SessionRecorder 本身就是 afterTool 钩子，
+            // 它记录的内容就是最终落盘内容。放在钩子之后会让截断对落盘无效。
+            text = ToolResultTruncator.truncate(text, ctx.getToolResultMaxChars());
             if (denial == null) {
                 for (AgentLifecycle hook : hooks) {
                     if (hook == null) {
@@ -1012,6 +1199,7 @@ public final class AgentLoop {
                 text = pre.denials[i];
             } else {
                 text = texts[i] == null ? "" : texts[i];
+                text = ToolResultTruncator.truncate(text, ctx.getToolResultMaxChars());
                 for (AgentLifecycle hook : hooks) {
                     if (hook == null) {
                         continue;
@@ -1233,6 +1421,8 @@ public final class AgentLoop {
                 }
                 return one.thenAcceptAsync(text -> {
                     String resultText = text == null ? "" : text;
+                    // 截断先于 afterTool：钩子记录的就是落盘内容（Q1 决策）。
+                    resultText = ToolResultTruncator.truncate(resultText, ctx.getToolResultMaxChars());
                     for (AgentLifecycle hook : hooks) {
                         if (hook == null) {
                             continue;

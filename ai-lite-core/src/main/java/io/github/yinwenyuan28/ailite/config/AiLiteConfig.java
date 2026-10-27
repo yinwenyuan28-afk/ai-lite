@@ -24,6 +24,8 @@ public final class AiLiteConfig {
     private Metrics metrics = new Metrics();
     /** 出口保护（限流熔断计划）：并发限流/熔断/多 key 冷却的跨供应商通用参数，默认全关。 */
     private Guard guard = new Guard();
+    /** 上下文治理（运行时能力计划）：预算检测、自动压缩、工具结果截断。 */
+    private Context context = new Context();
 
     public boolean isEnabled() {
         return enabled;
@@ -87,6 +89,14 @@ public final class AiLiteConfig {
 
     public void setSession(Session session) {
         this.session = session == null ? new Session() : session;
+    }
+
+    public Context getContext() {
+        return context;
+    }
+
+    public void setContext(Context context) {
+        this.context = context == null ? new Context() : context;
     }
 
     /**
@@ -655,6 +665,192 @@ public final class AiLiteConfig {
 
         public void setTtlSeconds(long ttlSeconds) {
             this.ttlSeconds = ttlSeconds;
+        }
+    }
+
+    /**
+     * 上下文治理配置（运行时能力计划）。
+     *
+     * <p>拆成 budget / compaction / tool-result 三组而不是一个总开关，
+     * 是为了能表达"只要截断、不要压缩"这类组合。</p>
+     *
+     * <p><b>默认值必须自洽</b>：启动期会校验
+     * {@code keepRecentTokens + summaryMaxTokens < contextWindow - reserveTokens}，
+     * 不满足直接启动失败，不留到运行期变成"每轮压缩一次"的死循环。</p>
+     */
+    public static final class Context {
+
+        /** 预算检测开关。关闭后不做任何 token 估算与超限判断。 */
+        private boolean enabled = true;
+        /** token 估算器实现标识，目前只有 chars-weighted。 */
+        private String estimator = "chars-weighted";
+        private Budget budget = new Budget();
+        private Compaction compaction = new Compaction();
+        private ToolResult toolResult = new ToolResult();
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getEstimator() {
+            return estimator;
+        }
+
+        public void setEstimator(String estimator) {
+            this.estimator = estimator;
+        }
+
+        public Budget getBudget() {
+            return budget;
+        }
+
+        public void setBudget(Budget budget) {
+            this.budget = budget == null ? new Budget() : budget;
+        }
+
+        public Compaction getCompaction() {
+            return compaction;
+        }
+
+        public void setCompaction(Compaction compaction) {
+            this.compaction = compaction == null ? new Compaction() : compaction;
+        }
+
+        public ToolResult getToolResult() {
+            return toolResult;
+        }
+
+        public void setToolResult(ToolResult toolResult) {
+            this.toolResult = toolResult == null ? new ToolResult() : toolResult;
+        }
+
+        /**
+         * 预算参数。留给定模型回复的余量越大，触发线越低、压缩越早。
+         */
+        public static final class Budget {
+
+            /**
+             * 预留给模型回复的 token 数。触发线 = contextWindow - reserveTokens。
+             * 窗口未知（null/0）或小于等于本值时视为"窗口未知"，跳过预算检查。
+             */
+            private int reserveTokens = 8192;
+
+            public int getReserveTokens() {
+                return reserveTokens;
+            }
+
+            public void setReserveTokens(int reserveTokens) {
+                this.reserveTokens = reserveTokens;
+            }
+        }
+
+        /**
+         * 自动压缩参数。默认开启：上下文超限是必然故障，不是可选优化。
+         */
+        public static final class Compaction {
+
+            private boolean enabled = true;
+            /**
+             * 压缩后保留的最近 token 数。必须满足
+             * {@code keepRecentTokens + summaryMaxTokens < contextWindow - reserveTokens}。
+             */
+            private int keepRecentTokens = 12000;
+            /** 摘要正文的目标 token 上限，作为摘要请求的 maxTokens。 */
+            private int summaryMaxTokens = 2048;
+            /** 摘要调用的供应商；留空表示沿用当前主调用的供应商。 */
+            private String summaryProvider;
+            /** 摘要调用的模型；留空表示沿用当前主调用的模型。 */
+            private String summaryModel;
+            /** 摘要调用独立超时，不绑定主 run 的取消。 */
+            private long timeoutMs = 60000L;
+            /** 单次 run 内压缩次数上限，防止压缩不收敛时无限循环。 */
+            private int maxPerRun = 3;
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public int getKeepRecentTokens() {
+                return keepRecentTokens;
+            }
+
+            public void setKeepRecentTokens(int keepRecentTokens) {
+                this.keepRecentTokens = keepRecentTokens;
+            }
+
+            public int getSummaryMaxTokens() {
+                return summaryMaxTokens;
+            }
+
+            public void setSummaryMaxTokens(int summaryMaxTokens) {
+                this.summaryMaxTokens = summaryMaxTokens;
+            }
+
+            public String getSummaryProvider() {
+                return summaryProvider;
+            }
+
+            public void setSummaryProvider(String summaryProvider) {
+                this.summaryProvider = summaryProvider;
+            }
+
+            public String getSummaryModel() {
+                return summaryModel;
+            }
+
+            public void setSummaryModel(String summaryModel) {
+                this.summaryModel = summaryModel;
+            }
+
+            public long getTimeoutMs() {
+                return timeoutMs;
+            }
+
+            public void setTimeoutMs(long timeoutMs) {
+                this.timeoutMs = timeoutMs;
+            }
+
+            public int getMaxPerRun() {
+                return maxPerRun;
+            }
+
+            public void setMaxPerRun(int maxPerRun) {
+                this.maxPerRun = maxPerRun;
+            }
+        }
+
+        /**
+         * 工具结果截断参数。截断发生在 afterTool 钩子之前，落盘的就是截断文本。
+         */
+        public static final class ToolResult {
+
+            private boolean enabled = true;
+            /** 单条工具结果保留的最大字符数。 */
+            private int maxChars = 2000;
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public int getMaxChars() {
+                return maxChars;
+            }
+
+            public void setMaxChars(int maxChars) {
+                this.maxChars = maxChars;
+            }
         }
     }
 

@@ -18,6 +18,13 @@ public final class AgentLoopContext {
     private final List<LlmMessage> messages;
     private final List<LlmTool> tools;
     private final LlmCancelHandle cancel;
+    /**
+     * 本轮工具结果字符上限；0 表示不限。
+     *
+     * <p>放在上下文里而不是构造器参数，是为了让编排入口按调用方参数覆盖，
+     * 同时不改变 {@code AgentLoopContext.copy} 的签名（那是 39 处调用点的前提）。</p>
+     */
+    private int toolResultMaxChars;
 
     AgentLoopContext(String bizId, List<LlmMessage> messages, List<LlmTool> tools, LlmCancelHandle cancel) {
         this.bizId = bizId;
@@ -65,6 +72,22 @@ public final class AgentLoopContext {
 
     public LlmCancelHandle getCancel() {
         return cancel;
+    }
+
+    /**
+     * @return 本轮工具结果字符上限；0 表示不限
+     */
+    public int getToolResultMaxChars() {
+        return toolResultMaxChars;
+    }
+
+    /**
+     * 设置本轮工具结果字符上限。
+     *
+     * @param toolResultMaxChars 上限字符数；0 表示不限
+     */
+    public void setToolResultMaxChars(int toolResultMaxChars) {
+        this.toolResultMaxChars = toolResultMaxChars;
     }
 
     public boolean isCancelled() {

@@ -31,6 +31,9 @@ public class JdbcAgentSessionStoreTest {
         jdbc.execute("CREATE TABLE AI_LITE_SESSION ("
                 + "USER_ID VARCHAR(128) NOT NULL, SESSION_ID VARCHAR(191) NOT NULL,"
                 + "BIZ_ID VARCHAR(128), VERSION BIGINT NOT NULL, MESSAGES_JSON CLOB,"
+                + "TITLE VARCHAR(255), MESSAGE_COUNT INT DEFAULT 0,"
+                + "TOTAL_TOKENS BIGINT DEFAULT 0,"
+                + "COMPACTION_LEASE_UNTIL BIGINT,"
                 + "UPDATED_AT TIMESTAMP, PRIMARY KEY (USER_ID, SESSION_ID))");
         store = new JdbcAgentSessionStore(jdbc);
     }
@@ -40,6 +43,9 @@ public class JdbcAgentSessionStoreTest {
         jdbc.execute("CREATE TABLE MY_AGENT_SESSION ("
                 + "USER_ID VARCHAR(128) NOT NULL, SESSION_ID VARCHAR(191) NOT NULL,"
                 + "BIZ_ID VARCHAR(128), VERSION BIGINT NOT NULL, MESSAGES_JSON CLOB,"
+                + "TITLE VARCHAR(255), MESSAGE_COUNT INT DEFAULT 0,"
+                + "TOTAL_TOKENS BIGINT DEFAULT 0,"
+                + "COMPACTION_LEASE_UNTIL BIGINT,"
                 + "UPDATED_AT TIMESTAMP, PRIMARY KEY (USER_ID, SESSION_ID))");
         JdbcAgentSessionStore custom = new JdbcAgentSessionStore(jdbc, "MY_AGENT_SESSION");
 

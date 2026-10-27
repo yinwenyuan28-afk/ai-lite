@@ -30,9 +30,11 @@ public class AgentSessionTest {
     public void codecKeepsLegacyFieldNamesAndTimestamp() {
         String json = "{\"userId\":\"u\",\"sessionId\":\"s\",\"bizId\":\"b\",\"version\":3,"
                 + "\"updatedAt\":1760940000000,\"messages\":["
-                + "{\"id\":\"m1\",\"role\":\"ASSISTANT\",\"text\":\"answer\",\"thinkingText\":\"think\","
+                + "{\"type\":\"message\",\"id\":\"m1\",\"role\":\"ASSISTANT\",\"text\":\"answer\","
+                + "\"thinkingText\":\"think\","
                 + "\"toolCalls\":[{\"id\":\"c1\",\"name\":\"now\",\"argumentsJson\":\"{}\"}]},"
-                + "{\"id\":\"m2\",\"role\":\"TOOL_RESULT\",\"text\":\"12:00\",\"toolCallId\":\"c1\"}]}";
+                + "{\"type\":\"message\",\"id\":\"m2\",\"role\":\"TOOL_RESULT\",\"text\":\"12:00\","
+                + "\"toolCallId\":\"c1\"}]}";
 
         AgentSession session = AgentSessionCodec.decodeSession(json);
 

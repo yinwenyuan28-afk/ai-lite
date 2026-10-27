@@ -19,10 +19,37 @@ public final class LlmRequest {
     private final Integer connectTimeoutMs;
     private final Integer readTimeoutMs;
     private final Map<String, Object> extraBody;
+    /** 本次调用的输出 token 上限覆盖；null 表示沿用模型配置。 */
+    private final Integer maxTokens;
+    /** 类型化增量通道；null 表示退回无类型的 onDelta。 */
+    private final LlmDeltaSink deltaSink;
 
     public LlmRequest(ResolvedModel model, List<LlmMessage> messages, List<LlmTool> tools,
                       boolean stream, Consumer<String> onDelta, LlmCancelHandle cancel,
                       Integer connectTimeoutMs, Integer readTimeoutMs, Map<String, Object> extraBody) {
+        this(model, messages, tools, stream, onDelta, cancel, connectTimeoutMs, readTimeoutMs,
+                extraBody, null, null);
+    }
+
+    /**
+     * @param maxTokens 输出 token 上限覆盖；null 表示沿用模型配置
+     */
+    public LlmRequest(ResolvedModel model, List<LlmMessage> messages, List<LlmTool> tools,
+                      boolean stream, Consumer<String> onDelta, LlmCancelHandle cancel,
+                      Integer connectTimeoutMs, Integer readTimeoutMs, Map<String, Object> extraBody,
+                      Integer maxTokens) {
+        this(model, messages, tools, stream, onDelta, cancel, connectTimeoutMs, readTimeoutMs,
+                extraBody, maxTokens, null);
+    }
+
+    /**
+     * @param maxTokens  输出 token 上限覆盖；null 表示沿用模型配置
+     * @param deltaSink  类型化增量通道；非 null 时传输层不再推 {@code "\n\n"} 分隔符
+     */
+    public LlmRequest(ResolvedModel model, List<LlmMessage> messages, List<LlmTool> tools,
+                      boolean stream, Consumer<String> onDelta, LlmCancelHandle cancel,
+                      Integer connectTimeoutMs, Integer readTimeoutMs, Map<String, Object> extraBody,
+                      Integer maxTokens, LlmDeltaSink deltaSink) {
         this.model = model;
         this.messages = messages == null ? Collections.<LlmMessage>emptyList() : messages;
         this.tools = tools;
@@ -32,6 +59,8 @@ public final class LlmRequest {
         this.connectTimeoutMs = connectTimeoutMs;
         this.readTimeoutMs = readTimeoutMs;
         this.extraBody = extraBody == null ? Collections.<String, Object>emptyMap() : extraBody;
+        this.maxTokens = maxTokens;
+        this.deltaSink = deltaSink;
     }
 
     public ResolvedModel getModel() {
@@ -74,6 +103,30 @@ public final class LlmRequest {
 
     public Map<String, Object> getExtraBody() {
         return extraBody;
+    }
+
+    /**
+     * @return 本次调用实际使用的输出 token 上限；未覆盖时取模型配置
+     */
+    public int effectiveMaxTokens() {
+        if (maxTokens != null && maxTokens.intValue() > 0) {
+            return maxTokens.intValue();
+        }
+        return model.getMaxTokens();
+    }
+
+    /**
+     * @return 输出 token 上限覆盖值；null 表示未覆盖
+     */
+    public Integer getMaxTokensOverride() {
+        return maxTokens;
+    }
+
+    /**
+     * @return 类型化增量通道；null 表示未启用
+     */
+    public LlmDeltaSink getDeltaSink() {
+        return deltaSink;
     }
 
     /**

@@ -17,6 +17,14 @@ public final class GatewayTestSupport {
     }
 
     public static AiLiteConfig.Llm config(String apiKey) {
+        return config(apiKey, null);
+    }
+
+    /**
+     * @param contextWindow 模型上下文窗口；null 表示不配置（视为未知）
+     * @return 单供应商单模型的测试配置
+     */
+    public static AiLiteConfig.Llm config(String apiKey, Integer contextWindow) {
         AiLiteConfig.Llm llm = new AiLiteConfig.Llm();
         llm.setBizIds(Collections.singletonList("biz"));
 
@@ -25,6 +33,7 @@ public final class GatewayTestSupport {
         model.setReasoning(true);
         model.setInput(Collections.singletonList("text"));
         model.setMaxTokens(Integer.valueOf(4096));
+        model.setContextWindow(contextWindow);
         model.setThinkingLevelMap(Collections.singletonMap("high", "high"));
 
         AiLiteConfig.Provider provider = new AiLiteConfig.Provider();
@@ -45,6 +54,14 @@ public final class GatewayTestSupport {
 
     public static ModelResolver resolver(String apiKey) {
         return new ModelResolver(config(apiKey));
+    }
+
+    /**
+     * @param contextWindow 模型上下文窗口；null 表示不配置
+     * @return 解析器
+     */
+    public static ModelResolver resolver(String apiKey, Integer contextWindow) {
+        return new ModelResolver(config(apiKey, contextWindow));
     }
 
     public static final class FakeTransport implements LlmTransport {

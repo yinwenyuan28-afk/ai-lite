@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Date;
+import java.util.List;
 import java.util.Optional;
 import io.github.yinwenyuan28.ailite.internal.session.AgentSessionStoreSupport;
 
@@ -96,5 +97,26 @@ public final class CachingAgentSessionStore implements AgentSessionStore {
     public boolean exists(String userId, String sessionId) {
         AgentSessionStoreSupport.requireKeys(userId, sessionId);
         return find(userId, sessionId).isPresent();
+    }
+
+    /**
+     * 列举委托给持久存储。
+     *
+     * <p>必须显式委托：{@code AgentSessionStore} 的 default 实现返回空列表，
+     * 不覆盖的话带缓存的部署会"列不出任何会话"。</p>
+     *
+     * @param userId 用户 id
+     * @param offset 跳过条数
+     * @param limit  最多返回条数
+     * @return 摘要列表
+     */
+    @Override
+    public List<AgentSessionSummary> listByUser(String userId, int offset, int limit) {
+        return durable.listByUser(userId, offset, limit);
+    }
+
+    @Override
+    public boolean supportsListing() {
+        return durable.supportsListing();
     }
 }

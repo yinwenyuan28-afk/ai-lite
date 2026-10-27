@@ -18,6 +18,7 @@ public final class LlmCall {
     private final List<LlmMessage> messages;
     private Integer connectTimeoutMs;
     private Integer readTimeoutMs;
+    private Integer maxTokens;
 
     private LlmCall(String bizId, String provider, String modelId, String thinkingLevel, String profile,
                     List<LlmMessage> messages, Integer connectTimeoutMs, Integer readTimeoutMs) {
@@ -72,25 +73,43 @@ public final class LlmCall {
     }
 
     /**
+     * 设置这一次的输出 token 上限。传 null 表示沿用模型配置的 maxTokens。
+     *
+     * <p>存在的理由：压缩摘要需要一个明显小于主调用的上限（{@code summary-max-tokens}），
+     * 而模型配置里只允许一个值。没有这个覆盖，摘要请求可能把整个窗口都用来生成摘要。</p>
+     *
+     * @param maxTokens 输出 token 上限；null 表示不覆盖
+     * @return this
+     */
+    public LlmCall maxTokens(Integer maxTokens) {
+        this.maxTokens = maxTokens;
+        return this;
+    }
+
+    /**
      * 复制调用参数。用于步骤工厂在创建时做快照，避免调用方后续修改
      * {@link #timeouts(Integer, Integer)} 影响已构造的步骤。
      *
      * @return 新的调用参数，消息列表仍为浅拷贝
      */
     public LlmCall copy() {
-        return new LlmCall(bizId, provider, modelId, thinkingLevel, profile, messages,
+        LlmCall copy = new LlmCall(bizId, provider, modelId, thinkingLevel, profile, messages,
                 connectTimeoutMs, readTimeoutMs);
+        copy.maxTokens = maxTokens;
+        return copy;
     }
 
     /**
-     * 复制调用，只替换消息。模型选择、超时保持调用当下的值。
+     * 复制调用，只替换消息。模型选择、超时与 maxTokens 保持调用当下的值。
      *
      * @param messages 新消息列表
      * @return 新的调用参数
      */
     public LlmCall withMessages(List<LlmMessage> messages) {
-        return new LlmCall(bizId, provider, modelId, thinkingLevel, profile, messages,
+        LlmCall copy = new LlmCall(bizId, provider, modelId, thinkingLevel, profile, messages,
                 connectTimeoutMs, readTimeoutMs);
+        copy.maxTokens = maxTokens;
+        return copy;
     }
 
     public String getBizId() {
@@ -123,5 +142,12 @@ public final class LlmCall {
 
     public Integer getReadTimeoutMs() {
         return readTimeoutMs;
+    }
+
+    /**
+     * @return 输出 token 上限覆盖；null 表示沿用模型配置
+     */
+    public Integer getMaxTokens() {
+        return maxTokens;
     }
 }

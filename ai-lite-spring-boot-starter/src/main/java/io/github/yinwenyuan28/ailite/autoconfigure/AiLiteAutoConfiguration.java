@@ -11,6 +11,7 @@ import io.github.yinwenyuan28.ailite.guard.GuardMetrics;
 import io.github.yinwenyuan28.ailite.guard.ProviderGuard;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.internal.llm.AsyncLlmCallLogger;
+import io.github.yinwenyuan28.ailite.internal.assembly.ToolResultTruncator;
 import io.github.yinwenyuan28.ailite.llm.CallbackPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmCallStore;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
@@ -346,8 +347,21 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
     @ConditionalOnMissingBean
     public AgentLoop aiLiteAgentLoop(LlmGateway gateway, ExecutorProvider executor,
             ObjectProvider<CallbackPolicy> callbackPolicy) {
+        // 截断上限在构造期固定：AgentLoop 是无状态执行器，让它每轮读可变配置
+        // 会让并发 run 的行为依赖外部状态。单轮覆盖走 run 的 maxToolResultChars 参数。
+        //
+        // 配置从 BeanFactory 取而不是加方法参数：@Bean 方法是公开签名，
+        // 加参数会被 japicmp 判成"方法被删"（破坏 0.1.7 的二进制兼容）。
+        int maxToolResultChars = 0;
+        try {
+            AiLiteConfig config = beanFactory.getBean(AiLiteConfig.class);
+            maxToolResultChars = ToolResultTruncator.limitFromConfig(config.getContext());
+        } catch (BeansException ex) {
+            // 配置缺席时退化为"不截断"，与旧版行为一致。
+            log.debug("未取到 AiLiteConfig，工具结果截断按关闭处理: {}", ex.getMessage());
+        }
         return new AgentLoop(gateway, executor, null, null, null,
-                callbackPolicy.getIfAvailable());
+                callbackPolicy.getIfAvailable(), maxToolResultChars);
     }
 
     /**

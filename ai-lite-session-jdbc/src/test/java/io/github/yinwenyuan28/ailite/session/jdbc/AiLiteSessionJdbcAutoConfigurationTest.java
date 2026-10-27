@@ -112,6 +112,9 @@ public class AiLiteSessionJdbcAutoConfigurationTest {
         jdbc.execute("CREATE TABLE " + table + " ("
                 + "USER_ID VARCHAR(128) NOT NULL, SESSION_ID VARCHAR(191) NOT NULL,"
                 + "BIZ_ID VARCHAR(128), VERSION BIGINT NOT NULL, MESSAGES_JSON CLOB,"
+                + "TITLE VARCHAR(255), MESSAGE_COUNT INT DEFAULT 0,"
+                + "TOTAL_TOKENS BIGINT DEFAULT 0,"
+                + "COMPACTION_LEASE_UNTIL BIGINT,"
                 + "UPDATED_AT TIMESTAMP, PRIMARY KEY (USER_ID, SESSION_ID))");
     }
 

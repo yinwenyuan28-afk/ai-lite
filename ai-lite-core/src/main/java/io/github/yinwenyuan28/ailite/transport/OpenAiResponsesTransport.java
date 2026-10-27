@@ -145,7 +145,7 @@ public final class OpenAiResponsesTransport implements LlmTransport {
         body.put("model", model.getModelId());
         body.put("stream", true);
         body.put("store", false);
-        body.put("max_output_tokens", Math.max(MIN_OUTPUT_TOKENS, model.getMaxTokens()));
+        body.put("max_output_tokens", Math.max(MIN_OUTPUT_TOKENS, request.effectiveMaxTokens()));
         if (Strings.isNotBlank(instructions)) {
             body.put("instructions", instructions);
         }
@@ -317,14 +317,14 @@ public final class OpenAiResponsesTransport implements LlmTransport {
             if (Strings.isNotEmpty(delta)) {
                 state.beforeContent(request);
                 state.content.append(delta);
-                TransportSupport.emit(request.getOnDelta(), delta);
+                TransportSupport.emitContent(request, delta);
             }
         } else if ("response.reasoning_summary_text.delta".equals(type)
                 || "response.reasoning_text.delta".equals(type)) {
             String delta = TransportSupport.text(event, "delta");
             if (Strings.isNotEmpty(delta)) {
                 state.reasoning.append(delta);
-                TransportSupport.emit(request.getOnDelta(), delta);
+                TransportSupport.emitReasoning(request, delta);
             }
         } else if ("response.output_item.added".equals(type)) {
             JsonNode item = event.path("item");
@@ -420,7 +420,7 @@ public final class OpenAiResponsesTransport implements LlmTransport {
 
         private void beforeContent(LlmRequest request) {
             if (reasoning.length() > 0 && !blankEmitted) {
-                TransportSupport.emit(request.getOnDelta(), "\n\n");
+                TransportSupport.emitSeparator(request);
                 blankEmitted = true;
             }
         }

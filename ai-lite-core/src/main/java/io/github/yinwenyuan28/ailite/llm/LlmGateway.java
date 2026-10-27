@@ -290,6 +290,24 @@ public final class LlmGateway {
     }
 
     /**
+     * 解析本次调用将使用的模型元数据，供编排层做预算判断。
+     *
+     * <p>与真正发请求的区别：只解析、不发请求、不占 guard 许可、不写调用记录。
+     * 编排层需要 {@code contextWindow} 判断是否要压缩，但又不应该为了读一个配置
+     * 去发一次模型调用。</p>
+     *
+     * @param call 调用参数
+     * @return 解析后的模型元数据
+     * @throws LlmCallException 配置缺失或 profile 不存在
+     */
+    public ResolvedModel resolveFor(LlmCall call) {
+        if (call == null) {
+            throw new LlmCallException("调用不能为空");
+        }
+        return resolve(call);
+    }
+
+    /**
      * 只发一轮并带上工具声明，但不执行工具。
      *
      * @param call  调用参数
@@ -313,6 +331,25 @@ public final class LlmGateway {
      */
     public LlmResult round(LlmCall call, List<LlmTool> tools, LlmCancelHandle cancel) {
         return invoke(call, tools, null, MODE_ROUND, false, null, cancel);
+    }
+
+    /**
+     * 只发一轮并带工具声明，同步流式产出增量，并区分推理与正文。
+     *
+     * <p><b>线程契约</b>：增量回调恒在调用方线程上执行（同步传输直接读流）。</p>
+     *
+     * @param call     调用参数
+     * @param tools    工具列表，可为 null
+     * @param sink     类型化增量通道，非 null
+     * @param cancel   取消句柄，可为 null
+     * @return 模型返回
+     */
+    public LlmResult roundByStream(LlmCall call, List<LlmTool> tools, LlmDeltaSink sink,
+                                   LlmCancelHandle cancel) {
+        if (sink == null) {
+            throw new LlmCallException("增量通道不能为空");
+        }
+        return invoke(call, tools, null, MODE_ROUND, true, null, cancel, sink);
     }
 
     /**
@@ -1163,7 +1200,8 @@ public final class LlmGateway {
                 return;
             }
             final LlmRequest request = new LlmRequest(model, transcript, declareTools ? tools : null,
-                    stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(), null);
+                    stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(),
+                    null, call.getMaxTokens());
             final long started = System.currentTimeMillis();
             CompletableFuture<LlmCompletion> future;
             try {
@@ -1332,6 +1370,15 @@ public final class LlmGateway {
 
     private LlmResult invoke(LlmCall call, List<LlmTool> tools, Integer maxRounds, int mode,
                              boolean stream, Consumer<String> onDelta, LlmCancelHandle cancel) {
+        return invoke(call, tools, maxRounds, mode, stream, onDelta, cancel, null);
+    }
+
+    /**
+     * @param deltaSink 类型化增量通道；同步入口专用，异步入口本轮不接（异步流式延后）
+     */
+    private LlmResult invoke(LlmCall call, List<LlmTool> tools, Integer maxRounds, int mode,
+                             boolean stream, Consumer<String> onDelta, LlmCancelHandle cancel,
+                             LlmDeltaSink deltaSink) {
         if (call == null) {
             throw new LlmCallException("调用不能为空");
         }
@@ -1382,7 +1429,8 @@ public final class LlmGateway {
             }
             int round = completed + 1;
             LlmRequest request = new LlmRequest(model, transcript, declareTools ? tools : null,
-                    stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(), null);
+                    stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(),
+                    null, call.getMaxTokens(), deltaSink);
             long started = System.currentTimeMillis();
             LlmCompletion completion;
             // 许可按单次模型调用（每轮）获取（D4）：校验抛出点全部之后（F22），

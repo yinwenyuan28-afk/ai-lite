@@ -25,6 +25,25 @@ ai-lite:
     mode: platform
   session:
     enabled: true
+  # 上下文治理：预算检测 + 自动压缩 + 工具结果截断。
+  # 默认值已自洽（12000 + 2048 < 32768 - 8192）；改这些值要同时满足该不等式，
+  # 否则启动会直接失败并报出三个实际数值。
+  context:
+    enabled: true
+    budget:
+      reserve-tokens: 8192
+    compaction:
+      enabled: true
+      keep-recent-tokens: 12000
+      summary-max-tokens: 2048
+      # 留空表示摘要沿用主调用的供应商与模型；成本敏感时可指向更便宜的模型。
+      # summary-provider: cheap
+      # summary-model: small-model
+      timeout-ms: 60000
+      max-per-run: 3
+    tool-result:
+      enabled: true
+      max-chars: 2000
 
 # 只有显式打开时才会真正发请求，避免 demo 启动就联网。
 ai-lite.demo:

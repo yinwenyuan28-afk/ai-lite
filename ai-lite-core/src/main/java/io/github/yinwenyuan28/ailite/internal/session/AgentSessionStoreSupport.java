@@ -13,6 +13,11 @@ import java.util.Optional;
 
 /**
  * Store 共用校验与消息级 CRUD（读出整包 → 改 list → 带 version 写回）。
+ *
+ * <p><b>消息级 CRUD 必须位置感知</b>：会话条目里有压缩摘要等非消息条目，
+ * 它们夹在消息之间。三个写方法都用 {@link AgentSession#mergeMessages(List)}
+ * 而不是 {@code setMessages(过滤后的列表)}，否则一次 append 就会把所有压缩条目丢掉，
+ * 而且不会有任何报错。</p>
  */
 public final class AgentSessionStoreSupport {
 
@@ -30,7 +35,7 @@ public final class AgentSessionStoreSupport {
             throw new LlmCallException("会话不能为空");
         }
         requireKeys(session.getUserId(), session.getSessionId());
-        AgentSessionCodec.validateMessageIds(session.getMessages());
+        AgentSessionCodec.validateEntryIds(session.getEntries());
     }
 
     static boolean sameUser(AgentSession session, String userId) {
@@ -63,13 +68,14 @@ public final class AgentSessionStoreSupport {
         }
         AgentSession session = store.find(userId, sessionId)
                 .orElseThrow(() -> new LlmCallException("会话不存在"));
-        List<AgentSessionMessage> messages = new ArrayList<AgentSessionMessage>(session.getMessages());
+        List<AgentSessionMessage> messages = session.getMessages();
         for (AgentSessionMessage existing : messages) {
             if (message.getId().equals(existing.getId())) {
                 throw new LlmCallException("会话消息 id 重复");
             }
         }
         messages.add(message);
+        // 位置感知合并：非消息条目（压缩摘要等）保持原位置。
         session.setMessages(messages);
         store.save(session);
     }
@@ -82,7 +88,7 @@ public final class AgentSessionStoreSupport {
         }
         AgentSession session = store.find(userId, sessionId)
                 .orElseThrow(() -> new LlmCallException("会话不存在"));
-        List<AgentSessionMessage> messages = new ArrayList<AgentSessionMessage>(session.getMessages());
+        List<AgentSessionMessage> messages = session.getMessages();
         int index = indexOf(messages, message.getId());
         if (index < 0) {
             throw new LlmCallException("会话消息不存在");
@@ -100,7 +106,7 @@ public final class AgentSessionStoreSupport {
         }
         AgentSession session = store.find(userId, sessionId)
                 .orElseThrow(() -> new LlmCallException("会话不存在"));
-        List<AgentSessionMessage> messages = new ArrayList<AgentSessionMessage>(session.getMessages());
+        List<AgentSessionMessage> messages = session.getMessages();
         int index = indexOf(messages, messageId);
         if (index < 0) {
             throw new LlmCallException("会话消息不存在");

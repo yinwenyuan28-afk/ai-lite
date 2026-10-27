@@ -22,6 +22,13 @@ public class LlmCallException extends RuntimeException {
         OVERLOAD,
         /** 出口熔断开启，guard 快速失败；不可重试（retry 空转只会拖长 OPEN）。 */
         CIRCUIT_OPEN,
+        /**
+         * 上下文超出模型窗口且无法通过压缩解决；不可重试。
+         *
+         * <p>由编排层（{@code AgentSessionLoop}）在发送前估算得出，或压缩失败后抛出。
+         * 不做静默截断/丢历史：静默修改对话历史比报错更难排查。</p>
+         */
+        CONTEXT_OVERFLOW,
         UNKNOWN
     }
 
@@ -108,6 +115,24 @@ public class LlmCallException extends RuntimeException {
             retryAfterMs = retryAfterMillis(retryAfterHeader);
         }
         return new LlmCallException(message, null, Kind.HTTP, Integer.valueOf(statusCode), retryAfterMs);
+    }
+
+    /**
+     * 上下文超限的统一工厂。错误消息里带上估算值与窗口上限，
+     * 便于调用方定位"是历史太长还是单条太大"。
+     *
+     * @param estimatedTokens 估算的输入 token 数
+     * @param limitTokens     允许的上限（contextWindow - reserveTokens）
+     * @param detail          附加说明，例如"压缩已关闭"或"压缩后仍超限"，可为 null
+     * @return 带 {@link Kind#CONTEXT_OVERFLOW} 分类的异常
+     */
+    public static LlmCallException contextOverflow(int estimatedTokens, int limitTokens, String detail) {
+        StringBuilder message = new StringBuilder("上下文超出模型窗口：估算 ")
+                .append(estimatedTokens).append(" tokens，上限 ").append(limitTokens).append(" tokens");
+        if (detail != null && !detail.trim().isEmpty()) {
+            message.append("（").append(detail).append("）");
+        }
+        return new LlmCallException(message.toString(), null, Kind.CONTEXT_OVERFLOW);
     }
 
     /**

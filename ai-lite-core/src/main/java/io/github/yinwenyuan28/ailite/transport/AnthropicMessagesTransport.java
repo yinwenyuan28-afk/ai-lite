@@ -143,7 +143,7 @@ public final class AnthropicMessagesTransport implements LlmTransport {
     private ObjectNode body(LlmRequest request, ResolvedModel model) {
         ObjectNode body = TransportSupport.object();
         body.put("model", model.getModelId());
-        body.put("max_tokens", model.getMaxTokens());
+        body.put("max_tokens", request.effectiveMaxTokens());
         body.put("stream", true);
         String system = systemText(request.getMessages());
         if (Strings.isNotBlank(system)) {
@@ -388,13 +388,13 @@ public final class AnthropicMessagesTransport implements LlmTransport {
                 if (Strings.isNotEmpty(text)) {
                     state.beforeContent(request);
                     state.content.append(text);
-                    TransportSupport.emit(request.getOnDelta(), text);
+                    TransportSupport.emitContent(request, text);
                 }
             } else if ("thinking_delta".equals(deltaType)) {
                 String text = TransportSupport.text(delta, "thinking");
                 if (Strings.isNotEmpty(text)) {
                     state.reasoning.append(text);
-                    TransportSupport.emit(request.getOnDelta(), text);
+                    TransportSupport.emitReasoning(request, text);
                 }
             } else if ("signature_delta".equals(deltaType)) {
                 String signature = TransportSupport.text(delta, "signature");
@@ -484,7 +484,7 @@ public final class AnthropicMessagesTransport implements LlmTransport {
 
         private void beforeContent(LlmRequest request) {
             if (reasoning.length() > 0 && !blankEmitted) {
-                TransportSupport.emit(request.getOnDelta(), "\n\n");
+                TransportSupport.emitSeparator(request);
                 blankEmitted = true;
             }
         }

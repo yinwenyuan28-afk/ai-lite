@@ -57,7 +57,8 @@ public class SessionAdversarialTest {
 
     @Test
     public void messageWithoutRoleIsRejected() {
-        assertThatThrownBy(() -> AgentSessionCodec.decodeMessages("[{\"id\":\"m1\",\"text\":\"x\"}]"))
+        assertThatThrownBy(() -> AgentSessionCodec.decodeMessages(
+                "[{\"type\":\"message\",\"id\":\"m1\",\"text\":\"x\"}]"))
                 .isInstanceOf(LlmCallException.class)
                 .hasMessageContaining("缺少 role");
     }
@@ -65,19 +66,19 @@ public class SessionAdversarialTest {
     @Test
     public void illegalOrLowercaseRoleIsRejected() {
         assertThatThrownBy(() -> AgentSessionCodec.decodeMessages(
-                "[{\"id\":\"m1\",\"role\":\"BOT\",\"text\":\"x\"}]"))
+                "[{\"type\":\"message\",\"id\":\"m1\",\"role\":\"BOT\",\"text\":\"x\"}]"))
                 .isInstanceOf(LlmCallException.class)
                 .hasMessageContaining("role 非法");
         assertThatThrownBy(() -> AgentSessionCodec.decodeMessages(
-                "[{\"id\":\"m1\",\"role\":\"user\",\"text\":\"x\"}]"))
+                "[{\"type\":\"message\",\"id\":\"m1\",\"role\":\"user\",\"text\":\"x\"}]"))
                 .isInstanceOf(LlmCallException.class)
                 .hasMessageContaining("role 非法");
     }
 
     @Test
     public void messageWithoutIdDecodesButStoreRejectsIt() {
-        List<AgentSessionMessage> decoded =
-                AgentSessionCodec.decodeMessages("[{\"role\":\"USER\",\"text\":\"x\"}]");
+        List<AgentSessionMessage> decoded = AgentSessionCodec.decodeMessages(
+                "[{\"type\":\"message\",\"role\":\"USER\",\"text\":\"x\"}]");
         assertThat(decoded).hasSize(1);
         assertThat(decoded.get(0).getId()).isNull();
 
@@ -91,8 +92,8 @@ public class SessionAdversarialTest {
     @Test
     public void duplicateIdsAreRejectedByStoreDespiteCodecAcceptingThem() {
         List<AgentSessionMessage> decoded = AgentSessionCodec.decodeMessages(
-                "[{\"id\":\"same\",\"role\":\"USER\",\"text\":\"a\"},"
-                        + "{\"id\":\"same\",\"role\":\"USER\",\"text\":\"b\"}]");
+                "[{\"type\":\"message\",\"id\":\"same\",\"role\":\"USER\",\"text\":\"a\"},"
+                        + "{\"type\":\"message\",\"id\":\"same\",\"role\":\"USER\",\"text\":\"b\"}]");
         assertThat(decoded).hasSize(2);
 
         InMemoryAgentSessionStore store = new InMemoryAgentSessionStore(10, 60);

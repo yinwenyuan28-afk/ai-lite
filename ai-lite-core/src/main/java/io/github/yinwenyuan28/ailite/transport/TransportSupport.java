@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.yinwenyuan28.ailite.json.AiLiteJson;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmImage;
+import io.github.yinwenyuan28.ailite.llm.LlmRequest;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmUsage;
 import io.github.yinwenyuan28.ailite.util.Strings;
@@ -228,6 +229,51 @@ final class TransportSupport {
     static void emit(java.util.function.Consumer<String> onDelta, String text) {
         if (onDelta != null && Strings.isNotEmpty(text)) {
             onDelta.accept(text);
+        }
+    }
+
+    /**
+     * 推正文增量。有类型化通道时走类型化通道（不推分隔符），否则退回无类型通道。
+     *
+     * @param request 请求
+     * @param text    正文增量
+     */
+    static void emitContent(LlmRequest request, String text) {
+        if (!Strings.isNotEmpty(text)) {
+            return;
+        }
+        if (request.getDeltaSink() != null) {
+            request.getDeltaSink().content(text);
+        } else {
+            emit(request.getOnDelta(), text);
+        }
+    }
+
+    /**
+     * 推推理增量。有类型化通道时走类型化通道，否则退回无类型通道。
+     *
+     * @param request 请求
+     * @param text    推理增量
+     */
+    static void emitReasoning(LlmRequest request, String text) {
+        if (!Strings.isNotEmpty(text)) {
+            return;
+        }
+        if (request.getDeltaSink() != null) {
+            request.getDeltaSink().reasoning(text);
+        } else {
+            emit(request.getOnDelta(), text);
+        }
+    }
+
+    /**
+     * 推推理与正文之间的分隔符。类型化通道下不发——它自己就能表达分段。
+     *
+     * @param request 请求
+     */
+    static void emitSeparator(LlmRequest request) {
+        if (request.getDeltaSink() == null) {
+            emit(request.getOnDelta(), "\n\n");
         }
     }
 

@@ -14,10 +14,18 @@ import java.util.UUID;
 /**
  * 会话线消息。比 LlmMessage 多稳定 id 与可选的 thinking 字段；不存图片。
  * {@code text} 只放可见正文，{@code thinkingText} 单独放推理原文。
+ *
+ * <p>消息是会话条目的一种（{@link AgentSessionEntry}），类型标识为 {@code "message"}。
+ * 这也解释了为什么它没有 createTime：消息的历史顺序由数组位置表达，时间戳不参与判定，
+ * 保留 null 可避免为每轮对话多写一个字段。</p>
  */
-public final class AgentSessionMessage {
+public final class AgentSessionMessage extends AgentSessionEntry {
 
-    private final String id;
+    /**
+     * 类型标识，1.0 后冻结。
+     */
+    public static final String TYPE = "message";
+
     private final LlmRole role;
     private final String text;
     private final String thinkingText;
@@ -28,7 +36,7 @@ public final class AgentSessionMessage {
     private AgentSessionMessage(String id, LlmRole role, String text, String thinkingText,
                                 String thinkingSignature, List<LlmToolCall> toolCalls,
                                 String toolCallId) {
-        this.id = id;
+        super(id, null);
         this.role = role;
         this.text = text == null ? "" : text;
         this.thinkingText = Strings.isBlank(thinkingText) ? null : thinkingText;
@@ -37,6 +45,11 @@ public final class AgentSessionMessage {
                 ? Collections.<LlmToolCall>emptyList()
                 : Collections.unmodifiableList(new ArrayList<LlmToolCall>(toolCalls));
         this.toolCallId = toolCallId;
+    }
+
+    @Override
+    public String type() {
+        return TYPE;
     }
 
     public static AgentSessionMessage system(String text) {
@@ -139,10 +152,9 @@ public final class AgentSessionMessage {
         return UUID.randomUUID().toString();
     }
 
-    public String getId() {
-        return id;
-    }
-
+    /**
+     * @return 消息角色
+     */
     public LlmRole getRole() {
         return role;
     }
