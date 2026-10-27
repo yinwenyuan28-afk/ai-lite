@@ -37,7 +37,11 @@
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
-            <artifactId>ai-lite-admin</artifactId>
+            <artifactId>ai-lite-admin-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-admin-ui</artifactId>
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>

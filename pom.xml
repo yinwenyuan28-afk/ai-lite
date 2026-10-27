@@ -70,7 +70,8 @@
         <module>ai-lite-session-redis</module>
         <module>ai-lite-session-jdbc</module>
         <module>ai-lite-store-jdbc</module>
-        <module>ai-lite-admin</module>
+        <module>ai-lite-admin-api</module>
+        <module>ai-lite-admin-ui</module>
         <module>ai-lite-executor-coroutines</module>
         <module>ai-lite-spring-boot-starter</module>
         <module>ai-lite-demo</module>
@@ -149,7 +150,12 @@
             </dependency>
             <dependency>
                 <groupId>io.github.yinwenyuan28-afk</groupId>
-                <artifactId>ai-lite-admin</artifactId>
+                <artifactId>ai-lite-admin-api</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-admin-ui</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

@@ -1,6 +1,6 @@
 # 管理 API
 
-自带页面不是必须依赖。引入 `ai-lite-admin` 并把 `ai-lite.admin.enabled` 设为 `true` 后，下面这些接口就在应用自己的端口上。自带页面还要再设 `ai-lite.admin.page-enabled: true`，地址是 `GET /ai-lite/admin`。
+自带页面不是必须依赖。引入 `ai-lite-admin-api` 并把 `ai-lite.admin.enabled` 设为 `true` 后，下面这些接口就在应用自己的端口上。若还要自带控制台，再引入 `ai-lite-admin-ui` 并设 `ai-lite.admin.page-enabled: true`，地址是 `GET /ai-lite/admin`。
 
 接口没有口令。不要把打开了管理接口的端口暴露到公网。
 

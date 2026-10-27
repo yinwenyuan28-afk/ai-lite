@@ -127,12 +127,13 @@ profiles:
 
 ### 2.4 目录模式（管理页）
 
-引入 `ai-lite-admin`，并且容器里有 `JdbcTemplate`、目录表和提示词表时，模型列表和业务绑定改由数据库提供。配置文件只留供应商连接信息和业务 id。不引入这个模块时，上面的 `profiles` 和 `providers.*.models` 仍按原规则生效。
+引入 `ai-lite-admin-api`，并且容器里有 `JdbcTemplate`、目录表和提示词表时，模型列表和业务绑定改由数据库提供。配置文件只留供应商连接信息和业务 id。不引入这个模块时，上面的 `profiles` 和 `providers.*.models` 仍按原规则生效。自带控制台另需 `ai-lite-admin-ui`。
 
 ```yaml
 ai-lite:
   admin:
-    enabled: false                 # 默认关闭。打开后在应用端口注册 /ai-lite/admin
+    enabled: false                 # 默认关闭。打开后在应用端口注册 /ai-lite/admin/api/**
+    page-enabled: false            # 另需引入 ai-lite-admin-ui；为 true 时提供 GET /ai-lite/admin
   catalog:
     cache-seconds: 5
     provider-table: AI_LITE_PROVIDER_OVERLAY
@@ -157,7 +158,7 @@ ai-lite:
 | `catalog.model-table` | `AI_LITE_MODEL` | 从 `GET {baseUrl}/models` 增量同步，或手工添加 |
 | `catalog.biz-table` | `AI_LITE_BIZ_BINDING` | 一个业务 id 对应一个供应商、模型和思考档 |
 
-建表脚本是 `ai-lite-admin/src/main/resources/ai-lite-catalog.sql`。提示词仍用 `ai-lite-prompt.sql`，调用日志仍用 `ai-lite-llm-call.sql`。
+建表脚本是 `ai-lite-admin-api/src/main/resources/ai-lite-catalog.sql`。提示词仍用 `ai-lite-prompt.sql`，调用日志仍用 `ai-lite-llm-call.sql`。
 
 目录模式下的规则：
 

@@ -7,7 +7,7 @@
 
 ### 新增
 
-- **管理页与业务热配置**：新增可选模块 `ai-lite-admin`。`ai-lite.admin.enabled` 打开管理 API，供自有前端接入；自带页面另由 `ai-lite.admin.page-enabled` 打开，默认关闭。同步模型只列出远端 id，用户勾选后才加入，删除只能由用户发起。调用记录增加输入输出档位：不记、只记失败、全部记录。
+- **管理页与业务热配置**：新增可选模块 `ai-lite-admin-api`（JDBC 目录 + 管理 REST）与 `ai-lite-admin-ui`（自带控制台）。`ai-lite.admin.enabled` 打开管理 API，供自有前端接入；自带页面需额外引入 ui 模块并由 `ai-lite.admin.page-enabled` 打开，默认关闭。同步模型只列出远端 id，用户勾选后才加入，删除只能由用户发起。调用记录增加输入输出档位：不记、只记失败、全部记录。
 - 目录模式下，配置文件只声明供应商和 `biz-ids`。一个业务 id 对应一份提示词（key 就是业务 id）和一条模型绑定，存在数据库里，写入后清本机缓存。同步只插入新模型 id（未就绪），不覆盖已有能力参数，也不删除接口里已经消失的 id。
 - **`LlmCall.biz(bizId, messages)`**：目录生效且这次调用没有指定 profile 和模型时，按绑定解析。没有绑定时报「业务未配置模型」，不再回退 `default-profile`。目录模式下未发布提示词时报「提示词未发布」。不引入该模块时，原有 `profiles` / `models` 路径不变。
 - **API 兼容性门禁**：接入 `japicmp-maven-plugin`，`mvn verify -Pcontract-check` 会拿当前产物与上一个发布版（`ai-lite.properties` 里的 `ai-lite.release.version`）做二进制签名比对。删除 public 方法、修改参数类型、把类降级为包内可见都会让构建失败。`.internal` 包已排除，内部实现可自由重构。已做反向验证：删掉 `LlmResult.getRawContent()` 后构建变红并准确报出 `REMOVED METHOD`。

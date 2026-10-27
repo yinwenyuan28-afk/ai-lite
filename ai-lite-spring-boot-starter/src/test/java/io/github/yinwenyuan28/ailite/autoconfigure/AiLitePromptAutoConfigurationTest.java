@@ -8,6 +8,7 @@ import io.github.yinwenyuan28.ailite.prompt.PromptVersion;
 import io.github.yinwenyuan28.ailite.prompt.RenderedPrompt;
 import org.junit.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -24,6 +25,9 @@ public class AiLitePromptAutoConfigurationTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(AiLitePromptAutoConfiguration.class))
+            // 测试类路径上有 prompt-jdbc，过滤后才走内存存储分支
+            .withClassLoader(new FilteredClassLoader(
+                    "io.github.yinwenyuan28.ailite.prompt.jdbc.JdbcPromptStore"))
             .withPropertyValues(
                     "ai-lite.prompt.cache-seconds=0",
                     "ai-lite.prompt.keys[0].key=resume-parse",
