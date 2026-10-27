@@ -263,7 +263,8 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [HTTP 传输层原理](docs/desc-HTTP传输.md)：三层职责切分、六种传输的线程模型、SSE 逐行解析、取消怎么贯穿到 socket、并发上限的真正决定者。
 - [重试边界](docs/desc-重试.md)：重试口径的唯一权威——可重试分类、策略参数、异步重试的线程与取消、自定义重试怎么接。
 - [用户级线程实现](docs/desc-用户级线程.md)：JDK 21 虚拟线程与 Kotlin 协程桥接的实现原理、ThreadLocal 传递、取消链。
-- [Agent Loop 发给 LLM 的上下文](docs/desc-AgentLoop上下文.md)：Agent 循环每轮实际发出去的请求体——上下文组成、协议差异、什么不进上下文。
+- [Agent Loop 发给 LLM 的上下文](docs/desc-AgentLoop上下文.md)：Agent 循环每轮实际发出去的请求体——上下文组成、协议差异、工具结果截断、流式增量分流、什么不进上下文。
+- [上下文治理](docs/desc-上下文治理.md)：会话历史怎么变成"这一轮真正发出去的消息"——投影、预算、自动压缩，以及为什么保留原始而不原地替换。
 
 **速查（跨类工具书）**
 
@@ -281,6 +282,8 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [夯实回调执行策略](docs/plan/夯实回调执行策略-plan.md)：用户回调与 Agent 钩子的串行执行、队列/取消。
 - [夯实可观测性](docs/plan/夯实可观测性-plan.md)：Micrometer 指标出口。
 - [夯实限流熔断](docs/plan/夯实限流熔断-plan.md)：出口保护（并发限流、熔断、Retry-After、多 key 轮换）的设计与审查记录。
+- [夯实 Agent 运行时能力](docs/plan/夯实Agent运行时能力-plan.md)：typed entries、上下文预算与自动压缩、工具结果截断、同步流式、用量记账、会话列举的实现记录——含三处"静默丢压缩条目"缺陷的定位、T3-G 往返门禁，以及实施中另外发现的四个缺陷。
+- [夯实对外契约冻结](docs/plan/夯实对外契约冻结-plan.md)：API 稳定性审计、`.internal` 包边界、SPI 演化承诺与 japicmp 门禁。
 - [测试索引](docs/testing/测试索引.md)：按主题索引全部对抗性测试设计；另有[异步重试测试用例](docs/testing/异步重试测试用例.md)（oneWithRetryAsync 的 55 条验收清单）与[网关](docs/testing/网关异步对抗性测试设计.md)、[AgentLoop](docs/testing/AgentLoop异步对抗性测试设计.md)、[SessionLoop](docs/testing/SessionLoop异步对抗性测试设计.md)三篇对抗性测试设计。
 
 **基准**

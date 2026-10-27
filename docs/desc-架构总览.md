@@ -12,6 +12,7 @@
 | HTTP 传输层 | [HTTP客户端使用指南](guide-HTTP客户端.md) | [HTTP传输层原理](desc-HTTP传输.md)、[HTTP传输并发选型评估](plan/HTTP传输并发选型评估.md)（调研留档）、本文 §5 |
 | 网关层 | [单次模型调用入口](desc-单次调用.md)、[重试边界](desc-重试.md) | 本文 §4–§5、[用户级线程实现说明](desc-用户级线程.md) |
 | 编排层 | [Workflow异步执行器使用指南](guide-Workflow异步执行器.md) | [AgentLoop上下文说明](desc-AgentLoop上下文.md)、本文 §6 |
+| 会话层 | [上层调用API使用指南](guide-上层调用API.md) §5 | [上下文治理](desc-上下文治理.md)、本文 §8 |
 | 横切（配置/观测） | [配置参考](ref-配置.md) | 本文 §10–§11 |
 
 ---
@@ -529,14 +530,22 @@ flowchart TD
 每一轮发给模型的消息由以下部分组成：
 
 1. 调用方传入的 system / user 消息；
-2. 会话历史（续聊时）；
+2. 会话历史（续聊时，**已按上下文治理规则投影**）；
 3. 本次循环内模型返回的 assistant 消息（含 tool calls）；
-4. 工具执行结果（`tool_result`）；
+4. 工具执行结果（`tool_result`，**已按上限截断**）；
 5. `beforeModel` 钩子对消息和工具名单的修改。
 
 `text` 与 `thinkingText` 是独立字段。同一轮工具循环内，assistant 消息会把 thinking 一起带回下一轮（协议支持时）。跨 `resume` 的会话历史默认 `includeThinking=false`，即持久化的 thinking 不重新发送；需要时调用 `AgentSession.toLlmMessages(true)`。
 
-图片、协议细节和上下文增长示例见 [desc-AgentLoop上下文.md](desc-AgentLoop上下文.md)。
+续聊时第 2 项不是"数据库里的全部历史"，而是投影结果：
+
+```text
+前缀区（开头连续 SYSTEM，永不压缩）
++ [最后一条 CompactionEntry 的摘要作为一条 SYSTEM]
++ firstKeptEntryId 之后的全部消息
+```
+
+投影、预算检测、压缩的完整规则见 [上下文治理](desc-上下文治理.md)。图片、协议细节和上下文增长示例见 [desc-AgentLoop上下文.md](desc-AgentLoop上下文.md)。
 
 ---
 
@@ -544,44 +553,73 @@ flowchart TD
 
 ### 8.1 模型
 
-- `AgentSession`：`userId + sessionId` 唯一，`version` 为乐观锁版本。
+会话是**带类型的条目流**，不是”一串消息”：
+
+```java
+AgentSession
+  ├─ getEntries()  → List<AgentSessionEntry>    全量（message / compaction / session_info / usage）
+  └─ getMessages() → List<AgentSessionMessage>  只读过滤视图，只返 message
+```
+
+- `AgentSession`：`userId + sessionId` 唯一，`version` 为乐观锁版本，另有 `totalTokens` / `title` 派生字段。
 - `AgentSessionMessage`：稳定 `id`、role、可见正文、thinking、tool calls、tool call id。
-- `AgentSessionCodec`：会话快照的编解码，兼容可选 thinking 字段。
+- `CompactionEntry`：压缩摘要 + 保留区起点（`firstKeptEntryId`）。
+- `SessionInfoEntry` / `UsageEntry`：会话元信息与单轮用量，不进上下文。
+- `AgentSessionCodec`：按 `type` 注册表分发。**未知 type 跳过**（向前兼容），**缺 type 抛异常**（不兼容 0.1.x 纯消息数组）。
+
+`getMessages()` 的签名与语义保持不变（二进制兼容），内部改为过滤。写消息必须走 `setMessages(...)`，它按 **id 对齐**合并，非消息条目保持原位——按位置对齐会在删除中间消息时把后续消息挤过压缩条目，破坏前缀区判定。
 
 ### 8.2 续聊流程
 
 ```text
 prepare:
   find(user, session)
-  + newUserTurns
+  + newUserTurns（按 id 幂等去重）
   -> 校验 message id 唯一
+  -> 投影：前缀区 + [摘要] + firstKept 之后
+  -> 追加本轮新消息
+  -> 估算 token；超线则压缩（可能改写投影）
   -> 转成 LlmMessage
   -> 追加内置 SessionRecorder
 
 run:
-  AgentLoop.runAsync(...)
+  AgentLoop.run / runAsync
 
 finish:
   ABORTED -> 直接返回旧快照，不落盘
   其他    -> recorder 结果合并进 pending
+          -> copyOf + mergeMessages（不重建对象，否则丢压缩条目）
+          -> 追加 UsageEntry、累计 totalTokens、推导 title
           -> save(version)
           -> find 读回新快照
 ```
 
 - 取消或异常不会落半截：`finish` 只在循环正常结束时执行。
-- `save` 使用版本条件更新；同一会话并发续聊会抛“会话版本冲突”，由调用方决定重试还是让用户重发。
+- `save` 使用版本条件更新；同一会话并发续聊会抛”会话版本冲突”，由调用方决定重试还是让用户重发。
 - `SessionRecorder` 把每轮 assistant 与 tool result 转成会话消息；前面 hook 拒绝工具时，它会在 `afterTurn` 从 `ctx` 补齐缺失的 tool result。
+- **`finish` 绝不能用 `new AgentSession()` 重建对象**：那样只会带走消息，压缩条目每轮都会被丢弃。
+
+投影与压缩的完整规则见 [上下文治理](desc-上下文治理.md)。
 
 ### 8.3 存储实现
 
 | 模块 | 能力 |
 | --- | --- |
-| `InMemoryAgentSessionStore` | 有界、带 TTL，默认实现 |
-| `CachingAgentSessionStore` | 持久层 + `SessionCache`，缓存不承担版本校验 |
+| `InMemoryAgentSessionStore` | 有界、带 TTL，默认实现；支持列举与压缩租约 |
+| `CachingAgentSessionStore` | 持久层 + `SessionCache`，缓存不承担版本校验；**显式委托** `listByUser` |
 | `ai-lite-session-redis` | Redis 快照缓存，坏 JSON 按 miss 处理 |
-| `ai-lite-session-jdbc` | `JdbcTemplate` 持久化，版本条件更新，表名可配置 |
+| `ai-lite-session-jdbc` | `JdbcTemplate` 持久化，版本条件更新，表名可配置；支持列举与租约 |
+
+`AgentSessionStore` 已有 8 个方法：4 个抽象（`find`/`save`/`delete`/`exists`）+ 4 个消息级 default，另加两组 A 组新增的 default：
+
+| 能力 | 方法 | 默认行为 |
+| --- | --- | --- |
+| 会话列举 | `listByUser(userId, offset, limit)`、`supportsListing()` | 返回空列表 / `false`（不抛异常，旧实现升级后仍能启动） |
+| 压缩租约 | `tryAcquireCompaction(...)`、`releaseCompaction(...)` | 恒返回 `true` / 空操作（单机不做限制） |
 
 JDBC 自动装配在 `JdbcTemplateAutoConfiguration` 之后、`AiLiteSessionAutoConfiguration` 之前，保证存在 `JdbcTemplate` 时替换默认内存存储。
+
+**JDBC 读写必须对称**：`save` 写全量条目，`RowMapper` 也必须用 `decodeEntries` 读。实施时曾出现”写全量、读只取消息”，压缩条目读回来就消失。
 
 ---
 

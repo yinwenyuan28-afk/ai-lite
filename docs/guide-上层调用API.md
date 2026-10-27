@@ -1,6 +1,6 @@
 # 上层调用 API 使用指南
 
-> 适用版本：0.1.7
+> 适用版本：0.1.8
 > 目标读者：业务开发、平台接入方、需要替换 SPI 实现的团队
 > **本文在哪一层**：横切层——入门入口 + 全层 API 字典（网关、Agent 编排、会话、提示词、并发执行器、扩展点各占一节）。
 > **讲什么**：每个 API 怎么调、参数是什么、稳定性约定。想理解调用内部发生什么，看对应层的专题文档（单次调用 → [单次模型调用入口](desc-单次调用.md)）。
@@ -52,6 +52,10 @@ mvn verify -Pcontract-check
 
 这条检查默认不激活（SNAPSHOT 开发期 API 本就在演化），发布流程里必跑。
 
+**一处已知豁免**：`AgentSessionStore` 整类被排除。原因是 japicmp 0.15.7 把"接口新增方法"一律判为二进制不兼容，不区分是否给了 `default` 实现；而它的 excludes 只支持类级匹配，不支持 `类#方法` 形式。这与 A 组承诺（只允许新增 default 方法，Java 8 下对既有实现类二进制兼容）冲突。
+
+代价与补偿：排除整类后，"删抽象方法"这类真破坏不会被该插件发现。补偿手段是编译期（4 个抽象方法必须被实现）+ 测试断言（三个 default 方法的默认语义：`supportsListing()` 为 `false`、`listByUser` 返回空、`tryAcquireCompaction` 返回 `true`）。1.0 冻结时若升级到支持方法级 exclude 的版本，应换回精确豁免。
+
 ---
 
 ## 2. 快速开始
@@ -62,7 +66,7 @@ mvn verify -Pcontract-check
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-spring-boot-starter</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.8</version>
 </dependency>
 ```
 
@@ -708,6 +712,21 @@ AgentSessionLoop.ResumeResult result = sessionLoop.resume(userId, sessionId, cal
 
 `AgentSession` 是可变对象，不是线程安全的；把它当快照使用。
 
+### 5.2.1 条目类型
+
+| 类型 | 类 | 关键字段 | 进上下文 |
+| --- | --- | --- | --- |
+| `message` | `AgentSessionMessage` | `role`、`text`、`thinkingText`、`toolCalls`、`toolCallId` | 是 |
+| `compaction` | `CompactionEntry` | `summary`、`firstKeptEntryId`、`tokensBefore`、`summaryModel`、`summaryTokens` | 只把 `summary` 作为一条 SYSTEM 注入 |
+| `session_info` | `SessionInfoEntry` | `name` | 否 |
+| `usage` | `UsageEntry` | `kind`、`provider`、`model`、`inputTokens`、`outputTokens`、`totalTokens` | 否 |
+
+`CompactionEntry` 表示"从 `firstKeptEntryId` 之前的历史已被摘要替代"。原始消息一条都不删——条目流里可能同时有多条压缩记录，投影只认最后一条。
+
+`UsageEntry.KIND_CHAT` / `KIND_COMPACTION` 区分常规轮次与摘要调用。
+
+投影与压缩的完整规则见 [上下文治理](desc-上下文治理.md)。
+
 ### 5.3 `AgentSessionMessage`
 
 | 工厂 | 说明 |
@@ -732,6 +751,38 @@ AgentSessionLoop.ResumeResult result = sessionLoop.resume(userId, sessionId, cal
 | `getToolCalls()` | 工具调用列表 |
 | `getToolCallId()` | 工具结果对应的调用 id |
 | `splicedText()` | 调试用：把思考文本和正文拼回 `thinking + "\n\n" + text` |
+
+### 5.3.1 `ResumeOptions`
+
+`AgentSessionLoop.resume(userId, sessionId, call, options)` 的参数对象。不可变，用 `builder()` 构造。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `tools` | 空列表 | 本轮可用工具 |
+| `lifecycles` | 空列表 | 调用方钩子，内置 `SessionRecorder` 总排在其后 |
+| `maxRounds` | `null`（=8） | 最大轮数，必须大于 0 |
+| `cancel` | `null` | 取消句柄，一次性对象，原样传递 |
+| `newUserTurns` | 空列表 | 本轮新增消息；与已有条目 id 相同的会被跳过（幂等重试安全） |
+| `timeoutMs` | `null` | 整轮超时；**仅异步入口支持**，同步传入会抛异常 |
+| `maxToolResultChars` | `null` | 工具结果上限三态：`null` 跟随配置 / `0` 不限 / 正数覆盖 |
+| `deltaListener` | `null` | 同步流式回调；**仅同步入口支持**，异步传入会抛异常 |
+
+两个"仅某入口支持"的字段都是显式抛异常而不是静默忽略——静默忽略会让调用方误以为有时间保护或会收到增量。
+
+### 5.3.2 `AgentSessionSummary`
+
+`listByUser` 的返回元素，只读：
+
+| 成员 | 说明 |
+| --- | --- |
+| `getUserId()` / `getSessionId()` / `getBizId()` | 会话标识 |
+| `getTitle()` | 会话标题，可为 `null` |
+| `getMessageCount()` | 消息条目数（不含压缩/用量条目） |
+| `getTotalTokens()` | 累计 token，与 `AgentSession.getTotalTokens()` 一致 |
+| `getUpdatedAt()` | 最后更新时间 |
+| `AgentSessionSummary.of(session)` | 从完整会话构造 |
+
+只返回摘要而不是完整 `AgentSession`，是为了让"列出我的会话"的开销与消息体量解耦——单个会话的 `MESSAGES_JSON` 可能达到 MB 级。
 
 ### 5.4 `AgentSessionStore`
 
@@ -1233,6 +1284,22 @@ LlmGateway gateway = new LlmGateway(
 | `CompletionException` | Kotlin `await()` 可能包装 | 需要时解包 `cause` |
 | `CancellationException` | future 被取消 | 按取消处理，不要当业务失败 |
 
+`LlmCallException.getKind()` 给出结构化分类，不要解析错误消息字符串：
+
+| `Kind` | 含义 | 可重试 |
+| --- | --- | --- |
+| `CONFIG` | 配置错误（未登记 biz-id、模型缺失等） | 否 |
+| `TRANSPORT` | 传输失败（连接、超时等） | 是 |
+| `HTTP` | 非 2xx 响应；`getStatusCode()` 给状态码 | 408/429/5xx 可重试 |
+| `PARSE` | 响应解析失败 | 否 |
+| `CANCELLED` | 被取消 | 否 |
+| `OVERLOAD` | 本框架过载保护（回调队列满等） | 否 |
+| `CIRCUIT_OPEN` | 出口熔断快速失败 | 否（重试只会拖长 OPEN） |
+| `CONTEXT_OVERFLOW` | 上下文超窗口且无法压缩 | 否（需业务裁剪历史或调大窗口） |
+| `UNKNOWN` | 未分类 | 视根因而定 |
+
+`CONTEXT_OVERFLOW` 的错误消息里带估算值与上限（以及失败原因，如"自动压缩已关闭"或"压缩后仍超限"），便于定位是历史太长还是单条太大。
+
 停止原因不是异常：`ABORTED`、`MAX_ROUNDS`、`LENGTH` 都通过 `LlmResult.getStopReason()` 返回。
 
 ---
@@ -1391,12 +1458,16 @@ public final class MyTransport implements LlmTransport {
 | `LlmCallException` | core | 调用异常 |
 | `Workflow` / `WorkflowSpec` | core | 简单步骤组合 |
 | `AgentLoop` / `AgentLifecycle` / `AgentLoopContext` | core | 完整工具循环与生命周期 |
+| `AgentDeltaListener` / `DeltaKind` | core | 同步流式增量回调与类型 |
 | `AgentModelOutput` / `AgentToolCall` / `ToolDecision` / `TurnDecision` | core | 生命周期入参/决策 |
 | `AgentSpec` / `Assembly` | core | 业务组织接口 |
 | `AgentSession` / `AgentSessionMessage` / `AgentSessionCodec` | core | 会话模型 |
+| `AgentSessionEntry` / `CompactionEntry` / `SessionInfoEntry` / `UsageEntry` | core | 会话条目类型 |
+| `AgentSessionSummary` | core | 会话列举用的只读摘要 |
 | `AgentSessionStore` / `SessionCache` | core | 会话存储 SPI |
-| `AgentSessionLoop` | core | 续聊入口 |
+| `AgentSessionLoop` / `ResumeOptions` | core | 续聊入口与参数收敛 |
 | `InMemoryAgentSessionStore` / `InMemorySessionCache` / `CachingAgentSessionStore` | core | 内置会话存储 |
+| `LlmStopReason` / `LlmUsage` | core | 停止原因与用量 |
 | `PromptManager` / `PromptCatalog` / `PromptKey` / `PromptVersion` / `PromptTemplate` / `RenderedPrompt` | prompt | 提示词中心 |
 | `PromptStore` / `InMemoryPromptStore` | prompt | 提示词存储 SPI/默认实现 |
 | `PromptStatus` / `PromptAudit` / `PromptActions` / `PromptException` | prompt | 提示词状态与异常 |

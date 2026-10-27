@@ -1,6 +1,6 @@
 # Agent Loop 发给 LLM 的上下文
 
-> 适用版本：0.1.7
+> 适用版本：0.1.8
 > 相关代码：`AgentLoop`、`LlmGateway`、三个协议适配器、`LlmMessage`、`LlmResult`
 > **本文在哪一层**：编排层（Agent 循环与网关的交界）。
 > **讲什么**：AgentLoop 每一轮实际发给模型的请求体长什么样——上下文组成、三种协议的序列化差异、工具循环后上下文怎么增长、什么不会进上下文。
@@ -369,6 +369,44 @@ thinking 回传规则：
 
 每轮发送的是**完整转录**。LLM API 是无状态的，不能只发增量。
 
+### 4.1 工具结果会被截断
+
+单条工具结果超过上限时，在**写回上下文之前**就被截断，并追加标记：
+
+```text
+…[输出过长已截断，原始 12345 字符，保留前 2000]
+```
+
+顺序固定为：`execute → 截断 → afterTool 钩子 → 写回上下文`。
+
+**为什么截断必须在钩子之前**：`AgentSessionLoop` 的 `SessionRecorder` 本身就是 `afterTool` 钩子，它记录的内容就是最终落盘内容。如果截断放在钩子之后，钩子记下原文、落盘也是原文，截断等于白做。
+
+上限来源两处，单轮覆盖优先：
+
+| 来源 | 说明 |
+| --- | --- |
+| `ai-lite.context.tool-result.max-chars` | 全局默认（`AgentLoop` 构造期固定） |
+| `AgentLoop.run/runStream/runAsync` 的 `maxToolResultChars` | 单轮覆盖：`null` 跟随配置，`0` 不限，正数覆盖 |
+
+覆盖串行、并行、异步三条写回路径，行为一致。
+
+**已知边界**：`afterTool` 钩子改写后的文本**不再截断**。钩子是调用方的明确意图，框架不二次裁剪调用方产出的内容。
+
+### 4.2 流式增量按类型分流
+
+`AgentLoop.runStream` 的增量回调带类型（`DeltaKind`）：
+
+| 类型 | 拼接结果 | 说明 |
+| --- | --- | --- |
+| `CONTENT` | == `LlmResult.getContent()` | 可见正文 |
+| `REASONING` | == `LlmResult.getThinkingText()` | 推理原文 |
+
+**为什么必须区分类型**：传输层会把 reasoning 与正文推进同一条无类型回调，并在两者之间插入一个 `"\n\n"` 分隔符。若只有一个 `Consumer<String>`，调用方无法判断"这段该显示在思考区还是正文区"，而且"所有增量拼起来等于 content"这个断言在推理模型上必然不成立。
+
+类型化通道（`LlmDeltaSink`）存在时，传输层不再推分隔符；否则退回旧的无类型通道，旧行为完全不变。
+
+线程契约：同步流式的增量恒在调用方线程。异步入口本轮不支持流式。
+
 ---
 
 ## 5. 哪些东西不会进入 LLM 上下文
@@ -437,6 +475,7 @@ thinking 回传规则：
    - Anthropic：只有同时有 thinking 和 signature 才回传 thinking block。
    - Responses：不回传 thinking。
 4. 会话 JSON 新增可选字段 `thinkingSignature`，旧数据不受影响。
+5. **0.1.8 起会话 JSON 是带 `type` 的条目数组**，0.1.x 的纯消息数组读不了（`type` 缺失直接抛异常）。这是刻意的：项目尚未正式使用，不做老数据兼容，以免留下"两套格式都读"的长期负担。
 
 ---
 
@@ -454,3 +493,9 @@ thinking 回传规则：
 | Anthropic 序列化 | `ai-lite-core/src/main/java/.../transport/AnthropicMessagesTransport.java` |
 | 会话消息模型 | `ai-lite-core/src/main/java/.../session/AgentSessionMessage.java` |
 | 会话编解码 | `ai-lite-core/src/main/java/.../session/AgentSessionCodec.java` |
+| 投影与预算 | `ai-lite-core/src/main/java/.../session/AgentSessionLoop.java`（`projectEntries` / `enforceBudget`） |
+| 压缩实现 | `ai-lite-core/src/main/java/.../internal/session/SessionCompactor.java` |
+| token 估算 | `ai-lite-core/src/main/java/.../util/TokenEstimator.java` |
+| 工具结果截断 | `ai-lite-core/src/main/java/.../internal/assembly/ToolResultTruncator.java` |
+
+更完整的上下文治理规则（前缀区、切点、分块、租约）见 [上下文治理](desc-上下文治理.md)。

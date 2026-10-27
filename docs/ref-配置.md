@@ -101,7 +101,7 @@ models:
 | `id` | 供应商侧模型名 |
 | `reasoning` | 是否支持推理；false 时思考档一律为 off |
 | `input` | 入参类型，含 `image` 才会校验并通过图片 |
-| `context-window` | 上下文窗口，0 表示未知 |
+| `context-window` | 上下文窗口，0 表示未知。**0.1.8 起真正参与预算检测**：触发线 = 本值 - `ai-lite.context.budget.reserve-tokens`；未配置或 0 时跳过全部预算检查与压缩 |
 | `max-tokens` | 输出上限 |
 | `thinking-format` | `reasoning-effort`（默认）、`chat-template`、`deepseek`、`none`、`anthropic-budget`、`anthropic-adaptive` |
 | `thinking-level-map` | 业务档 → 供应商档；value 为 null 表示不支持 |
@@ -323,7 +323,7 @@ http:
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-okhttp-jdk21</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.8</version>
 </dependency>
 ```
 
@@ -342,7 +342,7 @@ Jetty 作为跨 Boot 2.1/2.7 的 NIO 主路径：
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-jetty</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.8</version>
 </dependency>
 ```
 
@@ -364,7 +364,7 @@ WebClient（真实响应式栈，适合已经使用 WebFlux 的项目）：
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-webclient</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.8</version>
 </dependency>
 ```
 
@@ -385,7 +385,7 @@ Ktor CIO（Kotlin 项目，JDK 8 可用）：
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-ktor-cio</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.8</version>
 </dependency>
 ```
 
@@ -501,9 +501,28 @@ context:
 **三组独立开关的理由**：拆成 `budget` / `compaction` / `tool-result` 才能表达
 "只要截断、不要压缩"这类组合。
 
+**`enabled` 与 `compaction.enabled` 是两个不同的开关**：
+
+| `context.enabled` | `compaction.enabled` | 行为 |
+| --- | --- | --- |
+| `false` | 任意 | 不做预算检查；投影**仍应用**已有的压缩条目 |
+| `true` | `false` | 做预算检查，超限抛 `CONTEXT_OVERFLOW`；投影**忽略**压缩条目，回到完整历史 |
+| `true` | `true` | 全功能（默认） |
+
+分开是因为前者表示"我不想要预算判断"，后者表示"我不想要压缩改我的历史"。
+混用一个开关会出现"关掉预算判断时历史突然变长"这种意外。
+
+**`estimator` 目前只有 `chars-weighted` 一个实现**。配置成其他值会在启动期报错，
+不静默回退——否则调用方会误以为换成了别的算法。
+
+**`tool-result.max-chars` 可被单轮覆盖**：`ResumeOptions.maxToolResultChars` 的三态是
+`null` 跟随本配置、`0` 本轮不限、正数本轮覆盖。
+
 **估算精度**：按字符类型加权（ASCII 0.25、中文 0.6 tokens/字符）。这是一个
 中文为主的库，常见的"字符数 / 2.5"对中文低估 40%~60%，会让压缩判断失效。
 精确 token 数以供应商返回的 usage 为准，估算只用于判断"该不该压缩"。
+
+投影、切点、分块与租约的完整机制见 [上下文治理](desc-上下文治理.md)。
 
 ## 6. 提示词 `ai-lite.prompt`
 
