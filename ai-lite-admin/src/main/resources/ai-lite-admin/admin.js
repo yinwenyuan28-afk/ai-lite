@@ -28,6 +28,17 @@
     });
   }
 
+  function del(path) {
+    return fetch(root + path, { method: "DELETE" }).then(function (response) {
+      return response.json().then(function (body) {
+        if (!response.ok || body.ok === false) {
+          throw new Error(body.message || "请求失败");
+        }
+        return body.data;
+      });
+    });
+  }
+
   function el(tag, text) {
     var node = document.createElement(tag);
     if (text != null) {
@@ -95,6 +106,9 @@
       "。留空表示不改这一项。";
     if (provider.keyPool) {
       note += " 已配置密钥池，这里填写的密钥不会替换密钥池。";
+    }
+    if (provider.overlay) {
+      note += " 正在使用库内覆盖。";
     }
     var noteNode = el("p", note);
     noteNode.className = "note";
@@ -225,16 +239,7 @@
         openModelDialog(provider, model);
       });
       test.addEventListener("click", function () {
-        tryStatus("正在调用 " + model.modelId + "…", true);
-        post("/providers/" + encodeURIComponent(provider.name) + "/models/"
-          + encodeURIComponent(model.modelId) + "/try", {})
-          .then(function (data) {
-            var reply = data.content ? "回复：" + data.content : (data.message || "");
-            tryStatus((data.ok ? "调用成功" : "调用失败") + "，" + data.latencyMs + " 毫秒。" + reply, !!data.ok);
-            showTryDump(tryDump, data);
-          }).catch(function (error) {
-            tryStatus(error.message, false);
-          });
+        openTryModelDialog(provider, model, tryStatus, tryDump);
       });
       remove.addEventListener("click", function () {
         if (!window.confirm("删除模型 " + model.modelId + "？已有模型不会因为同步而消失，只有这里能删。")) {
@@ -271,6 +276,29 @@
     var response = el("pre", data.response || "");
     response.className = "log-text";
     dump.appendChild(response);
+  }
+
+  function openTryModelDialog(provider, model, tryStatus, tryDump) {
+    var body = el("div");
+    var thinking = el("select");
+    ["off", "minimal", "low", "medium", "high", "xhigh", "max"].forEach(function (value) {
+      thinking.appendChild(option(value, value));
+    });
+    thinking.value = "off";
+    body.appendChild(field("思考档", thinking));
+    openDialog("测试调用 " + model.modelId, body, "调用", function (dialog) {
+      dialog.close();
+      tryStatus("正在调用 " + model.modelId + "…", true);
+      post("/providers/" + encodeURIComponent(provider.name) + "/models/"
+        + encodeURIComponent(model.modelId) + "/try", { thinkingLevel: thinking.value })
+        .then(function (data) {
+          var reply = data.content ? "回复：" + data.content : (data.message || "");
+          tryStatus((data.ok ? "调用成功" : "调用失败") + "，" + data.latencyMs + " 毫秒。" + reply, !!data.ok);
+          showTryDump(tryDump, data);
+        }).catch(function (error) {
+          tryStatus(error.message, false);
+        });
+    });
   }
 
   function openSyncDialog(provider, models) {
@@ -402,6 +430,38 @@
     dialog.showModal();
   }
 
+  function openCallDetail(callId) {
+    api("/calls/" + encodeURIComponent(callId)).then(function (item) {
+      var body = el("div");
+      var summary = el("pre", "");
+      summary.className = "log-text";
+      summary.textContent = [
+        "CALL_ID: " + (item.CALL_ID || callId),
+        "业务: " + (item.BIZ_ID || ""),
+        "供应商: " + (item.PROVIDER || ""),
+        "模型: " + (item.MODEL_ID || ""),
+        "思考档: " + (item.THINKING_LEVEL || ""),
+        "token: " + (item.TOTAL_TOKENS == null ? "" : String(item.TOTAL_TOKENS)),
+        "结果: " + (item.SUCCESS === 1 || item.SUCCESS === true ? "成功" : "失败"),
+        "耗时: " + (item.LATENCY_MS == null ? "" : String(item.LATENCY_MS) + " ms"),
+        "摘要: " + (item.ERROR_BRIEF || item.STOP_REASON || "")
+      ].join("\n");
+      body.appendChild(summary);
+      if (item.INPUT_TEXT || item.OUTPUT_TEXT) {
+        body.appendChild(el("p", "输入输出"));
+        var io = el("pre", "");
+        io.className = "log-text";
+        io.textContent = "输入\n" + (item.INPUT_TEXT || "") + "\n\n输出\n" + (item.OUTPUT_TEXT || "");
+        body.appendChild(io);
+      }
+      openDialog("调用详情", body, "关闭", function (dialog) {
+        dialog.close();
+      });
+    }).catch(function (error) {
+      window.alert(error.message);
+    });
+  }
+
   function loadBiz() {
     var panel = document.getElementById("biz");
     panel.textContent = "";
@@ -468,7 +528,9 @@
     var bindActions = el("div");
     bindActions.className = "actions";
     var saveBinding = button("保存模型", true);
+    var clearBinding = button("清除绑定", false);
     bindActions.appendChild(saveBinding);
+    bindActions.appendChild(clearBinding);
     bindingBlock.appendChild(bindActions);
     cardBody.appendChild(bindingBlock);
     var bindStatus = status(bindingBlock);
@@ -484,23 +546,73 @@
         bindStatus(error.message, false);
       });
     });
+    clearBinding.addEventListener("click", function () {
+      if (!window.confirm("清除 " + biz.bizId + " 的模型绑定？")) {
+        return;
+      }
+      del("/biz/" + encodeURIComponent(biz.bizId) + "/binding")
+        .then(function () {
+          loadBiz();
+        }).catch(function (error) {
+          bindStatus(error.message, false);
+        });
+    });
 
     var promptBlock = el("div");
     promptBlock.className = "form-block";
     var system = el("textarea");
     var user = el("textarea");
+    var outputSchema = el("textarea");
+    outputSchema.placeholder = "可选，结构化输出 JSON Schema";
+    var previewVars = el("textarea");
+    previewVars.value = "{}";
+    previewVars.className = "vars-json";
     promptBlock.appendChild(field("系统模板", system));
     promptBlock.appendChild(field("用户模板", user));
+    promptBlock.appendChild(field("outputSchema", outputSchema));
+    promptBlock.appendChild(field("预览变量（JSON）", previewVars));
     var promptActions = el("div");
     promptActions.className = "actions";
     var saveDraft = button("保存草稿", false);
+    var saveNewDraft = button("另存新草稿", false);
+    var previewBtn = button("预览", false);
     var publish = button("发布", true);
     promptActions.appendChild(saveDraft);
+    promptActions.appendChild(saveNewDraft);
+    promptActions.appendChild(previewBtn);
     promptActions.appendChild(publish);
     promptBlock.appendChild(promptActions);
+    var previewResult = el("pre", "");
+    previewResult.className = "log-text preview-result";
+    previewResult.hidden = true;
+    promptBlock.appendChild(previewResult);
     cardBody.appendChild(promptBlock);
     var promptStatus = status(promptBlock);
     var draftId = "";
+
+    function parsePreviewVars(text) {
+      var raw = (text || "").trim();
+      if (!raw) {
+        return {};
+      }
+      var parsed = JSON.parse(raw);
+      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("预览变量须为 JSON 对象");
+      }
+      return parsed;
+    }
+
+    function draftBody(withVersionId) {
+      var body = {
+        systemTemplate: system.value,
+        userTemplate: user.value,
+        outputSchema: outputSchema.value
+      };
+      if (withVersionId && draftId) {
+        body.versionId = draftId;
+      }
+      return body;
+    }
 
     var historyBlock = el("div");
     historyBlock.className = "form-block";
@@ -515,6 +627,17 @@
     historyBlock.appendChild(historyWrap);
     cardBody.appendChild(historyBlock);
     var historyStatus = status(historyBlock);
+
+    var auditBlock = el("div");
+    auditBlock.className = "form-block";
+    auditBlock.appendChild(el("h3", "审计"));
+    var auditTable = el("table");
+    var auditWrap = el("div");
+    auditWrap.className = "table-wrap";
+    auditWrap.appendChild(auditTable);
+    auditBlock.appendChild(auditWrap);
+    cardBody.appendChild(auditBlock);
+    var auditStatus = status(auditBlock);
 
     function statusLabel(value) {
       if (value === "published") {
@@ -567,6 +690,7 @@
         load.addEventListener("click", function () {
           system.value = item.systemTemplate || "";
           user.value = item.userTemplate || "";
+          outputSchema.value = item.outputSchema || "";
           if (item.status === "draft") {
             draftId = item.versionId;
             promptStatus("已载入草稿 v" + item.versionNo + "，可继续编辑或发布。", true);
@@ -612,15 +736,35 @@
       });
     }
 
+    function renderAudits(audits) {
+      auditTable.textContent = "";
+      auditTable.appendChild(row("th", ["操作", "详情", "操作人", "时间"]));
+      if (!audits || !audits.length) {
+        auditStatus("还没有审计记录。", true);
+        return;
+      }
+      auditStatus("", true);
+      audits.forEach(function (item) {
+        var line = el("tr");
+        [item.action || "", item.detail || "", item.actor || "",
+          formatTime(item.createTime)].forEach(function (value) {
+          line.appendChild(el("td", value));
+        });
+        auditTable.appendChild(line);
+      });
+    }
+
     function reloadPrompt() {
       return api("/biz/" + encodeURIComponent(biz.bizId) + "/prompt").then(function (prompt) {
         var source = prompt.draft || prompt.active;
         if (source) {
           system.value = source.systemTemplate || "";
           user.value = source.userTemplate || "";
+          outputSchema.value = source.outputSchema || "";
         }
         draftId = prompt.draft ? prompt.draft.versionId : "";
         renderVersions(prompt.versions || []);
+        renderAudits(prompt.audits || []);
         bizNote.textContent = prompt.active ? "已有生效提示词。" : "还没有生效提示词。";
         return prompt;
       });
@@ -631,13 +775,42 @@
     });
 
     saveDraft.addEventListener("click", function () {
-      post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/draft", {
+      post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/draft", draftBody(true))
+        .then(function (draft) {
+          draftId = draft.versionId;
+          promptStatus("草稿已保存，尚未生效。", true);
+          return reloadPrompt();
+        }).catch(function (error) {
+          promptStatus(error.message, false);
+        });
+    });
+    saveNewDraft.addEventListener("click", function () {
+      post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/draft", draftBody(false))
+        .then(function (draft) {
+          draftId = draft.versionId;
+          promptStatus("已另存为新草稿。", true);
+          return reloadPrompt();
+        }).catch(function (error) {
+          promptStatus(error.message, false);
+        });
+    });
+    previewBtn.addEventListener("click", function () {
+      var vars;
+      try {
+        vars = parsePreviewVars(previewVars.value);
+      } catch (error) {
+        var msg = error instanceof SyntaxError ? "预览变量 JSON 格式无效" : error.message;
+        promptStatus(msg, false);
+        return;
+      }
+      post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/preview", {
         systemTemplate: system.value,
-        userTemplate: user.value
-      }).then(function (draft) {
-        draftId = draft.versionId;
-        promptStatus("草稿已保存，尚未生效。", true);
-        return reloadPrompt();
+        userTemplate: user.value,
+        vars: vars
+      }).then(function (data) {
+        previewResult.hidden = false;
+        previewResult.textContent = "系统\n" + (data.system || "") + "\n\n用户\n" + (data.user || "");
+        promptStatus("预览已生成（见下方）。", true);
       }).catch(function (error) {
         promptStatus(error.message, false);
       });
@@ -701,13 +874,31 @@
     bizId.placeholder = "业务 id";
     var provider = input("text", "");
     provider.placeholder = "供应商";
+    var modelIdFilter = input("text", "");
+    modelIdFilter.placeholder = "模型 id";
+    var successFilter = el("select");
+    successFilter.appendChild(option("", "全部"));
+    successFilter.appendChild(option("true", "成功"));
+    successFilter.appendChild(option("false", "失败"));
     var limit = input("number", "50");
     var query = button("查询", true);
     filters.appendChild(bizId);
     filters.appendChild(provider);
+    filters.appendChild(modelIdFilter);
+    filters.appendChild(successFilter);
     filters.appendChild(limit);
     filters.appendChild(query);
     cardBody.appendChild(filters);
+    var pager = el("div");
+    pager.className = "actions pager";
+    var prevPage = button("上一页", false);
+    var nextPage = button("下一页", false);
+    var pageInfo = el("span", "");
+    pageInfo.className = "page-info";
+    pager.appendChild(prevPage);
+    pager.appendChild(pageInfo);
+    pager.appendChild(nextPage);
+    cardBody.appendChild(pager);
     var report = status(cardBody);
     var table = el("table");
     var tableWrap = el("div");
@@ -717,17 +908,53 @@
     card.appendChild(cardBody);
     panel.appendChild(card);
 
+    var offset = 0;
+    var pageMeta = { total: 0, limit: 50, offset: 0 };
+
+    function updatePager() {
+      var lim = pageMeta.limit || Number(limit.value || 50);
+      if (pageMeta.total === 0) {
+        pageInfo.textContent = "共 0 条";
+      } else {
+        var from = pageMeta.offset + 1;
+        var to = Math.min(pageMeta.offset + lim, pageMeta.total);
+        pageInfo.textContent = "第 " + from + "–" + to + " 条，共 " + pageMeta.total + " 条";
+      }
+      prevPage.disabled = pageMeta.offset <= 0;
+      nextPage.disabled = pageMeta.offset + lim >= pageMeta.total;
+    }
+
     function run() {
-      var path = "/calls?limit=" + encodeURIComponent(limit.value || "50");
+      var lim = Number(limit.value || 50);
+      if (lim < 1) {
+        lim = 50;
+      }
+      var path = "/calls?limit=" + encodeURIComponent(String(lim))
+        + "&offset=" + encodeURIComponent(String(offset));
       if (bizId.value) {
         path += "&bizId=" + encodeURIComponent(bizId.value);
       }
       if (provider.value) {
         path += "&provider=" + encodeURIComponent(provider.value);
       }
-      api(path).then(function (rows) {
+      if (modelIdFilter.value) {
+        path += "&modelId=" + encodeURIComponent(modelIdFilter.value);
+      }
+      if (successFilter.value) {
+        path += "&success=" + encodeURIComponent(successFilter.value);
+      }
+      api(path).then(function (page) {
+        pageMeta = {
+          total: page.total == null ? 0 : Number(page.total),
+          limit: page.limit == null ? lim : Number(page.limit),
+          offset: page.offset == null ? offset : Number(page.offset)
+        };
+        offset = pageMeta.offset;
+        updatePager();
+        var rows = page.items || [];
         table.textContent = "";
-        table.appendChild(row("th", ["时间", "业务", "供应商", "模型", "结果", "耗时", "摘要", "输入输出"]));
+        table.appendChild(row("th", ["CALL_ID", "时间", "业务", "供应商", "模型", "思考档",
+          "token", "结果", "耗时", "摘要", "输入输出"]));
         if (!rows.length) {
           report("没有记录。", true);
           return;
@@ -735,7 +962,19 @@
         report("", true);
         rows.forEach(function (item) {
           var line = el("tr");
+          var idCell = el("td");
+          var idBtn = button(item.CALL_ID || "", false);
+          idBtn.className = "btn call-id";
+          (function (callId) {
+            idBtn.addEventListener("click", function () {
+              openCallDetail(callId);
+            });
+          })(item.CALL_ID || "");
+          idCell.appendChild(idBtn);
+          line.appendChild(idCell);
           [item.CREATE_TIME || "", item.BIZ_ID || "", item.PROVIDER || "", item.MODEL_ID || "",
+            item.THINKING_LEVEL || "",
+            item.TOTAL_TOKENS == null ? "" : String(item.TOTAL_TOKENS),
             item.SUCCESS === 1 || item.SUCCESS === true ? "成功" : "失败",
             item.LATENCY_MS == null ? "" : String(item.LATENCY_MS),
             item.ERROR_BRIEF || item.STOP_REASON || ""].forEach(function (value) {
@@ -759,7 +998,28 @@
         report(error.message, false);
       });
     }
-    query.addEventListener("click", run);
+    query.addEventListener("click", function () {
+      offset = 0;
+      run();
+    });
+    prevPage.addEventListener("click", function () {
+      var lim = Number(limit.value || 50);
+      if (lim < 1) {
+        lim = 50;
+      }
+      offset = Math.max(0, offset - lim);
+      run();
+    });
+    nextPage.addEventListener("click", function () {
+      var lim = Number(limit.value || 50);
+      if (lim < 1) {
+        lim = 50;
+      }
+      if (offset + lim < pageMeta.total) {
+        offset += lim;
+        run();
+      }
+    });
     run();
   }
 

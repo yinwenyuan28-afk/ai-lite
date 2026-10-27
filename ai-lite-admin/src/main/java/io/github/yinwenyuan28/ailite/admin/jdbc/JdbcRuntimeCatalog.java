@@ -238,6 +238,19 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
         invalidate();
     }
 
+    /**
+     * 清除业务模型绑定。业务 id 仍保留在配置白名单里。
+     *
+     * @param bizId 业务 id
+     */
+    public void clearBinding(String bizId) {
+        if (bizId == null || bizId.trim().isEmpty()) {
+            throw new IllegalArgumentException("业务 id 不能为空");
+        }
+        jdbc.update("DELETE FROM " + bizTable + " WHERE BIZ_ID = ?", bizId.trim());
+        invalidate();
+    }
+
     private Snapshot load() {
         long now = System.currentTimeMillis();
         Snapshot current = snapshot;

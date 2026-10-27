@@ -241,6 +241,41 @@ textarea {
   line-height: 1.45;
 }
 
+textarea.vars-json {
+  min-height: 56px;
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+  font-size: 13px;
+}
+
+pre.preview-result {
+  margin-top: 12px;
+  max-width: none;
+}
+
+.page-info {
+  font-size: 13px;
+  color: #57606a;
+  padding: 0 4px;
+}
+
+.btn.call-id {
+  height: auto;
+  min-height: 28px;
+  padding: 2px 8px;
+  font-size: 12px;
+  color: #1f4e79;
+  background: transparent;
+  border-color: transparent;
+  white-space: normal;
+  text-align: left;
+  word-break: break-all;
+}
+
+.btn.call-id:hover {
+  background: #eef0f3;
+  border-color: #d0d7de;
+}
+
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {

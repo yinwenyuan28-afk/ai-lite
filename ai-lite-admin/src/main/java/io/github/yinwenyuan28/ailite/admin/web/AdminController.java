@@ -255,15 +255,22 @@ public class AdminController {
      */
     @PostMapping("/ai-lite/admin/api/providers/{name}/models/{modelId:.+}/try")
     public Map<String, Object> tryModel(@PathVariable("name") String name,
-                                        @PathVariable("modelId") String modelId) {
+                                        @PathVariable("modelId") String modelId,
+                                        @RequestBody(required = false) Map<String, Object> body) {
         AiLiteConfig.Provider provider = requireProvider(name);
         Endpoint endpoint = endpoint(name, provider);
         CatalogModel model = catalog.findModel(name, modelId);
         String format = model == null ? null : model.getThinkingFormat();
         Integer maxTokens = model == null ? null : model.getMaxTokens();
+        String thinkingLevel = text(body == null ? null : body.get("thinkingLevel"));
+        if (thinkingLevel.isEmpty()) {
+            thinkingLevel = LlmThinkingLevel.OFF.wire();
+        } else {
+            thinkingLevel = LlmThinkingLevel.parse(thinkingLevel).wire();
+        }
         ModelSyncClient.TryResult result = ModelSyncClient.tryChat(
                 provider.getApi(), endpoint.baseUrl, endpoint.apiKey, modelId, format, maxTokens,
-                endpoint.connectMs, endpoint.readMs);
+                thinkingLevel, endpoint.connectMs, endpoint.readMs);
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         data.put("ok", Boolean.valueOf(result.isOk()));
         data.put("httpStatus", Integer.valueOf(result.getHttpStatus()));
@@ -382,6 +389,22 @@ public class AdminController {
     }
 
     /**
+     * 清除业务模型绑定。业务 id 仍在白名单中，只是不再指向模型。
+     *
+     * @param bizId 业务 id
+     * @return 空绑定
+     */
+    @DeleteMapping("/ai-lite/admin/api/biz/{bizId}/binding")
+    public Map<String, Object> clearBizBinding(@PathVariable("bizId") String bizId) {
+        requireBiz(bizId);
+        catalog.clearBinding(bizId);
+        Map<String, Object> data = new LinkedHashMap<String, Object>();
+        data.put("bizId", bizId);
+        data.put("binding", null);
+        return ok(data);
+    }
+
+    /**
      * @param bizId 业务 id
      * @return 当前生效版本、最近草稿，以及版本记录（按版本号倒序）
      */
@@ -394,6 +417,7 @@ public class AdminController {
         data.put("active", active.isPresent() ? versionView(active.get()) : null);
         data.put("draft", latestDraft(manager, bizId));
         data.put("versions", versionList(manager, bizId));
+        data.put("audits", auditList(manager, bizId));
         return ok(data);
     }
 
@@ -408,9 +432,21 @@ public class AdminController {
     }
 
     /**
+     * @param bizId 业务 id
+     * @return 提示词操作审计（按时间正序）
+     */
+    @GetMapping("/ai-lite/admin/api/biz/{bizId}/prompt/audits")
+    public Map<String, Object> promptAudits(@PathVariable("bizId") String bizId) {
+        requireBiz(bizId);
+        return ok(auditList(requirePrompts(), bizId));
+    }
+
+    /**
+     * 有 versionId 时改已有草稿；否则新建草稿。
+     *
      * @param bizId 业务 id，同时作为提示词 key
-     * @param body  系统模板与用户模板
-     * @return 新草稿
+     * @param body  系统/用户模板、可选 versionId、outputSchema、message
+     * @return 草稿
      */
     @PostMapping("/ai-lite/admin/api/biz/{bizId}/prompt/draft")
     public Map<String, Object> draft(@PathVariable("bizId") String bizId,
@@ -420,8 +456,37 @@ public class AdminController {
         String system = body == null ? "" : text(body.get("systemTemplate"));
         String user = body == null ? "" : text(body.get("userTemplate"));
         String schema = body == null ? null : nullableText(body.get("outputSchema"));
-        PromptVersion version = manager.createDraft(bizId, system, user, schema, ACTOR);
+        String message = body == null ? null : nullableText(body.get("message"));
+        String versionId = body == null ? "" : text(body.get("versionId"));
+        PromptVersion version;
+        if (!versionId.isEmpty()) {
+            requireOwnedVersion(manager, bizId, versionId);
+            version = manager.saveDraft(versionId, system, user, schema, ACTOR, message);
+        } else {
+            version = manager.createDraft(bizId, system, user, schema, ACTOR, message);
+        }
         return ok(versionView(version));
+    }
+
+    /**
+     * 用编辑区模板和变量做本地预览，不改版本。
+     *
+     * @param bizId 业务 id
+     * @param body  systemTemplate、userTemplate、vars
+     * @return 渲染后的系统与用户文本
+     */
+    @PostMapping("/ai-lite/admin/api/biz/{bizId}/prompt/preview")
+    public Map<String, Object> preview(@PathVariable("bizId") String bizId,
+                                       @RequestBody(required = false) Map<String, Object> body) {
+        requireBiz(bizId);
+        requirePrompts();
+        String system = body == null ? "" : text(body.get("systemTemplate"));
+        String user = body == null ? "" : text(body.get("userTemplate"));
+        Map<String, String> vars = stringMap(body == null ? null : body.get("vars"));
+        Map<String, Object> data = new LinkedHashMap<String, Object>();
+        data.put("system", PromptManager.apply(system, vars));
+        data.put("user", PromptManager.apply(user, vars));
+        return ok(data);
     }
 
     /**
@@ -510,18 +575,41 @@ public class AdminController {
     /**
      * @param bizId    业务 id，可空
      * @param provider 供应商 id，可空
+     * @param modelId  模型 id，可空
+     * @param success  true/false，可空表示不过滤
      * @param limit    条数，默认 50，上限 200
-     * @return 调用摘要；开启正文记录时附带输入输出
+     * @param offset   偏移，默认 0
+     * @return items / total / limit / offset；开启正文记录时附带输入输出
      */
     @GetMapping("/ai-lite/admin/api/calls")
     public Map<String, Object> calls(@RequestParam(value = "bizId", required = false) String bizId,
                                      @RequestParam(value = "provider", required = false) String provider,
-                                     @RequestParam(value = "limit", required = false) Integer limit) {
+                                     @RequestParam(value = "modelId", required = false) String modelId,
+                                     @RequestParam(value = "success", required = false) Boolean success,
+                                     @RequestParam(value = "limit", required = false) Integer limit,
+                                     @RequestParam(value = "offset", required = false) Integer offset) {
         int size = limit == null ? 50 : limit.intValue();
         if (size < 1 || size > 200) {
             throw new IllegalArgumentException("limit 必须在 1 到 200 之间");
         }
-        return ok(CallLogQuery.list(jdbc, callTable, bizId, provider, size));
+        int from = offset == null ? 0 : offset.intValue();
+        if (from < 0) {
+            throw new IllegalArgumentException("offset 不能为负");
+        }
+        return ok(CallLogQuery.page(jdbc, callTable, bizId, provider, modelId, success, size, from));
+    }
+
+    /**
+     * @param callId 调用 id
+     * @return 单条摘要；找不到时 400
+     */
+    @GetMapping("/ai-lite/admin/api/calls/{callId}")
+    public Map<String, Object> callDetail(@PathVariable("callId") String callId) {
+        Map<String, Object> row = CallLogQuery.find(jdbc, callTable, callId);
+        if (row == null) {
+            throw new IllegalArgumentException("调用记录不存在");
+        }
+        return ok(row);
     }
 
     /**
@@ -629,6 +717,46 @@ public class AdminController {
             rows.add(versionView(version));
         }
         return rows;
+    }
+
+    private static List<Map<String, Object>> auditList(PromptManager manager, String bizId) {
+        List<Map<String, Object>> rows = new ArrayList<Map<String, Object>>();
+        for (io.github.yinwenyuan28.ailite.prompt.PromptAudit audit : manager.audits(bizId)) {
+            Map<String, Object> row = new LinkedHashMap<String, Object>();
+            row.put("auditId", audit.getAuditId());
+            row.put("action", audit.getAction());
+            row.put("versionId", audit.getVersionId());
+            row.put("actor", audit.getActor());
+            row.put("detail", audit.getDetail());
+            row.put("createTime", audit.getCreateTime() == null ? null
+                    : Long.valueOf(audit.getCreateTime().getTime()));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private static void requireOwnedVersion(PromptManager manager, String bizId, String versionId) {
+        for (PromptVersion version : manager.versions(bizId)) {
+            if (versionId.equals(version.getVersionId())) {
+                return;
+            }
+        }
+        throw new IllegalArgumentException("版本不属于该业务");
+    }
+
+    private static Map<String, String> stringMap(Object raw) {
+        Map<String, String> vars = new LinkedHashMap<String, String>();
+        if (!(raw instanceof Map)) {
+            return vars;
+        }
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) raw).entrySet()) {
+            if (entry.getKey() == null) {
+                continue;
+            }
+            vars.put(String.valueOf(entry.getKey()),
+                    entry.getValue() == null ? "" : String.valueOf(entry.getValue()));
+        }
+        return vars;
     }
 
     private static Map<String, Object> latestDraft(PromptManager manager, String bizId) {

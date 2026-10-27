@@ -283,7 +283,7 @@ public class AdminWebTest {
     public void tryChatReturnsReplyAndReadyModelsComeFirst() throws Exception {
         catalog.insertModelIfAbsent("demo", "zzz");
         catalog.insertModelIfAbsent("demo", "aaa");
-        catalog.saveCapabilities("demo", "zzz", false, 1024, 128, "none");
+        catalog.saveCapabilities("demo", "zzz", true, 1024, 128, "reasoning-effort");
         final String[] seenRequest = new String[1];
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/chat/completions", new com.sun.net.httpserver.HttpHandler() {
@@ -306,7 +306,9 @@ public class AdminWebTest {
         config.getLlm().getProviders().get("demo").setBaseUrl(
                 "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
 
-        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models/zzz/try"))
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models/zzz/try")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"thinkingLevel\":\"high\"}"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("你好")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("POST ")))
@@ -316,6 +318,7 @@ public class AdminWebTest {
                 .andExpect(content().string(org.hamcrest.Matchers.not(
                         org.hamcrest.Matchers.containsString(SECRET))));
         assertThat(seenRequest[0]).contains("\"max_tokens\":128");
+        assertThat(seenRequest[0]).contains("\"reasoning_effort\":\"high\"");
 
         String listed = mockMvc.perform(get("/ai-lite/admin/api/providers"))
                 .andExpect(status().isOk())
@@ -350,6 +353,8 @@ public class AdminWebTest {
 
         calls.perform(get("/ai-lite/admin/api/calls").param("bizId", "demo-chat"))
                 .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"items\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"total\":1")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("demo-chat")))
                 .andExpect(content().string(org.hamcrest.Matchers.not(
                         org.hamcrest.Matchers.containsString("other"))))
@@ -357,6 +362,24 @@ public class AdminWebTest {
                         org.hamcrest.Matchers.containsString(SECRET))))
                 .andExpect(content().string(org.hamcrest.Matchers.not(
                         org.hamcrest.Matchers.containsString("systemTemplate"))));
+        calls.perform(get("/ai-lite/admin/api/calls").param("success", "true"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"total\":1")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("c2")));
+        calls.perform(get("/ai-lite/admin/api/calls/c1"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("timeout")));
+
+        catalog.insertModelIfAbsent("demo", "qwen");
+        catalog.saveCapabilities("demo", "qwen", false, 1024, 128, "none");
+        mockMvc.perform(put("/ai-lite/admin/api/biz/demo-chat")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"providerId\":\"demo\",\"modelId\":\"qwen\",\"thinkingLevel\":\"off\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .delete("/ai-lite/admin/api/biz/demo-chat/binding"))
+                .andExpect(status().isOk());
+        assertThat(catalog.findBinding("demo-chat")).isNull();
     }
 
     @Test

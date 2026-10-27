@@ -86,7 +86,7 @@ public final class ModelSyncClient {
      * @return 探测结果。requestText 是脱敏后的请求，responseText 是原始响应
      */
     public static TryResult tryChat(String api, String baseUrl, String apiKey, String modelId,
-                                      String thinkingFormat, Integer maxTokens,
+                                      String thinkingFormat, Integer maxTokens, String thinkingLevel,
                                       int connectMs, int readMs) {
         if ("anthropic-messages".equals(api)) {
             return TryResult.failed(trimSlash(baseUrl), "Anthropic 协议的测试调用尚未接入");
@@ -95,7 +95,7 @@ public final class ModelSyncClient {
             return TryResult.failed(trimSlash(baseUrl), "Responses 协议的测试调用尚未接入");
         }
         String url = trimSlash(baseUrl) + "/chat/completions";
-        String payload = chatPayload(modelId, thinkingFormat, maxTokens);
+        String payload = chatPayload(modelId, thinkingFormat, maxTokens, thinkingLevel);
         String requestText = redact(requestDump("POST", url, payload), apiKey);
         int read = readMs <= 0 ? 30000 : Math.min(readMs, 60000);
         int connect = connectMs <= 0 ? 10000 : connectMs;
@@ -158,21 +158,52 @@ public final class ModelSyncClient {
         return text.substring(0, max) + "\n…已截断";
     }
 
-    static String chatPayload(String modelId, String thinkingFormat, Integer maxTokens) {
+    static String chatPayload(String modelId, String thinkingFormat, Integer maxTokens,
+                              String thinkingLevel) {
         int tokens = maxTokens == null || maxTokens.intValue() <= 0 ? 8192 : maxTokens.intValue();
+        String level = normalizeThinkingLevel(thinkingLevel);
+        boolean enabled = !"off".equals(level);
+        String format = thinkingFormat == null || thinkingFormat.trim().isEmpty()
+                ? "none" : thinkingFormat.trim();
         StringBuilder json = new StringBuilder();
         json.append("{\"model\":\"").append(escapeJson(modelId)).append("\",");
         json.append("\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],");
         json.append("\"max_tokens\":").append(tokens);
-        if ("chat-template".equals(thinkingFormat)) {
-            json.append(",\"chat_template_kwargs\":{\"enable_thinking\":false}");
-        } else if ("qwen".equals(thinkingFormat)) {
-            json.append(",\"enable_thinking\":false");
-        } else if ("deepseek".equals(thinkingFormat)) {
-            json.append(",\"thinking\":{\"type\":\"disabled\"}");
+        if ("chat-template".equals(format)) {
+            json.append(",\"chat_template_kwargs\":{\"enable_thinking\":").append(enabled).append("}");
+        } else if ("qwen".equals(format)) {
+            json.append(",\"enable_thinking\":").append(enabled);
+        } else if ("deepseek".equals(format)) {
+            if (enabled) {
+                json.append(",\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"")
+                        .append(escapeJson(level)).append("\"");
+            } else {
+                json.append(",\"thinking\":{\"type\":\"disabled\"}");
+            }
+        } else if ("reasoning-effort".equals(format) && enabled) {
+            json.append(",\"reasoning_effort\":\"").append(escapeJson(level)).append("\"");
         }
         json.append("}");
         return json.toString();
+    }
+
+    static String normalizeThinkingLevel(String thinkingLevel) {
+        if (thinkingLevel == null || thinkingLevel.trim().isEmpty()) {
+            return "off";
+        }
+        String name = thinkingLevel.trim().toLowerCase();
+        if ("false".equals(name) || "no".equals(name) || "none".equals(name)) {
+            return "off";
+        }
+        if ("true".equals(name) || "yes".equals(name) || "on".equals(name)) {
+            return "high";
+        }
+        if ("off".equals(name) || "minimal".equals(name) || "low".equals(name)
+                || "medium".equals(name) || "high".equals(name)
+                || "xhigh".equals(name) || "max".equals(name)) {
+            return name;
+        }
+        throw new IllegalArgumentException("未知思考档: " + thinkingLevel.trim());
     }
 
     static String chatContent(String body) {
