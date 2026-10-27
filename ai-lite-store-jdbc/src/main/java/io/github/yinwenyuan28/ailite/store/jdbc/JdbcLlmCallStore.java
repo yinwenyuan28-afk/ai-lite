@@ -7,7 +7,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.sql.Timestamp;
 
 /**
- * JDBC 调用记录存储。只写摘要，不写提示词、响应体和密钥。
+ * JDBC 调用记录存储。摘要写入调用表。输入输出只在记录对象带了正文时写入
+ * {@code AI_LITE_LLM_CALL_BODY}，并且会去掉密钥。
  *
  * <p>表结构见 {@code src/main/resources/ai-lite-llm-call.sql}。</p>
  */
@@ -44,6 +45,16 @@ public final class JdbcLlmCallStore implements LlmCallStore {
                 record.getLatencyMs(), record.getStopReason(), record.getSuccess(),
                 record.getErrorBrief(), new Timestamp(record.getCreateTime() == null
                         ? System.currentTimeMillis() : record.getCreateTime().getTime()));
+        if (record.getInputBody() == null && record.getOutputBody() == null) {
+            return;
+        }
+        jdbc.update("INSERT INTO AI_LITE_LLM_CALL_BODY (CALL_ID, INPUT_TEXT, OUTPUT_TEXT)"
+                        + " VALUES (?, ?, ?)",
+                record.getCallId(), emptyToNull(record.getInputBody()), emptyToNull(record.getOutputBody()));
+    }
+
+    private static String emptyToNull(String text) {
+        return text == null || text.isEmpty() ? null : text;
     }
 
     private static String safeTable(String table) {

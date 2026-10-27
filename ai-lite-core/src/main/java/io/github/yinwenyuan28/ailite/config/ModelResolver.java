@@ -1,5 +1,10 @@
 package io.github.yinwenyuan28.ailite.config;
 
+import io.github.yinwenyuan28.ailite.catalog.BizBinding;
+import io.github.yinwenyuan28.ailite.catalog.CatalogModel;
+import io.github.yinwenyuan28.ailite.catalog.NoopRuntimeCatalog;
+import io.github.yinwenyuan28.ailite.catalog.ProviderOverlay;
+import io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmThinking;
 import io.github.yinwenyuan28.ailite.llm.LlmThinkingLevel;
@@ -38,6 +43,7 @@ public final class ModelResolver {
     private final Map<String, AiLiteConfig.Provider> providers;
     private final Map<String, AiLiteConfig.Profile> profiles;
     private final long keyCooldownMs;
+    private final RuntimeCatalog catalog;
     /** providerId → 轮换状态；只在配置了 api-keys 的 provider 上创建。 */
     private final ConcurrentHashMap<String, KeyRotation> rotations = new ConcurrentHashMap<String, KeyRotation>();
 
@@ -55,11 +61,22 @@ public final class ModelResolver {
      * @throws LlmCallException 配置结构非法时抛出
      */
     public ModelResolver(AiLiteConfig.Llm config, long keyCooldownMs) {
+        this(config, keyCooldownMs, null);
+    }
+
+    /**
+     * @param config         模型配置节
+     * @param keyCooldownMs  429/401 失败标记后单把 key 的冷却毫秒数
+     * @param catalog        运行时目录；null 表示不启用
+     * @throws LlmCallException 配置结构非法时抛出
+     */
+    public ModelResolver(AiLiteConfig.Llm config, long keyCooldownMs, RuntimeCatalog catalog) {
         this.config = config == null ? new AiLiteConfig.Llm() : config;
         this.providers = this.config.getProviders();
         this.profiles = this.config.getProfiles();
         this.configured = providers != null && !providers.isEmpty();
         this.keyCooldownMs = Math.max(0L, keyCooldownMs);
+        this.catalog = catalog == null ? NoopRuntimeCatalog.INSTANCE : catalog;
         this.bizIds = new HashSet<String>();
         if (this.config.getBizIds() != null) {
             for (String id : this.config.getBizIds()) {
@@ -69,6 +86,13 @@ public final class ModelResolver {
             }
         }
         validateStructure();
+    }
+
+    /**
+     * @return 目录是否参与业务解析
+     */
+    public boolean isCatalogActive() {
+        return catalog.isActive();
     }
 
     /**
@@ -141,6 +165,89 @@ public final class ModelResolver {
             throw new LlmCallException("配置档 " + name + " 指向未知模型: " + profile.getModel(), null, LlmCallException.Kind.CONFIG);
         }
         return resolve(Strings.trimToNull(profile.getProvider()), p, m, profile.getThinkingLevel());
+    }
+
+    /**
+     * 按业务 id 从运行时目录解析。没有绑定、模型未就绪或目录未启用时失败，不回退配置档。
+     *
+     * @param bizId 业务 id
+     * @return 解析结果
+     */
+    public ResolvedModel resolveBiz(String bizId) {
+        if (!catalog.isActive()) {
+            throw new LlmCallException("运行时目录未启用", null, LlmCallException.Kind.CONFIG);
+        }
+        String id = Strings.trimToNull(bizId);
+        BizBinding binding = id == null ? null : catalog.findBinding(id);
+        if (binding == null || Strings.isBlank(binding.getProviderId()) || Strings.isBlank(binding.getModelId())) {
+            throw new LlmCallException("业务未配置模型: " + bizId, null, LlmCallException.Kind.CONFIG);
+        }
+        String providerId = binding.getProviderId().trim();
+        AiLiteConfig.Provider source = providers.get(providerId);
+        if (source == null) {
+            throw new LlmCallException("未知供应商: " + providerId, null, LlmCallException.Kind.CONFIG);
+        }
+        CatalogModel row = catalog.findModel(providerId, binding.getModelId().trim());
+        if (row == null || !row.isReady()) {
+            throw new LlmCallException("模型尚未补齐能力参数: " + binding.getModelId(), null, LlmCallException.Kind.CONFIG);
+        }
+        AiLiteConfig.Provider effective = applyOverlay(source, catalog.findProvider(providerId));
+        return resolve(providerId, effective, toConfigModel(row), binding.getThinkingLevel());
+    }
+
+    /**
+     * 复制供应商并套上非空覆盖。配置了密钥池时不改单把密钥，调用和探测都走池。
+     */
+    private static AiLiteConfig.Provider applyOverlay(AiLiteConfig.Provider source, ProviderOverlay overlay) {
+        AiLiteConfig.Provider copy = new AiLiteConfig.Provider();
+        copy.setApi(source.getApi());
+        copy.setBaseUrl(source.getBaseUrl());
+        copy.setApiKey(source.getApiKey());
+        copy.setApiKeyEnv(source.getApiKeyEnv());
+        copy.setApiKeys(source.getApiKeys() == null
+                ? new ArrayList<String>() : new ArrayList<String>(source.getApiKeys()));
+        copy.setHeaders(new LinkedHashMap<String, String>(source.getHeaders()));
+        copy.setExtraBody(new LinkedHashMap<String, Object>(source.getExtraBody()));
+        copy.setConnectTimeoutMs(source.getConnectTimeoutMs());
+        copy.setReadTimeoutMs(source.getReadTimeoutMs());
+        copy.setModels(source.getModels());
+        copy.setGuard(source.getGuard());
+        if (overlay == null) {
+            return copy;
+        }
+        if (Strings.isNotBlank(overlay.getBaseUrl())) {
+            copy.setBaseUrl(overlay.getBaseUrl().trim());
+        }
+        boolean pool = copy.getApiKeys() != null && !copy.getApiKeys().isEmpty();
+        if (!pool && Strings.isNotBlank(overlay.getApiKey())) {
+            copy.setApiKey(overlay.getApiKey().trim());
+        }
+        if (overlay.getConnectTimeoutMs() != null) {
+            copy.setConnectTimeoutMs(overlay.getConnectTimeoutMs());
+        }
+        if (overlay.getReadTimeoutMs() != null) {
+            copy.setReadTimeoutMs(overlay.getReadTimeoutMs());
+        }
+        return copy;
+    }
+
+    private static AiLiteConfig.Model toConfigModel(CatalogModel row) {
+        AiLiteConfig.Model model = new AiLiteConfig.Model();
+        model.setId(row.getModelId());
+        model.setName(row.getDisplayName());
+        model.setReasoning(row.isReasoning());
+        if (row.getInputModes() == null || row.getInputModes().isEmpty()) {
+            List<String> text = new ArrayList<String>();
+            text.add("text");
+            model.setInput(text);
+        } else {
+            model.setInput(new ArrayList<String>(row.getInputModes()));
+        }
+        model.setContextWindow(row.getContextWindow());
+        model.setMaxTokens(row.getMaxTokens() == null ? Integer.valueOf(8192) : row.getMaxTokens());
+        model.setThinkingFormat(Strings.isBlank(row.getThinkingFormat())
+                ? "reasoning-effort" : row.getThinkingFormat().trim());
+        return model;
     }
 
     private ResolvedModel resolve(String providerId, AiLiteConfig.Provider p, AiLiteConfig.Model m,
@@ -394,12 +501,14 @@ public final class ModelResolver {
             if (Strings.isBlank(trimTrailingSlash(p.getBaseUrl()))) {
                 throw new LlmCallException("供应商 " + id + " 的 base-url 无效", null, LlmCallException.Kind.CONFIG);
             }
-            if (p.getModels() == null || p.getModels().isEmpty()) {
+            if (!catalog.isActive() && (p.getModels() == null || p.getModels().isEmpty())) {
                 throw new LlmCallException("供应商 " + id + " 没有配置模型", null, LlmCallException.Kind.CONFIG);
             }
-            for (AiLiteConfig.Model m : p.getModels()) {
-                if (m == null || Strings.isBlank(m.getId())) {
-                    throw new LlmCallException("供应商 " + id + " 存在缺少 id 的模型", null, LlmCallException.Kind.CONFIG);
+            if (p.getModels() != null) {
+                for (AiLiteConfig.Model m : p.getModels()) {
+                    if (m == null || Strings.isBlank(m.getId())) {
+                        throw new LlmCallException("供应商 " + id + " 存在缺少 id 的模型", null, LlmCallException.Kind.CONFIG);
+                    }
                 }
             }
         }

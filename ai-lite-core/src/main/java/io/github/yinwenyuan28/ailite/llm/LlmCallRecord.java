@@ -22,6 +22,8 @@ public final class LlmCallRecord {
     private String stopReason;
     private Integer success;
     private String errorBrief;
+    private String inputBody;
+    private String outputBody;
     private Date createTime;
 
     public String getCallId() {
@@ -142,6 +144,22 @@ public final class LlmCallRecord {
 
     public void setErrorBrief(String errorBrief) {
         this.errorBrief = errorBrief;
+    }
+
+    public String getInputBody() {
+        return inputBody;
+    }
+
+    public void setInputBody(String inputBody) {
+        this.inputBody = inputBody;
+    }
+
+    public String getOutputBody() {
+        return outputBody;
+    }
+
+    public void setOutputBody(String outputBody) {
+        this.outputBody = outputBody;
     }
 
     public Date getCreateTime() {

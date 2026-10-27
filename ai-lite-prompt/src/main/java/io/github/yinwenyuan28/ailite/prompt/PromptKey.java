@@ -19,6 +19,8 @@ public final class PromptKey {
     private String defaultSystemTemplate;
     /** 数据库不可用或尚未发布时使用的用户模板。 */
     private String defaultUserTemplate;
+    /** 目录模式的业务提示词。未发布时的文案与配置登记项不同。 */
+    private boolean catalogBound;
 
     public PromptKey() {
     }
@@ -44,6 +46,7 @@ public final class PromptKey {
         copy.profile = profile;
         copy.defaultSystemTemplate = defaultSystemTemplate;
         copy.defaultUserTemplate = defaultUserTemplate;
+        copy.catalogBound = catalogBound;
         return copy;
     }
 
@@ -102,5 +105,13 @@ public final class PromptKey {
 
     public void setDefaultUserTemplate(String defaultUserTemplate) {
         this.defaultUserTemplate = defaultUserTemplate;
+    }
+
+    public boolean isCatalogBound() {
+        return catalogBound;
+    }
+
+    public void setCatalogBound(boolean catalogBound) {
+        this.catalogBound = catalogBound;
     }
 }

@@ -58,6 +58,8 @@ public final class LlmGateway {
      */
     private volatile Map<String, ProviderGuard> guards = Collections.emptyMap();
 
+    private CallBodyPolicy callBodyPolicy;
+
     /**
      * 手工构造入口。异步重试使用进程级共享调度器，避免调用方额外管理生命周期。
      *
@@ -116,6 +118,15 @@ public final class LlmGateway {
      */
     public ToolExecutor getToolExecutor() {
         return toolExecutor;
+    }
+
+    /**
+     * 设置调用记录是否保存模型输入输出。不设置时不保存。
+     *
+     * @param callBodyPolicy 档位，可为 null
+     */
+    public void setCallBodyPolicy(CallBodyPolicy callBodyPolicy) {
+        this.callBodyPolicy = callBodyPolicy;
     }
 
     /**
@@ -1024,6 +1035,7 @@ public final class LlmGateway {
             this.bizId = bizId;
             this.model = model;
             this.attempt = new Attempt(bizId, model, call.getProfile());
+            this.attempt.attach(transcript);
             this.transcript = transcript;
             this.tools = tools;
             this.declareTools = declareTools;
@@ -1250,6 +1262,7 @@ public final class LlmGateway {
                 }
                 completed = round;
                 last = completion;
+                attempt.completion(completion);
                 attempt.add(completion.getUsage(), latency);
 
                 if (cancel != null && cancel.isCancelled()) {
@@ -1418,6 +1431,7 @@ public final class LlmGateway {
         }
 
         Attempt attempt = new Attempt(bizId, model, call.getProfile());
+        attempt.attach(transcript);
         ProviderGuard guard = guardFor(model);
         int completed = 0;
         LlmCompletion last = null;
@@ -1485,6 +1499,7 @@ public final class LlmGateway {
             }
             completed = round;
             last = completion;
+            attempt.completion(completion);
             attempt.add(completion.getUsage(), latency);
 
             if (cancel != null && cancel.isCancelled()) {
@@ -1571,6 +1586,9 @@ public final class LlmGateway {
             return resolver.resolveProfile(call.getProfile());
         }
         if (Strings.isBlank(call.getProvider()) && Strings.isBlank(call.getModelId())) {
+            if (resolver.isCatalogActive()) {
+                return resolver.resolveBiz(call.getBizId());
+            }
             String defaultProfile = resolver.getDefaultProfile();
             if (defaultProfile != null) {
                 return resolver.resolveProfile(defaultProfile);
@@ -1629,6 +1647,11 @@ public final class LlmGateway {
         row.setStopReason(stop.wire());
         row.setSuccess(Integer.valueOf(success));
         row.setErrorBrief(brief(error, attempt.model.getApiKey()));
+        String level = callBodyPolicy == null ? CallBodyPolicy.NONE : callBodyPolicy.level();
+        if (CallBodyPolicy.store(level, success)) {
+            row.setInputBody(CallBodyText.input(attempt.transcript, attempt.model.getApiKey()));
+            row.setOutputBody(CallBodyText.output(attempt.completion, attempt.model.getApiKey()));
+        }
         logger.record(row);
     }
 
@@ -1651,11 +1674,21 @@ public final class LlmGateway {
         private int output;
         private int total;
         private long latencyMs;
+        private List<LlmMessage> transcript = Collections.emptyList();
+        private LlmCompletion completion;
 
         private Attempt(String bizId, ResolvedModel model, String profile) {
             this.bizId = bizId;
             this.model = model;
             this.profile = profile;
+        }
+
+        private void attach(List<LlmMessage> messages) {
+            this.transcript = messages == null ? Collections.<LlmMessage>emptyList() : messages;
+        }
+
+        private void completion(LlmCompletion value) {
+            this.completion = value;
         }
 
         private void add(LlmUsage usage, long latency) {

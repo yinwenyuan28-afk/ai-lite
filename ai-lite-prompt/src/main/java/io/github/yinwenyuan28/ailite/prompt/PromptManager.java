@@ -346,6 +346,9 @@ public final class PromptManager {
     public RenderedPrompt render(String promptKey, Map<String, String> vars,
                                  String fallbackSystem, String fallbackUser) {
         PromptKey spec = catalog.require(promptKey);
+        if (spec.isCatalogBound()) {
+            return renderCatalog(spec, vars, fallbackSystem, fallbackUser);
+        }
         String system;
         String user;
         Optional<PromptVersion> active = current(spec.getKey());
@@ -359,6 +362,46 @@ public final class PromptManager {
         }
         if (Strings.isBlank(system)) {
             throw new PromptException("提示词模板未配置: " + spec.getKey());
+        }
+        return new RenderedPrompt(apply(system, vars), apply(user, vars));
+    }
+
+    /**
+     * 目录模式：没有生效版本且调用方没有兜底时失败。存储异常单独报出，不说成未发布。
+     */
+    private RenderedPrompt renderCatalog(PromptKey spec, Map<String, String> vars,
+                                         String fallbackSystem, String fallbackUser) {
+        String key = spec.getKey();
+        CacheEntry cached = cache.get(key);
+        Optional<PromptVersion> active;
+        if (cached != null && !cached.expired()) {
+            active = cached.value == null
+                    ? Optional.<PromptVersion>empty() : Optional.of(cached.value);
+        } else {
+            try {
+                active = store.findActive(key);
+            } catch (RuntimeException ex) {
+                log.warn("prompt store unavailable key={}: {}", key, ex.getMessage());
+                throw new PromptException("提示词存储不可用: " + key);
+            }
+            if (cacheSeconds > 0L) {
+                PromptVersion value = active.isPresent() ? active.get().copy() : null;
+                cache.put(key, new CacheEntry(value, System.currentTimeMillis() + cacheSeconds * 1000L));
+            }
+        }
+        String system;
+        String user;
+        if (active.isPresent()) {
+            system = active.get().getSystemTemplate();
+            user = active.get().getUserTemplate();
+        } else if (Strings.isNotBlank(fallbackSystem) || fallbackUser != null) {
+            system = Strings.isNotBlank(fallbackSystem) ? fallbackSystem : spec.getDefaultSystemTemplate();
+            user = fallbackUser != null ? fallbackUser : spec.getDefaultUserTemplate();
+        } else {
+            throw new PromptException("提示词未发布: " + key);
+        }
+        if (Strings.isBlank(system)) {
+            throw new PromptException("提示词未发布: " + key);
         }
         return new RenderedPrompt(apply(system, vars), apply(user, vars));
     }

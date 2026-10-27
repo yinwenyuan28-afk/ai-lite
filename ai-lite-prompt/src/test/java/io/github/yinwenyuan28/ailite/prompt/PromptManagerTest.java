@@ -221,6 +221,67 @@ public class PromptManagerTest {
     }
 
     @Test
+    public void catalogBoundKeyWithoutActiveVersionSaysUnpublished() {
+        PromptKey key = new PromptKey("demo-chat", "demo", null, null, null);
+        key.setCatalogBound(true);
+        PromptManager manager = new PromptManager(new PromptCatalog(Collections.singletonList(key)));
+
+        assertThatThrownBy(() -> manager.render("demo-chat", null))
+                .isInstanceOf(PromptException.class)
+                .hasMessageContaining("提示词未发布: demo-chat");
+    }
+
+    @Test
+    public void catalogBoundStoreFailureIsNotReportedAsUnpublished() {
+        PromptKey key = new PromptKey("demo-chat", "demo", null, null, null);
+        key.setCatalogBound(true);
+        PromptStore store = new PromptStore() {
+            @Override
+            public Optional<PromptVersion> findActive(String promptKey) {
+                throw new IllegalStateException("down");
+            }
+
+            @Override
+            public Optional<PromptVersion> findVersion(String versionId) {
+                return Optional.empty();
+            }
+
+            @Override
+            public List<PromptVersion> versions(String promptKey, int limit) {
+                return Collections.emptyList();
+            }
+
+            @Override
+            public List<PromptAudit> audits(String promptKey, int limit) {
+                return Collections.emptyList();
+            }
+
+            @Override
+            public int nextVersionNo(String promptKey) {
+                return 1;
+            }
+
+            @Override
+            public void saveVersion(PromptVersion version) {
+            }
+
+            @Override
+            public void activate(String promptKey, String versionId, String actor, Date publishTime) {
+            }
+
+            @Override
+            public void audit(PromptAudit audit) {
+            }
+        };
+        PromptManager manager = new PromptManager(new PromptCatalog(Collections.singletonList(key)), store, 0L);
+
+        assertThatThrownBy(() -> manager.render("demo-chat", null))
+                .isInstanceOf(PromptException.class)
+                .hasMessageContaining("提示词存储不可用")
+                .matches(ex -> !ex.getMessage().contains("未发布"));
+    }
+
+    @Test
     public void renderDoesNotEscapeUnknownPlaceholders() {
         PromptManager manager = manager();
 

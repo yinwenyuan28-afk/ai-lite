@@ -60,6 +60,17 @@ public final class LlmCall {
     }
 
     /**
+     * 只按业务 id 解析。供应商和模型从运行时目录读取，不使用配置文件里的 profile。
+     *
+     * @param bizId    已登记的业务 id
+     * @param messages 消息列表
+     * @return 调用参数
+     */
+    public static LlmCall biz(String bizId, List<LlmMessage> messages) {
+        return new LlmCall(bizId, null, null, null, null, messages, null, null);
+    }
+
+    /**
      * 设置这一次的连接超时和读取超时，单位毫秒。传 null 表示沿用供应商配置。
      *
      * @param connectTimeoutMs 连接超时
