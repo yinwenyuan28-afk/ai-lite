@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Lite 管理</title>
+  <link rel="stylesheet" href="/ai-lite/admin/assets/admin.css">
+</head>
+<body class="admin-page">
+<header class="page-header">
+  <h1>AI Lite 管理</h1>
+  <p class="page-desc">这里的修改写入数据库，不改配置文件。</p>
+</header>
+<div class="workspace">
+  <nav class="tabs" role="tablist" aria-label="管理页签">
+    <button type="button" class="tab" data-tab="providers" aria-selected="true">供应商</button>
+    <button type="button" class="tab" data-tab="biz" aria-selected="false">业务与提示词</button>
+    <button type="button" class="tab" data-tab="calls" aria-selected="false">调用日志</button>
+  </nav>
+  <main class="workspace-main">
+    <section id="providers" class="panel active"></section>
+    <section id="biz" class="panel"></section>
+    <section id="calls" class="panel"></section>
+    <dialog id="dialog" class="admin-dialog"></dialog>
+  </main>
+</div>
+<script src="/ai-lite/admin/assets/admin.js"></script>
+</body>
+</html>

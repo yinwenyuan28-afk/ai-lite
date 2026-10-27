@@ -1,0 +1,5 @@
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+io.github.yinwenyuan28.ailite.admin.jdbc.AiLiteCatalogAutoConfiguration,\
+io.github.yinwenyuan28.ailite.admin.jdbc.AiLiteCatalogNoJdbcAutoConfiguration,\
+io.github.yinwenyuan28.ailite.admin.jdbc.AiLiteCatalogMissingPromptStoreAutoConfiguration,\
+io.github.yinwenyuan28.ailite.admin.web.AiLiteAdminAutoConfiguration

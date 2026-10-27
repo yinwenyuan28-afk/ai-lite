@@ -1,0 +1,108 @@
+package io.github.yinwenyuan28.ailite.admin.jdbc;
+
+import io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog;
+import io.github.yinwenyuan28.ailite.llm.CallBodyPolicy;
+import io.github.yinwenyuan28.ailite.prompt.PromptCatalog;
+import io.github.yinwenyuan28.ailite.prompt.PromptStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.AutoConfigureAfter;
+import org.springframework.boot.autoconfigure.AutoConfigureBefore;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+/**
+ * 运行时目录。页面开关关闭时仍然注册，避免关掉页面就退回配置文件。
+ *
+ * <p>必须排在提示词自动装配之前，业务 id 才能先成为 {@link PromptCatalog}。
+ * 必须排在提示词 JDBC 存储之后，才能确认发布会落库。</p>
+ */
+@Configuration
+@AutoConfigureAfter(name = {
+        "org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration",
+        "io.github.yinwenyuan28.ailite.prompt.jdbc.AiLitePromptJdbcAutoConfiguration"
+})
+@AutoConfigureBefore(name = {
+        "io.github.yinwenyuan28.ailite.autoconfigure.AiLitePromptAutoConfiguration",
+        "io.github.yinwenyuan28.ailite.autoconfigure.AiLiteAutoConfiguration"
+})
+@ConditionalOnClass(name = "io.github.yinwenyuan28.ailite.prompt.jdbc.JdbcPromptStore")
+@EnableConfigurationProperties({AiLiteCatalogProperties.class, AiLiteLlmBizProperties.class})
+@ConditionalOnProperty(prefix = "ai-lite", name = "enabled", havingValue = "true",
+        matchIfMissing = true)
+public class AiLiteCatalogAutoConfiguration {
+
+    private static final Logger log = LoggerFactory.getLogger(AiLiteCatalogAutoConfiguration.class);
+
+    /**
+     * 有数据源时才建目录。Boot 2.1 不能在同一个元素上重复 {@code @ConditionalOnProperty}。
+     */
+    @Configuration
+    @ConditionalOnBean(JdbcTemplate.class)
+    static class CatalogBeans {
+
+        /**
+         * @param jdbc         JDBC
+         * @param properties   表名与缓存
+         * @param bizProperties 业务 id
+         * @param environment  用来发现仍写在配置里的提示词 key
+         * @return 运行时目录
+         */
+        @Bean
+        @ConditionalOnMissingBean(RuntimeCatalog.class)
+        public RuntimeCatalog aiLiteRuntimeCatalog(JdbcTemplate jdbc, AiLiteCatalogProperties properties,
+                                                   AiLiteLlmBizProperties bizProperties,
+                                                   Environment environment,
+                                                   org.springframework.context.ApplicationContext context) {
+            if (environment.getProperty("ai-lite.prompt.keys[0].key") != null) {
+                log.warn("目录模式以业务 id 作为提示词，忽略 ai-lite.prompt.keys");
+            }
+            if (!hasPromptStore(context)) {
+                throw new IllegalStateException(AiLiteCatalogMissingPromptStoreAutoConfiguration.MESSAGE);
+            }
+            CatalogBizIds.normalize(bizProperties.getBizIds());
+            JdbcRuntimeCatalog.requireTable(jdbc, "AI_LITE_PROMPT_VERSION", "ai-lite-prompt.sql");
+            return new JdbcRuntimeCatalog(jdbc, properties.getProviderTable(), properties.getModelTable(),
+                    properties.getBizTable(), properties.getCacheSeconds());
+        }
+
+        /**
+         * @param jdbc JDBC
+         * @return 调用正文档位。表还没建时读取视为不记录
+         */
+        @Bean
+        @ConditionalOnMissingBean(CallBodyPolicy.class)
+        public CallBodyPolicy aiLiteCallBodyPolicy(JdbcTemplate jdbc) {
+            return new JdbcCallBodyPolicy(jdbc);
+        }
+
+        /**
+         * @param bizProperties 业务 id
+         * @return 以业务 id 为 key 的提示词目录
+         */
+        @Bean
+        @ConditionalOnMissingBean(PromptCatalog.class)
+        public PromptCatalog aiLitePromptCatalog(AiLiteLlmBizProperties bizProperties) {
+            return CatalogBizIds.catalog(bizProperties.getBizIds());
+        }
+
+        private static boolean hasPromptStore(org.springframework.context.ApplicationContext context) {
+            String[] names = context.getBeanNamesForType(PromptStore.class);
+            for (String name : names) {
+                Object bean = context.getBean(name);
+                if (bean != null && bean.getClass().getName()
+                        .equals("io.github.yinwenyuan28.ailite.prompt.jdbc.JdbcPromptStore")) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+}
