@@ -12,27 +12,47 @@
 
     <artifactId>ai-lite-core</artifactId>
     <name>AI Lite Core</name>
-    <description>Framework-free LLM gateway, agent loop and session model.</description>
+    <description>Compatibility aggregate: pulls in ai-lite-llm and ai-lite-agent.</description>
+
+    <!--
+        ai-lite-core 自 0.1.8 起不再包含源码，只做传递依赖的聚合坐标：
+
+          ai-lite-core = ai-lite-llm（网关 / HTTP SPI / 协议 / 配置）
+                       + ai-lite-agent（AgentLoop / Workflow / 会话）
+
+        为什么保留 packaging=jar 而不是改成 pom：
+        仓库内 15 个 pom 和全部外部用户都以默认 <type>jar</type> 依赖 ai-lite-core，
+        而 Maven 不会把 jar 类型依赖自动改写成 pom。改成 packaging=pom 后，这些
+        依赖会以 "Could not find artifact ...:jar" 失败（已用独立工程实测）。
+        保留 jar packaging 会产出一个空 jar（约 1.2 KB），坐标继续可解析。
+    -->
+    <packaging>jar</packaging>
 
     <dependencies>
         <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-llm</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>junit</groupId>
-            <artifactId>junit</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.assertj</groupId>
-            <artifactId>assertj-core</artifactId>
-            <scope>test</scope>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-agent</artifactId>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                本模块已无源码，所有类都迁到了 ai-lite-llm / ai-lite-agent。
+                japicmp 会把旧基线里的类全部判为「已删除」，因此必须跳过；
+                兼容性检查从 0.1.8 起在 ai-lite-llm / ai-lite-agent 上重建基线。
+            -->
+            <plugin>
+                <groupId>com.github.siom79.japicmp</groupId>
+                <artifactId>japicmp-maven-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

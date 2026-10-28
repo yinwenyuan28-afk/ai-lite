@@ -59,6 +59,8 @@
     </properties>
 
     <modules>
+        <module>ai-lite-llm</module>
+        <module>ai-lite-agent</module>
         <module>ai-lite-core</module>
         <module>ai-lite-prompt</module>
         <module>ai-lite-prompt-jdbc</module>
@@ -88,6 +90,16 @@
             </dependency>
 
             <!-- 内部模块统一版本 -->
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-llm</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yinwenyuan28-afk</groupId>
+                <artifactId>ai-lite-agent</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <dependency>
                 <groupId>io.github.yinwenyuan28-afk</groupId>
                 <artifactId>ai-lite-core</artifactId>
