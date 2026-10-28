@@ -7,7 +7,7 @@
     <!-- groupId 与 GitHub 用户名对应。 -->
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-parent</artifactId>
-    <version>0.1.9-SNAPSHOT</version>
+    <version>0.1.9</version>
     <packaging>pom</packaging>
 
     <name>AI Lite</name>
@@ -61,8 +61,9 @@
         <!--
             API 兼容性门禁的对比基线：上一个已发布到 Central 的版本。
             每次正式发布后手工前移这一行（随 release 提交一起改）。
+            0.1.8 发布时漏了前移，本次（0.1.9）补上，否则门禁一直在拿 0.1.7 比对。
         -->
-        <ai-lite.release.version>0.1.7</ai-lite.release.version>
+        <ai-lite.release.version>0.1.8</ai-lite.release.version>
     </properties>
 
     <modules>

@@ -3,7 +3,7 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
-## [0.1.9] - 未发布
+## [0.1.9] - 2026-10-28
 
 ### 修复
 
@@ -14,14 +14,14 @@
 
 ### 新增
 
-- **`RawHttpExecutor`**（`ai-lite-llm`）：与 `HttpExecutor` 共用同一出站链路，但**不因状态码非 2xx 抛异常**，把状态码与完整正文交回调用方。原来的 `HttpExecutor.execute` 为控制错误消息体积会把正文截到 300 字符，管理台试跑看不到供应商返回的完整错误体（401 的 message、400 的字段校验、网关的 HTML 错误页），诊断价值大打折扣。按既有 SPI 演化承诺（B 组方法集终态、新能力走新接口）单独成接口，不动 `HttpExecutor`。OkHttp / okhttp-virtual / Jetty / WebClient / Ktor CIO / JDK8 六种实现全部支持。
+- **`RawHttpExecutor.executeRaw`**（`ai-lite-llm`）：与 `HttpExecutor` 共用同一出站链路，但**不因状态码非 2xx 抛异常**，把状态码与完整正文交回调用方。原来的 `HttpExecutor.execute` 为控制错误消息体积会把正文截到 300 字符，管理台试跑看不到供应商返回的完整错误体（401 的 message、400 的字段校验、网关的 HTML 错误页），诊断价值大打折扣。按既有 SPI 演化承诺（B 组方法集终态、新能力走新接口）单独成接口，不动 `HttpExecutor`。OkHttp / okhttp-virtual / Jetty / WebClient / Ktor CIO / JDK8 六种实现全部支持。
 - **`HttpRequest` 支持 GET**：新增带 `method` 的构造器与 `HttpRequest.GET` / `POST` 常量，用于 `GET {baseUrl}/models` 这样的只读探测。原 6 参构造器语义不变（仍为 POST），不需要改动任何既有调用方。
 - **`ModelSyncClient` 接受 `HttpExecutor`**：`sync` / `listRemote` / `tryChat` / `probe` 均新增首参为执行器的重载；旧签名保留并转调（退化为 `HttpURLConnection`），仅用于脱离 Starter 的场景。
 - **`AdminController` 新增带 `HttpExecutor` 的构造器**，自动装配经 `ObjectProvider` 注入；取不到时打 WARN 说明诊断与业务不是同一条链路。
 
 ### 工程
 
-- 新增回归测试：Jetty 的 https 不得出现 `Missing SslContextFactory`、401 必须原样返回、`exchange` 保留完整错误正文、`GET` 探测不带请求体、`threads` 过小时给出可操作提示；管理台的试跑必须经过配置的执行器（用带标记头的执行器证明），且能展示供应商返回的完整错误正文。
+- 新增回归测试：Jetty 的 https 不得出现 `Missing SslContextFactory`、401 必须原样返回、`executeRaw` 保留完整错误正文、`GET` 探测不带请求体、`threads` 过小时给出可操作提示；管理台的试跑必须经过配置的执行器（用带标记头的执行器证明），且能展示供应商返回的完整错误正文。
 
 ## [0.1.8] - 2026-10-28（对外契约冻结 + Agent 运行时能力）
 
@@ -251,6 +251,7 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.8]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.8
 [0.1.7]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.7
 [0.1.6]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.6
 [0.1.5]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.5
