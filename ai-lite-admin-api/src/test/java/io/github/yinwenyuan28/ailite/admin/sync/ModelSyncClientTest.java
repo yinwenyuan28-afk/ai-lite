@@ -44,8 +44,42 @@ public class ModelSyncClientTest {
         Assume.assumeTrue("未配置本地 api-key，跳过网新真请求测试", apiKey != null);
     }
 
+    /**
+     * 端点连通性探测。只给需要真发请求的用例用，避免把纯本地逻辑的用例也一起跳过。
+     *
+     * @return true 表示能建立到端点的连接
+     */
+    private static boolean reachable() {
+        java.net.HttpURLConnection connection = null;
+        try {
+            connection = (java.net.HttpURLConnection)
+                    new java.net.URL(trimSlash(WANGXIN_BASE) + "/models").openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(3000);
+            connection.setReadTimeout(3000);
+            connection.getResponseCode();
+            return true;
+        } catch (Exception ex) {
+            System.out.println("[ModelSyncClientTest] 网新端点不可达，跳过真请求：" + ex);
+            return false;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private static String trimSlash(String baseUrl) {
+        String value = baseUrl;
+        while (value.endsWith("/")) {
+            value = value.substring(0, value.length() - 1);
+        }
+        return value;
+    }
+
     @Test
     public void syncFromWangxinKeepsReadyRows() {
+        Assume.assumeTrue("网新端点不可达，跳过真请求测试", reachable());
         ModelSyncClient.SyncStats first = ModelSyncClient.sync(
                 "openai-completions", WANGXIN_BASE, apiKey, catalog, "wangxin");
         assertThat(first.getAdded()).isGreaterThan(0);

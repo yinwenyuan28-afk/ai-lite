@@ -6,6 +6,12 @@ import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalog;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalogTest;
 import io.github.yinwenyuan28.ailite.admin.jdbc.SqliteFiles;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
+import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
+import io.github.yinwenyuan28.ailite.http.HttpExecutor;
+import io.github.yinwenyuan28.ailite.http.HttpRequest;
+import io.github.yinwenyuan28.ailite.http.HttpResult;
+import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
+import io.github.yinwenyuan28.ailite.http.jdk8.Jdk8HttpExecutor;
 import io.github.yinwenyuan28.ailite.json.AiLiteJson;
 import io.github.yinwenyuan28.ailite.prompt.PromptCatalog;
 import io.github.yinwenyuan28.ailite.prompt.PromptKey;
@@ -51,6 +57,8 @@ public class AdminWebTest {
     private AiLiteConfig config;
     private MockMvc mockMvc;
     private HttpServer server;
+    /** 配置启用的传输；诊断必须走它，用例据此断言"没有绕开网关"。 */
+    private HttpExecutor httpExecutor;
 
     @Before
     public void setUp() throws Exception {
@@ -74,6 +82,7 @@ public class AdminWebTest {
         anthropic.setBaseUrl("http://127.0.0.1:9");
         anthropic.setApiKey(SECRET);
         config.getLlm().getProviders().put("claude", anthropic);
+        httpExecutor = new Jdk8HttpExecutor();
         mockMvc = MockMvcBuilders.standaloneSetup(controller())
                 .setMessageConverters(
                         new ByteArrayHttpMessageConverter(),
@@ -81,8 +90,128 @@ public class AdminWebTest {
                 .build();
     }
 
+    @Test
+    public void tryChatReturnsErrorBodyFromConfiguredTransport() throws Exception {
+        catalog.insertModelIfAbsent("demo", "boom");
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", new com.sun.net.httpserver.HttpHandler() {
+            @Override
+            public void handle(com.sun.net.httpserver.HttpExchange exchange) throws java.io.IOException {
+                byte[] body = "{\"error\":{\"message\":\"quota exceeded\"}}"
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(429, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+            }
+        });
+        server.start();
+        config.getLlm().getProviders().get("demo").setBaseUrl(
+                "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
+
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models/boom/try")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"thinkingLevel\":\"off\"}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"ok\":false")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("429")))
+                // 完整错误正文必须出现在 response 字段里：这是试跑的核心价值。
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("quota exceeded")))
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString(SECRET))));
+    }
+
+    /**
+     * 试跑必须经过配置启用的执行器。
+     *
+     * <p>用 {@link Jdk8HttpExecutor} 的子类打标记：只有请求真的从执行器发出，
+     * 假服务才会看到这个头。若退回 HttpURLConnection 兜底，标记不会出现。</p>
+     */
+    @Test
+    public void tryChatGoesThroughConfiguredExecutor() throws Exception {
+        catalog.insertModelIfAbsent("demo", "marker");
+        final java.util.concurrent.atomic.AtomicBoolean seen = new java.util.concurrent.atomic.AtomicBoolean();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", new com.sun.net.httpserver.HttpHandler() {
+            @Override
+            public void handle(com.sun.net.httpserver.HttpExchange exchange) throws java.io.IOException {
+                seen.set("executor".equals(exchange.getRequestHeaders().getFirst(MARKER_HEADER)));
+                byte[] body = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+            }
+        });
+        server.start();
+        config.getLlm().getProviders().get("demo").setBaseUrl(
+                "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
+        // 换成一个会在出站请求里打标记的执行器。
+        httpExecutor = new MarkerExecutor();
+        mockMvc = MockMvcBuilders.standaloneSetup(controller())
+                .setMessageConverters(
+                        new ByteArrayHttpMessageConverter(),
+                        new MappingJackson2HttpMessageConverter(AiLiteJson.mapper()))
+                .build();
+
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models/marker/try")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"thinkingLevel\":\"off\"}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"ok\":true")));
+
+        assertThat(seen.get()).as("试跑必须经过配置启用的 HttpExecutor").isTrue();
+    }
+
+    /** 给每个出站请求加一个识别头，用于证明请求来自执行器。 */
+    private static final String MARKER_HEADER = "X-AiLite-Transport";
+
+    /** 包一层真实执行器并打标记；Jdk8HttpExecutor 是 final，只能委托。 */
+    private static final class MarkerExecutor implements AsyncHttpExecutor, RawHttpExecutor {
+        private final Jdk8HttpExecutor delegate = new Jdk8HttpExecutor();
+
+        @Override
+        public HttpResult execute(HttpRequest request) {
+            return delegate.execute(mark(request));
+        }
+
+        @Override
+        public HttpResult exchange(HttpRequest request) {
+            return delegate.exchange(mark(request));
+        }
+
+        @Override
+        public void executeStreaming(HttpRequest request, io.github.yinwenyuan28.ailite.http.StreamListener listener) {
+            delegate.executeStreaming(mark(request), listener);
+        }
+
+        @Override
+        public java.util.concurrent.CompletableFuture<HttpResult> executeAsync(HttpRequest request) {
+            return delegate.executeAsync(mark(request));
+        }
+
+        @Override
+        public java.util.concurrent.CompletableFuture<Void> executeStreamingAsync(
+                HttpRequest request, io.github.yinwenyuan28.ailite.http.StreamListener listener) {
+            return delegate.executeStreamingAsync(mark(request), listener);
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
+
+        private static HttpRequest mark(HttpRequest request) {
+            java.util.Map<String, String> headers =
+                    new java.util.LinkedHashMap<String, String>(request.getHeaders());
+            headers.put(MARKER_HEADER, "executor");
+            return new HttpRequest(request.getMethod(), request.getUrl(), headers, request.getBody(),
+                    request.getConnectTimeoutMs(), request.getReadTimeoutMs(), request.getCancel());
+        }
+    }
+
     private AdminController controller() {
-        return new AdminController(config, catalog, prompts, jdbc, null, new JdbcCallBodyPolicy(jdbc));
+        return new AdminController(config, catalog, prompts, jdbc, null, new JdbcCallBodyPolicy(jdbc),
+                httpExecutor);
     }
 
     @After

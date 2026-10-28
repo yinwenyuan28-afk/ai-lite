@@ -1,5 +1,10 @@
 package io.github.yinwenyuan28.ailite.admin.sync;
 
+import io.github.yinwenyuan28.ailite.http.HttpExecutor;
+import io.github.yinwenyuan28.ailite.http.HttpRequest;
+import io.github.yinwenyuan28.ailite.http.HttpResult;
+import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
+import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalog;
 
 import java.io.ByteArrayOutputStream;
@@ -8,14 +13,27 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 调用 OpenAI 兼容的 {@code GET {baseUrl}/models}。不写调用日志。
+ * 调用 OpenAI 兼容的 {@code GET {baseUrl}/models} 与 {@code POST {baseUrl}/chat/completions}。
+ * 不写调用日志。
  *
  * <p>同步是增量的：新 id 插入且未就绪，已有行不改，接口里消失的 id 不删。</p>
+ *
+ * <p><b>走哪条出站链路</b>：所有方法都优先使用调用方传入的
+ * {@link HttpExecutor}——也就是 {@code ai-lite.http.transport} 配置启用的那个。
+ * 管理台的"测试连通/测试调用"必须与真实模型调用同一条链路，否则会出现
+ * "管理台显示成功、业务调用全挂"的错位（典型场景：网关配 https 的 Jetty 而
+ * 诊断走了另一个没配 TLS 的客户端）。</p>
+ *
+ * <p>只有在没有可用执行器时（例如脱离 Starter 单独使用 admin-api 做单元测试），
+ * 才退化为 {@link HttpURLConnection} 兜底实现；该兜底与网关无关，仅保证接口可用。</p>
  */
 public final class ModelSyncClient {
 
@@ -26,6 +44,9 @@ public final class ModelSyncClient {
     }
 
     /**
+     * 同步远端模型列表到目录。
+     *
+     * @param http       出站执行器，可为 null（退化为 HttpURLConnection）
      * @param api        协议
      * @param baseUrl    供应商根地址
      * @param apiKey     生效密钥
@@ -33,12 +54,12 @@ public final class ModelSyncClient {
      * @param providerId 供应商 id
      * @return 新增数与已存在数
      */
-    public static SyncStats sync(String api, String baseUrl, String apiKey,
+    public static SyncStats sync(HttpExecutor http, String api, String baseUrl, String apiKey,
                                  JdbcRuntimeCatalog catalog, String providerId) {
         if ("anthropic-messages".equals(api)) {
             throw new IllegalStateException("该协议没有 /models，请手工添加模型");
         }
-        ProbeResult probe = probe(baseUrl, apiKey, 10000, MAX_READ_MS);
+        ProbeResult probe = probe(http, baseUrl, apiKey, 10000, MAX_READ_MS);
         if (!probe.isOk()) {
             throw new IllegalStateException(probe.getMessage());
         }
@@ -57,16 +78,18 @@ public final class ModelSyncClient {
     /**
      * 只读取远端模型 id，不写库。
      *
+     * @param http    出站执行器，可为 null
      * @param api     协议
      * @param baseUrl 供应商根地址
      * @param apiKey  生效密钥
      * @return 远端模型 id，保持出现顺序
      */
-    public static List<String> listRemote(String api, String baseUrl, String apiKey) {
+    public static List<String> listRemote(HttpExecutor http, String api, String baseUrl,
+                                          String apiKey) {
         if ("anthropic-messages".equals(api)) {
             throw new IllegalStateException("该协议没有 /models，请手工添加模型");
         }
-        ProbeResult probe = probe(baseUrl, apiKey, 10000, MAX_READ_MS);
+        ProbeResult probe = probe(http, baseUrl, apiKey, 10000, MAX_READ_MS);
         if (!probe.isOk()) {
             throw new IllegalStateException(probe.getMessage());
         }
@@ -74,20 +97,87 @@ public final class ModelSyncClient {
     }
 
     /**
-     * 向模型发一次最短对话。不写调用日志。思考开关关掉，避免测试本身触发长推理。
+     * 无执行器的重载，仅用于脱离 Starter 的场景（如 admin-api 的独立单元测试）。
+     *
+     * <p>生产路径必须走 {@link #sync(HttpExecutor, String, String, String,
+     * JdbcRuntimeCatalog, String)}，否则诊断与真实调用不是同一条链路。</p>
+     *
+     * @param api        协议
+     * @param baseUrl    供应商根地址
+     * @param apiKey     生效密钥
+     * @param catalog    目录
+     * @param providerId 供应商 id
+     * @return 新增数与已存在数
+     */
+    public static SyncStats sync(String api, String baseUrl, String apiKey,
+                                 JdbcRuntimeCatalog catalog, String providerId) {
+        return sync(null, api, baseUrl, apiKey, catalog, providerId);
+    }
+
+    /**
+     * 无执行器的重载，见 {@link #sync(String, String, String, JdbcRuntimeCatalog, String)}。
+     *
+     * @param api     协议
+     * @param baseUrl 供应商根地址
+     * @param apiKey  生效密钥
+     * @return 远端模型 id
+     */
+    public static List<String> listRemote(String api, String baseUrl, String apiKey) {
+        return listRemote(null, api, baseUrl, apiKey);
+    }
+
+    /**
+     * 无执行器的重载，见 {@link #sync(String, String, String, JdbcRuntimeCatalog, String)}。
      *
      * @param api            协议
      * @param baseUrl        供应商根地址
      * @param apiKey         生效密钥
      * @param modelId        模型 id
+     * @param thinkingFormat 思考格式
+     * @param maxTokens      输出上限
+     * @param thinkingLevel  思考档
+     * @param connectMs      连接超时
+     * @param readMs         读取超时
+     * @return 探测结果
+     */
+    public static TryResult tryChat(String api, String baseUrl, String apiKey, String modelId,
+                                    String thinkingFormat, Integer maxTokens, String thinkingLevel,
+                                    int connectMs, int readMs) {
+        return tryChat(null, api, baseUrl, apiKey, modelId, thinkingFormat, maxTokens,
+                thinkingLevel, connectMs, readMs);
+    }
+
+    /**
+     * 无执行器的重载，见 {@link #sync(String, String, String, JdbcRuntimeCatalog, String)}。
+     *
+     * @param baseUrl   根地址
+     * @param apiKey    密钥
+     * @param connectMs 连接超时
+     * @param readMs    读取超时
+     * @return 探测结果
+     */
+    public static ProbeResult probe(String baseUrl, String apiKey, int connectMs, int readMs) {
+        return probe(null, baseUrl, apiKey, connectMs, readMs);
+    }
+
+    /**
+     * 向模型发一次最短对话。不写调用日志。思考开关关掉，避免测试本身触发长推理。
+     *
+     * @param http           出站执行器，可为 null（退化为 HttpURLConnection）
+     * @param api            协议
+     * @param baseUrl        供应商根地址
+     * @param apiKey         生效密钥
+     * @param modelId        模型 id
      * @param thinkingFormat 思考格式，可空
+     * @param maxTokens      输出上限，可空
+     * @param thinkingLevel  思考档
      * @param connectMs      连接超时
      * @param readMs         读取超时，上限 60 秒
      * @return 探测结果。requestText 是脱敏后的请求，responseText 是原始响应
      */
-    public static TryResult tryChat(String api, String baseUrl, String apiKey, String modelId,
-                                      String thinkingFormat, Integer maxTokens, String thinkingLevel,
-                                      int connectMs, int readMs) {
+    public static TryResult tryChat(HttpExecutor http, String api, String baseUrl, String apiKey,
+                                    String modelId, String thinkingFormat, Integer maxTokens,
+                                    String thinkingLevel, int connectMs, int readMs) {
         if ("anthropic-messages".equals(api)) {
             return TryResult.failed(trimSlash(baseUrl), "Anthropic 协议的测试调用尚未接入");
         }
@@ -99,27 +189,17 @@ public final class ModelSyncClient {
         String requestText = redact(requestDump("POST", url, payload), apiKey);
         int read = readMs <= 0 ? 30000 : Math.min(readMs, 60000);
         int connect = connectMs <= 0 ? 10000 : connectMs;
+        Map<String, String> headers = new LinkedHashMap<String, String>();
+        headers.put("Authorization", "Bearer " + apiKey);
+        headers.put("Content-Type", "application/json; charset=utf-8");
+        HttpRequest request = new HttpRequest(HttpRequest.POST, url, headers, payload,
+                connect, read, null);
         long started = System.currentTimeMillis();
-        HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) new URL(url).openConnection();
-            connection.setRequestMethod("POST");
-            connection.setConnectTimeout(connect);
-            connection.setReadTimeout(read);
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
-            connection.setFixedLengthStreamingMode(bytes.length);
-            java.io.OutputStream output = connection.getOutputStream();
-            try {
-                output.write(bytes);
-            } finally {
-                output.close();
-            }
-            int status = connection.getResponseCode();
-            String body = readBody(status >= 400 ? connection.getErrorStream() : connection.getInputStream());
+            HttpResult result = send(http, request);
             long latency = System.currentTimeMillis() - started;
+            int status = result.getStatus();
+            String body = result.getBody();
             String raw = redact(limit(body, 20000), apiKey);
             String responseText = "HTTP " + status + "\n" + raw;
             if (status >= 200 && status < 300) {
@@ -129,16 +209,158 @@ public final class ModelSyncClient {
             }
             return new TryResult(false, status, latency,
                     stripKey("调用失败，HTTP " + status, apiKey), "", requestText, responseText);
+        } catch (LlmCallException ex) {
+            long latency = System.currentTimeMillis() - started;
+            String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
+            return new TryResult(false, statusOf(ex), latency,
+                    stripKey("请求失败：" + message, apiKey), "", requestText,
+                    redact(message, apiKey));
         } catch (Exception ex) {
             long latency = System.currentTimeMillis() - started;
             String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
             return new TryResult(false, 0, latency, stripKey("请求失败：" + message, apiKey),
                     "", requestText, redact(message, apiKey));
+        }
+    }
+
+    /**
+     * 只探测连通，不改模型表。
+     *
+     * @param http      出站执行器，可为 null（退化为 HttpURLConnection）
+     * @param baseUrl   根地址
+     * @param apiKey    密钥
+     * @param connectMs 连接超时
+     * @param readMs    读取超时，超过 15 秒按 15 秒
+     * @return 探测结果
+     */
+    public static ProbeResult probe(HttpExecutor http, String baseUrl, String apiKey,
+                                    int connectMs, int readMs) {
+        String url = trimSlash(baseUrl) + "/models";
+        int read = readMs <= 0 ? MAX_READ_MS : Math.min(readMs, MAX_READ_MS);
+        int connect = connectMs <= 0 ? 10000 : connectMs;
+        Map<String, String> headers = Collections.singletonMap(
+                "Authorization", "Bearer " + apiKey);
+        HttpRequest request = new HttpRequest(HttpRequest.GET, url, headers, null,
+                connect, read, null);
+        long started = System.currentTimeMillis();
+        try {
+            HttpResult result = send(http, request);
+            long latency = System.currentTimeMillis() - started;
+            int status = result.getStatus();
+            if (status >= 200 && status < 300) {
+                return new ProbeResult(true, status, latency, url, "连通成功", result.getBody());
+            }
+            return new ProbeResult(false, status, latency, url,
+                    stripKey("连通失败，HTTP " + status, apiKey), "");
+        } catch (LlmCallException ex) {
+            long latency = System.currentTimeMillis() - started;
+            String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
+            return new ProbeResult(false, statusOf(ex), latency, url,
+                    stripKey("请求失败：" + message, apiKey), "");
+        } catch (Exception ex) {
+            long latency = System.currentTimeMillis() - started;
+            String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
+            return new ProbeResult(false, 0, latency, url,
+                    stripKey("请求失败：" + message, apiKey), "");
+        }
+    }
+
+    /**
+     * 发送请求：优先走配置启用的执行器，没有执行器时才用 HttpURLConnection 兜底。
+     *
+     * <p>执行器未实现 {@link RawHttpExecutor} 时，用
+     * {@link HttpExecutor#execute} 并在非 2xx 时把状态码从异常里取回来——正文会
+     * 丢失（老接口的契约如此），但不至于让诊断功能不可用。</p>
+     *
+     * @param http    执行器，可为 null
+     * @param request 请求
+     * @return 状态码与正文；非 2xx 也正常返回
+     * @throws LlmCallException 网络层失败
+     */
+    private static HttpResult send(HttpExecutor http, HttpRequest request) {
+        if (http instanceof RawHttpExecutor) {
+            return ((RawHttpExecutor) http).exchange(request);
+        }
+        if (http != null) {
+            try {
+                return http.execute(request);
+            } catch (LlmCallException ex) {
+                if (ex.getKind() == LlmCallException.Kind.HTTP && ex.getStatusCode() != null) {
+                    // 老契约在此处丢弃正文；至少把状态码交给上层呈现。
+                    return new HttpResult(ex.getStatusCode().intValue(), "");
+                }
+                throw ex;
+            }
+        }
+        return fallbackSend(request);
+    }
+
+    /**
+     * 无执行器时的兜底：与旧实现等价，只保证接口可用，不代表网关链路。
+     */
+    private static HttpResult fallbackSend(HttpRequest request) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(request.getUrl()).openConnection();
+            connection.setRequestMethod(request.getMethod());
+            connection.setConnectTimeout(request.getConnectTimeoutMs());
+            connection.setReadTimeout(request.getReadTimeoutMs());
+            for (Map.Entry<String, String> header : request.getHeaders().entrySet()) {
+                connection.setRequestProperty(header.getKey(), header.getValue());
+            }
+            if (!request.isGet()) {
+                connection.setDoOutput(true);
+                byte[] bytes = request.getBody().getBytes(StandardCharsets.UTF_8);
+                connection.setFixedLengthStreamingMode(bytes.length);
+                java.io.OutputStream output = connection.getOutputStream();
+                try {
+                    output.write(bytes);
+                } finally {
+                    output.close();
+                }
+            }
+            int status = connection.getResponseCode();
+            String body = readBody(status >= 400
+                    ? connection.getErrorStream() : connection.getInputStream());
+            return new HttpResult(status, body);
+        } catch (LlmCallException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            // 消息里带上最深层原因（connect timed out / Connection refused 等），
+            // 只写"请求失败"会让管理台无法区分网络问题和配置问题。
+            throw new LlmCallException("请求失败：" + rootMessage(ex), ex,
+                    LlmCallException.Kind.TRANSPORT);
         } finally {
             if (connection != null) {
                 connection.disconnect();
             }
         }
+    }
+
+    /**
+     * 取异常链最深层带消息的那条，用于给管理员一个可执行的失败原因。
+     *
+     * @param error 原始异常
+     * @return 最深层原因的消息；全链都没有消息时返回空串
+     */
+    private static String rootMessage(Throwable error) {
+        String message = "";
+        Throwable current = error;
+        while (current != null) {
+            if (current.getMessage() != null && !current.getMessage().trim().isEmpty()) {
+                message = current.getMessage();
+            }
+            current = current.getCause();
+        }
+        return message;
+    }
+
+    /**
+     * @param error 失败异常
+     * @return HTTP 状态码；非 HTTP 失败为 0
+     */
+    private static int statusOf(LlmCallException error) {
+        return error.getStatusCode() == null ? 0 : error.getStatusCode().intValue();
     }
 
     static String requestDump(String method, String url, String payload) {
@@ -249,46 +471,6 @@ public final class ModelSyncClient {
             }
         }
         return out.toString();
-    }
-
-    /**
-     * 只探测连通，不改模型表。
-     *
-     * @param baseUrl  根地址
-     * @param apiKey   密钥
-     * @param connectMs 连接超时
-     * @param readMs    读取超时，超过 15 秒按 15 秒
-     * @return 探测结果
-     */
-    public static ProbeResult probe(String baseUrl, String apiKey, int connectMs, int readMs) {
-        String url = trimSlash(baseUrl) + "/models";
-        int read = readMs <= 0 ? MAX_READ_MS : Math.min(readMs, MAX_READ_MS);
-        int connect = connectMs <= 0 ? 10000 : connectMs;
-        long started = System.currentTimeMillis();
-        HttpURLConnection connection = null;
-        try {
-            connection = (HttpURLConnection) new URL(url).openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(connect);
-            connection.setReadTimeout(read);
-            connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-            int status = connection.getResponseCode();
-            String body = readBody(status >= 400 ? connection.getErrorStream() : connection.getInputStream());
-            long latency = System.currentTimeMillis() - started;
-            if (status >= 200 && status < 300) {
-                return new ProbeResult(true, status, latency, url, "连通成功", body);
-            }
-            return new ProbeResult(false, status, latency, url,
-                    stripKey("连通失败，HTTP " + status, apiKey), "");
-        } catch (Exception ex) {
-            long latency = System.currentTimeMillis() - started;
-            String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
-            return new ProbeResult(false, 0, latency, url, stripKey("请求失败：" + message, apiKey), "");
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
-        }
     }
 
     /**

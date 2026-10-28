@@ -8,6 +8,7 @@ import io.github.yinwenyuan28.ailite.catalog.BizBinding;
 import io.github.yinwenyuan28.ailite.catalog.CatalogModel;
 import io.github.yinwenyuan28.ailite.catalog.ProviderOverlay;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
+import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.llm.CallBodyPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmThinkingLevel;
@@ -58,24 +59,46 @@ public class AdminController {
     private final JdbcTemplate jdbc;
     private final String callTable;
     private final JdbcCallBodyPolicy bodyPolicy;
+    private final HttpExecutor http;
 
     /**
-     * @param config    配置文件里的供应商与业务 id
-     * @param catalog   运行时目录
-     * @param prompts   提示词管理器，可为 null
-     * @param jdbc      调用记录查询
-     * @param callTable 调用记录表名，未配置时为 null
+     * 兼容构造器：不传执行器时诊断走 HttpURLConnection 兜底。
+     *
+     * <p>生产装配必须用带 {@link HttpExecutor} 的构造器——只有那样"测试连通"
+     * 与"测试调用"才与真实模型调用走同一条出站链路。</p>
+     *
+     * @param config     配置文件里的供应商与业务 id
+     * @param catalog    运行时目录
+     * @param prompts    提示词管理器，可为 null
+     * @param jdbc       调用记录查询
+     * @param callTable  调用记录表名，未配置时为 null
      * @param bodyPolicy 输入输出记录档位，可为 null
      */
     public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
                            JdbcTemplate jdbc, String callTable,
                            JdbcCallBodyPolicy bodyPolicy) {
+        this(config, catalog, prompts, jdbc, callTable, bodyPolicy, null);
+    }
+
+    /**
+     * @param config     配置文件里的供应商与业务 id
+     * @param catalog    运行时目录
+     * @param prompts    提示词管理器，可为 null
+     * @param jdbc       调用记录查询
+     * @param callTable  调用记录表名，未配置时为 null
+     * @param bodyPolicy 输入输出记录档位，可为 null
+     * @param http       出站执行器（配置启用的传输）；null 表示退化为 HttpURLConnection
+     */
+    public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
+                           JdbcTemplate jdbc, String callTable,
+                           JdbcCallBodyPolicy bodyPolicy, HttpExecutor http) {
         this.config = config;
         this.catalog = catalog;
         this.prompts = prompts;
         this.jdbc = jdbc;
         this.callTable = callTable;
         this.bodyPolicy = bodyPolicy;
+        this.http = http;
     }
 
     /**
@@ -128,7 +151,7 @@ public class AdminController {
         AiLiteConfig.Provider provider = requireProvider(name);
         Endpoint endpoint = endpoint(name, provider);
         ModelSyncClient.ProbeResult probe = ModelSyncClient.probe(
-                endpoint.baseUrl, endpoint.apiKey, endpoint.connectMs, endpoint.readMs);
+                http, endpoint.baseUrl, endpoint.apiKey, endpoint.connectMs, endpoint.readMs);
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         data.put("url", probe.getCheckedUrl());
         data.put("httpStatus", Integer.valueOf(probe.getHttpStatus()));
@@ -148,7 +171,8 @@ public class AdminController {
     public Map<String, Object> syncModels(@PathVariable("name") String name) {
         AiLiteConfig.Provider provider = requireProvider(name);
         Endpoint endpoint = endpoint(name, provider);
-        List<String> remote = ModelSyncClient.listRemote(provider.getApi(), endpoint.baseUrl, endpoint.apiKey);
+        List<String> remote = ModelSyncClient.listRemote(
+                http, provider.getApi(), endpoint.baseUrl, endpoint.apiKey);
         Set<String> stored = new HashSet<String>();
         for (CatalogModel model : catalog.listModels(name)) {
             stored.add(model.getModelId());
@@ -233,7 +257,7 @@ public class AdminController {
             thinkingLevel = LlmThinkingLevel.parse(thinkingLevel).wire();
         }
         ModelSyncClient.TryResult result = ModelSyncClient.tryChat(
-                provider.getApi(), endpoint.baseUrl, endpoint.apiKey, modelId, format, maxTokens,
+                http, provider.getApi(), endpoint.baseUrl, endpoint.apiKey, modelId, format, maxTokens,
                 thinkingLevel, endpoint.connectMs, endpoint.readMs);
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         data.put("ok", Boolean.valueOf(result.isOk()));
