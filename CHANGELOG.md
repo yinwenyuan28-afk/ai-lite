@@ -3,7 +3,7 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
-## [0.1.8] - 未发布（对外契约冻结 + Agent 运行时能力）
+## [0.1.8] - 2026-10-28（对外契约冻结 + Agent 运行时能力）
 
 ### 新增
 
