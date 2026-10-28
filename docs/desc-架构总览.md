@@ -678,6 +678,7 @@ JDBC 自动装配在 `JdbcTemplateAutoConfiguration` 之后、`AiLiteSessionAuto
 | --- | --- | --- |
 | `LlmTransport` | 三个内置协议 | 实现 `api()` + `complete`，注册为 Bean |
 | `HttpExecutor` | OkHttp / OkHttp-Virtual / Jetty / JDK8 | 实现同步接口；需要异步回调时同时实现 `AsyncHttpExecutor`。Starter 按 `ai-lite.http.transport` 选择 |
+| `RawHttpExecutor` | 六种传输均已实现 | 诊断用途：同一出站链路，但不把非 2xx 当异常、保留完整错误正文。管理台的连通探测与测试调用经它发出，因此与业务调用同 TLS、同代理、同超时 |
 | `ToolExecutor` | `SequentialToolExecutor` | 实现批量执行；必须保证结果顺序与入参一致 |
 | `ExecutorProvider` | Platform / Direct / Virtual / Coroutines | 实现 `io()`，交给 Starter 或手动注入 |
 | `AgentSessionStore` | InMemory / JDBC | 实现 `find/save/delete/exists` |

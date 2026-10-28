@@ -34,6 +34,17 @@ LlmGateway          网关层：校验、选模型、出口保护、重试、调
 | ktor-cio | NIO + 协程 | Ktor CIO 引擎线程 | 不占等待线程 | 逐行挂起读取 | `Job.cancel()` |
 | jdk8 | 阻塞 I/O | 自建 cached 池（`ai-lite-jdk8-http-N`，daemon） | 1 个临时线程直到响应读完 | 阻塞读循环 | 等响应头阶段 `disconnect()` 有效；**读正文阶段 best-effort** |
 
+两个传输层的坑，只有 Jetty 有：
+
+- **https 必须配 `SslContextFactory`**。Jetty 9.4 的 `new HttpClient()` 不带 TLS 配置，
+  请求 `https://` 供应商时会在 `send()` 抛 `NullPointerException: Missing SslContextFactory`。
+  本框架已固定传入 `SslContextFactory.Client()`。
+- **401/407 的认证协议处理器会误伤**。Jetty 内置处理器要求 401/407 响应带
+  `WWW-Authenticate` challenge，而 LLM 供应商用 `Authorization: Bearer`、401 时通常不带该头，
+  于是抛 `HTTP protocol violation: Authentication challenge without WWW-Authenticate header`。
+  本框架在 `start()` **之后**移除这两个处理器（启动阶段会被重新注册，提前删无效），
+  让 401 作为普通响应交给网关分类。
+
 三个容易误解的点：
 
 - **`enqueue` 是"调用线程异步"，不是"I/O 非阻塞"。** OkHttp 的异步只是把任务从调用线程挪到 Dispatcher 线程，每个在途请求仍然实打实占一个平台线程。所以"换成 oneAsync"减少的是调用线程，不是传输层线程；想把传输层线程也压下来，才需要 NIO 传输或虚拟线程。

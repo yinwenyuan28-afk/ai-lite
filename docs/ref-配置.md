@@ -338,7 +338,25 @@ http:
 | `dispatcher.max-requests` | `64` | `okhttp`、`okhttp-virtual` | 全局在途请求上限 |
 | `dispatcher.max-requests-per-host` | `5` | `okhttp`、`okhttp-virtual` | 单 host 在途请求上限 |
 | `jetty.max-connections-per-destination` | Jetty 默认 | `jetty` | 单目标连接数上限 |
-| `jetty.threads` | Jetty 默认 | `jetty` | 自定义 Jetty 线程池大小；0 表示不覆盖 |
+| `jetty.threads` | Jetty 默认 | `jetty` | 自定义线程池大小；0 表示不覆盖。**必须 ≥ `max(1, CPU核数/2) + 2`**，见下方说明 |
+
+> **`jetty.threads` 的下限**：Jetty 用 NIO selector 线程驱动连接，固定大小线程池必须大于
+> selector 及保留线程的占用，否则客户端 `start()` 会报
+> `Insufficient configured threads: required=N < max=N`。此错误发生在**第一次调模型时**
+> （客户端懒创建），不是应用启动时，所以容易误判成上游故障。实测下界为
+> `max(1, CPU核数/2) + 2`：
+>
+> | CPU 核数 | 最少 threads |
+> | --- | --- |
+> | 2 | 3 |
+> | 4 | 4 |
+> | 8 | 6 |
+> | 16 | 10 |
+> | 32 | 18 |
+>
+> 拿不准就删掉这一项或写 `0`，让 Jetty 用默认池（上限 200）。另外注意：客户端按
+> connect timeout 分组缓存（最多 16 组），每组各自持有一个这么大的线程池，先按
+> "threads × 组数"估算总线程数。
 | `ktor.max-connections` | 引擎默认 | `ktor-cio` | 最大连接数 |
 | `ktor.max-connections-per-route` | 引擎默认 | `ktor-cio` | 单路由连接数 |
 | `ktor.pipelining` | 引擎默认 | `ktor-cio` | 是否复用连接 |

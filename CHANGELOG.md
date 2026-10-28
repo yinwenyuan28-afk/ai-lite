@@ -3,6 +3,26 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.9] - 未发布
+
+### 修复
+
+- **Jetty 传输在 https 下完全不可用**：`createClient` 用裸 `new HttpClient()`，没有配 `SslContextFactory`。任何 `https://` 供应商都会在 `send()` 阶段抛 `NullPointerException: Missing SslContextFactory`，且该异常不属于 `transport` 类失败、不会被重试策略接住，表现为"直接失败、无从下手"。现改为 `new HttpClient(new SslContextFactory.Client())`（默认排除 SSLv2/v3、启用 hostname 校验、使用 JVM 默认 truststore）。0.1.8 发布包受影响。
+- **Jetty 把供应商的 401 变成无法分类的传输错误**：Jetty 内置的 `www-authenticate` / `proxy-authenticate` 协议处理器要求 401/407 响应必须带 challenge 头，而 LLM 供应商一律用 `Authorization: Bearer`，401 时不带该头，于是抛出 `HttpResponseException: HTTP protocol violation: Authentication challenge without WWW-Authenticate header`。现在在 `start()` 之后移除这两个处理器（`start()` 会重新注册，提前删无效），401 作为普通响应交给网关分类成 `Kind.HTTP`，多 key 轮换的 401 冷却逻辑也才真正生效。
+- **`ai-lite.http.jetty.threads` 配小后首次调用即失败且提示难懂**：Jetty 用 NIO selector 驱动连接，固定大小线程池必须大于 selector 占用的线程数，否则 `ThreadPoolBudget` 在 `start()` 拒绝，报 `Insufficient configured threads: required=8 < max=1`。由于客户端是懒创建的，Spring 容器能正常启动，用户看到的却是"服务起来了、第一次调模型就挂"。现在在创建客户端前校验，直接抛出说明性错误（含本机核数、所需最小值与"或删掉该项用默认池"的出路）。实测下界为 `max(1, CPU/2) + 2`：2 核 → 3、4/5 核 → 4、8 核 → 6、16 核 → 10、32 核 → 18，9.4.22 与 9.4.53 一致。
+- **管理台的"试跑/测试连通"绕开了配置启用的传输**：`ModelSyncClient` 直接用 `HttpURLConnection`，与 `ai-lite.http.transport` 选的客户端无关。后果是同一份配置下，管理台显示"调用成功"而业务调用全挂（例如网关配了 https 的 Jetty、而诊断走的是另一条没配 TLS 的链路）。现在诊断统一经 `HttpExecutor` 发出，与真实模型调用同连接池、同 TLS、同超时、同代理配置。仅在没有该 Bean 时（单独引入 `ai-lite-admin-api`）才退化为 `HttpURLConnection` 并打 WARN。
+
+### 新增
+
+- **`RawHttpExecutor`**（`ai-lite-llm`）：与 `HttpExecutor` 共用同一出站链路，但**不因状态码非 2xx 抛异常**，把状态码与完整正文交回调用方。原来的 `HttpExecutor.execute` 为控制错误消息体积会把正文截到 300 字符，管理台试跑看不到供应商返回的完整错误体（401 的 message、400 的字段校验、网关的 HTML 错误页），诊断价值大打折扣。按既有 SPI 演化承诺（B 组方法集终态、新能力走新接口）单独成接口，不动 `HttpExecutor`。OkHttp / okhttp-virtual / Jetty / WebClient / Ktor CIO / JDK8 六种实现全部支持。
+- **`HttpRequest` 支持 GET**：新增带 `method` 的构造器与 `HttpRequest.GET` / `POST` 常量，用于 `GET {baseUrl}/models` 这样的只读探测。原 6 参构造器语义不变（仍为 POST），不需要改动任何既有调用方。
+- **`ModelSyncClient` 接受 `HttpExecutor`**：`sync` / `listRemote` / `tryChat` / `probe` 均新增首参为执行器的重载；旧签名保留并转调（退化为 `HttpURLConnection`），仅用于脱离 Starter 的场景。
+- **`AdminController` 新增带 `HttpExecutor` 的构造器**，自动装配经 `ObjectProvider` 注入；取不到时打 WARN 说明诊断与业务不是同一条链路。
+
+### 工程
+
+- 新增回归测试：Jetty 的 https 不得出现 `Missing SslContextFactory`、401 必须原样返回、`exchange` 保留完整错误正文、`GET` 探测不带请求体、`threads` 过小时给出可操作提示；管理台的试跑必须经过配置的执行器（用带标记头的执行器证明），且能展示供应商返回的完整错误正文。
+
 ## [0.1.8] - 2026-10-28（对外契约冻结 + Agent 运行时能力）
 
 ### 新增

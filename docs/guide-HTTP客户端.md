@@ -67,6 +67,10 @@ ai-lite:
 - `okhttp` / `okhttp-virtual` 使用 `dispatcher.*`；连接池大小会跟随 `max-requests` 调整。
 - `jetty` / `ktor-cio` / `webclient` / `jdk8` 不使用 `dispatcher.*`，配置了会得到启动警告。
 - 只配置 `transport` 而没有引入对应模块，会在启动时 fail-fast，不会静默退回 OkHttp。
+- **`jetty.threads` 不能随手调小**：Jetty 的 selector 线程先占掉一部分，线程池小于
+  `max(1, CPU核数/2) + 2` 时客户端会在**第一次调模型时**（懒创建）报
+  `Insufficient configured threads`。默认 `0` 最安全；确需限制时按
+  [配置参考 §4](ref-配置.md) 的对照表取值。
 
 ### 1.3 `ai-lite.executor`
 

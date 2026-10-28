@@ -36,4 +36,6 @@
 
 `none` 不记模型输入输出。`failure` 只记失败调用。`all` 每次都记。正文落在 `AI_LITE_LLM_CALL_BODY`，不含密钥和图片原文。档位存在 `AI_LITE_ADMIN_SETTING`。
 
+**连通探测与测试调用走配置启用的 HTTP 传输**（`ai-lite.http.transport`），与真实模型调用同一连接池、同一 TLS 配置、同一超时。因此管理台说"通"就意味着业务侧也能通——这是刻意为之：早期版本用独立的 `HttpURLConnection`，曾出现"管理台调用成功、业务调用全挂"的错位（网关走 Jetty 但没配 TLS 时尤其典型）。只有单独引入 `ai-lite-admin-api`、容器中没有 `HttpExecutor` 时才会退化为 `HttpURLConnection`，并在启动日志里打 WARN。连通探测固定 `GET {baseUrl}/models`；测试调用固定 `POST {baseUrl}/chat/completions`。
+
 思考格式不是自由文本，只能用 `GET /thinking-formats` 返回的 id。它决定请求体里怎么写思考开关。测试调用的 `thinkingLevel` 决定是否打开思考以及 `reasoning_effort` 等字段的值（`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`）。
