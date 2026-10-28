@@ -212,13 +212,13 @@ public class JettyHttpExecutorTest {
                 });
     }
 
-    /** 回归：exchange 不把 4xx 转成异常，错误正文原样返回给管理台。 */
+    /** 回归：executeRaw 不把 4xx 转成异常，错误正文原样返回给管理台。 */
     @Test
-    public void exchangeReturnsErrorBodyInsteadOfThrowing() throws Exception {
+    public void executeRawReturnsErrorBodyInsteadOfThrowing() throws Exception {
         server.enqueue(new MockResponse().setResponseCode(401)
                 .setBody("{\"error\":{\"message\":\"bad key\"}}"));
 
-        HttpResult result = executor.exchange(request("/v1/chat", null));
+        HttpResult result = executor.executeRaw(request("/v1/chat", null));
 
         assertThat(result.getStatus()).isEqualTo(401);
         assertThat(result.getBody()).contains("bad key");
@@ -226,10 +226,10 @@ public class JettyHttpExecutorTest {
 
     /** 诊断探测需要 GET，且不得带请求体。 */
     @Test
-    public void exchangeSupportsGetWithoutBody() throws Exception {
+    public void executeRawSupportsGetWithoutBody() throws Exception {
         server.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":[]}"));
 
-        HttpResult result = executor.exchange(new HttpRequest(HttpRequest.GET,
+        HttpResult result = executor.executeRaw(new HttpRequest(HttpRequest.GET,
                 server.url("/v1/models").toString(),
                 Collections.<String, String>emptyMap(), null, 3000, 3000, null));
 

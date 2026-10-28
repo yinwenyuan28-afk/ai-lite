@@ -91,7 +91,7 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor, RawHttpExecuto
      * 取消绑定完全一致。</p>
      */
     @Override
-    public HttpResult exchange(HttpRequest request) {
+    public HttpResult executeRaw(HttpRequest request) {
         HttpURLConnection connection = null;
         try {
             connection = open(request);

@@ -27,9 +27,10 @@ public interface RawHttpExecutor extends HttpExecutor {
      * {@link io.github.yinwenyuan28.ailite.llm.LlmCallException}；HTTP 语义上的
      * 失败（4xx/5xx）以 {@link HttpResult} 返回，由调用方决定如何呈现。</p>
      *
-     * @param request 请求。与 {@link HttpExecutor#execute} 使用同一模型，方法固定为 POST
+     * @param request 请求。与 {@link HttpExecutor#execute} 使用同一模型，方法可为
+     *                POST（试跑、同步）或 GET（探测 {@code /models}）
      * @return 状态码与完整响应体（3xx 同样原样返回，不做重定向跟随）
      * @throws io.github.yinwenyuan28.ailite.llm.LlmCallException 网络层失败、超时或取消
      */
-    HttpResult exchange(HttpRequest request);
+    HttpResult executeRaw(HttpRequest request);
 }

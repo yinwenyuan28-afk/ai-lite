@@ -118,7 +118,7 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
      * SslContextFactory），因此试跑看到的成败与真实模型调用一致。</p>
      */
     @Override
-    public HttpResult exchange(HttpRequest request) {
+    public HttpResult executeRaw(HttpRequest request) {
         ensureOpen();
         checkCancelled(request.getCancel());
         Request jettyRequest = newRequest(request, false);

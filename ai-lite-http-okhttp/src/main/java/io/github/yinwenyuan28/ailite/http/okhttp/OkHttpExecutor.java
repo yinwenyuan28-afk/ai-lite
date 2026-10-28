@@ -92,7 +92,7 @@ public final class OkHttpExecutor implements AsyncHttpExecutor, RawHttpExecutor 
      * dispatcher），试跑看到的成败因此与真实模型调用一致。</p>
      */
     @Override
-    public HttpResult exchange(HttpRequest request) {
+    public HttpResult executeRaw(HttpRequest request) {
         Call call = buildCall(request);
         try {
             Response response = call.execute();

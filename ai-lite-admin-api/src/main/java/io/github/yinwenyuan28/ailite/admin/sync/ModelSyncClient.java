@@ -279,7 +279,7 @@ public final class ModelSyncClient {
      */
     private static HttpResult send(HttpExecutor http, HttpRequest request) {
         if (http instanceof RawHttpExecutor) {
-            return ((RawHttpExecutor) http).exchange(request);
+            return ((RawHttpExecutor) http).executeRaw(request);
         }
         if (http != null) {
             try {

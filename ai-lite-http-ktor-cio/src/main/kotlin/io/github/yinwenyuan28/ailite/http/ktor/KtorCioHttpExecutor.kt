@@ -107,7 +107,7 @@ class KtorCioHttpExecutor private constructor(
      *
      * <p>复用同一个 {@link HttpClient}，连接池、超时与 TLS 配置和真实调用一致。</p>
      */
-    override fun exchange(request: HttpRequest): HttpResult {
+    override fun executeRaw(request: HttpRequest): HttpResult {
         ensureOpen()
         return try {
             runBlocking {

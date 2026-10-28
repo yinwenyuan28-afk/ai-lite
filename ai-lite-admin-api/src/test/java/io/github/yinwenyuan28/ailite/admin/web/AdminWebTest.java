@@ -175,8 +175,8 @@ public class AdminWebTest {
         }
 
         @Override
-        public HttpResult exchange(HttpRequest request) {
-            return delegate.exchange(mark(request));
+        public HttpResult executeRaw(HttpRequest request) {
+            return delegate.executeRaw(mark(request));
         }
 
         @Override

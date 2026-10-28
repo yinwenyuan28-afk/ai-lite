@@ -102,7 +102,7 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
      * 与 TLS 配置和真实调用一致。</p>
      */
     @Override
-    public HttpResult exchange(HttpRequest request) {
+    public HttpResult executeRaw(HttpRequest request) {
         CompletableFuture<HttpResult> future = exchangeRaw(request);
         try {
             return future.get();
@@ -115,7 +115,7 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
         }
     }
 
-    /** {@link #exchange} 的异步内核；错误体按上限完整读回，不转成异常。 */
+    /** {@link #executeRaw} 的异步内核；错误体按上限完整读回，不转成异常。 */
     private CompletableFuture<HttpResult> exchangeRaw(HttpRequest request) {
         final CompletableFuture<HttpResult> future = new CompletableFuture<HttpResult>();
         if (!openOrFail(future) || cancelOrFail(future, request.getCancel())) {
