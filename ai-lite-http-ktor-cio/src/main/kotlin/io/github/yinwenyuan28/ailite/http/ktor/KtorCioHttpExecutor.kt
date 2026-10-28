@@ -5,6 +5,7 @@ import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor
 import io.github.yinwenyuan28.ailite.http.HttpExecutor
 import io.github.yinwenyuan28.ailite.http.HttpRequest
 import io.github.yinwenyuan28.ailite.http.HttpResult
+import io.github.yinwenyuan28.ailite.http.RawHttpExecutor
 import io.github.yinwenyuan28.ailite.http.StreamListener
 import io.github.yinwenyuan28.ailite.llm.LlmCallException
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle
@@ -13,11 +14,12 @@ import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.timeout
 import io.ktor.client.request.header
-import io.ktor.client.request.preparePost
+import io.ktor.client.request.prepareRequest
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.ByteReadChannel
@@ -51,7 +53,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class KtorCioHttpExecutor private constructor(
         private val config: AiLiteConfig.Http
-) : AsyncHttpExecutor {
+) : AsyncHttpExecutor, RawHttpExecutor {
 
     companion object {
         private const val MAX_LINE_CHARS = 1024 * 1024
@@ -94,6 +96,27 @@ class KtorCioHttpExecutor private constructor(
         ensureOpen()
         return try {
             runBlocking { executeInternal(request) }
+        } catch (ex: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED)
+        }
+    }
+
+    /**
+     * 诊断用：非 2xx 也返回状态码与完整正文。
+     *
+     * <p>复用同一个 {@link HttpClient}，连接池、超时与 TLS 配置和真实调用一致。</p>
+     */
+    override fun exchange(request: HttpRequest): HttpResult {
+        ensureOpen()
+        return try {
+            runBlocking {
+                checkCancelled(request.cancel)
+                statement(request).execute { response ->
+                    // 与 executeInternal 的唯一区别：不检查状态码，原样返回。
+                    HttpResult(response.status.value, response.bodyAsText())
+                }
+            }
         } catch (ex: InterruptedException) {
             Thread.currentThread().interrupt()
             throw LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED)
@@ -191,12 +214,15 @@ class KtorCioHttpExecutor private constructor(
         }
     }
 
-    private suspend fun statement(request: HttpRequest) = client.preparePost(request.url) {
+    private suspend fun statement(request: HttpRequest) = client.prepareRequest(request.url) {
+        method = HttpMethod.parse(request.method)
         request.headers.forEach { (name, value) -> header(name, value) }
-        if (request.headers.keys.none { it.equals("Content-Type", true) }) {
-            contentType(ContentType.Application.Json)
+        if (!request.isGet) {
+            if (request.headers.keys.none { it.equals("Content-Type", true) }) {
+                contentType(ContentType.Application.Json)
+            }
+            setBody(request.body)
         }
-        setBody(request.body)
         timeout {
             requestTimeoutMillis = HttpTimeout.INFINITE_TIMEOUT_MS
             if (request.connectTimeoutMs > 0) {

@@ -3,6 +3,7 @@ package io.github.yinwenyuan28.ailite.http.okhttp;
 import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
+import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
@@ -28,7 +29,7 @@ import java.util.concurrent.TimeUnit;
  * <p>所有请求共用一个连接池和 dispatcher；每次调用只在 newBuilder 上覆盖超时，
  * 不会为一次请求新建整套线程和连接资源。</p>
  */
-public final class OkHttpExecutor implements AsyncHttpExecutor {
+public final class OkHttpExecutor implements AsyncHttpExecutor, RawHttpExecutor {
 
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
@@ -77,6 +78,31 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
             }
         } catch (LlmCallException ex) {
             throw ex;
+        } catch (IOException ex) {
+            throw wrap(ex, request.getCancel());
+        } finally {
+            unbind(request.getCancel());
+        }
+    }
+
+    /**
+     * 诊断用：非 2xx 也返回状态码与完整正文。
+     *
+     * <p>与 {@link #execute} 共用同一个 {@link OkHttpClient}（同一连接池、同一
+     * dispatcher），试跑看到的成败因此与真实模型调用一致。</p>
+     */
+    @Override
+    public HttpResult exchange(HttpRequest request) {
+        Call call = buildCall(request);
+        try {
+            Response response = call.execute();
+            try {
+                // 与 execute 的唯一区别：不校验状态码，4xx/5xx 原样交回。
+                ResponseBody body = response.body();
+                return new HttpResult(response.code(), body == null ? "" : body.string());
+            } finally {
+                response.close();
+            }
         } catch (IOException ex) {
             throw wrap(ex, request.getCancel());
         } finally {
@@ -240,7 +266,9 @@ public final class OkHttpExecutor implements AsyncHttpExecutor {
         for (Map.Entry<String, String> header : request.getHeaders().entrySet()) {
             builder.header(header.getKey(), header.getValue());
         }
-        builder.post(RequestBody.create(request.getBody(), JSON));
+        // GET 不能带 body；OkHttp 会对带 body 的 GET 抛异常。
+        builder.method(request.getMethod(), request.isGet()
+                ? null : RequestBody.create(request.getBody(), JSON));
         Call call = client.newCall(builder.build());
         bind(request.getCancel(), call);
         return call;

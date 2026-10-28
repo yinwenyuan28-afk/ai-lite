@@ -5,6 +5,7 @@ import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
+import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
 import io.github.yinwenyuan28.ailite.internal.http.Utf8LineBuffer;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
@@ -46,7 +47,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>连接资源由独立的 {@link ReactorResourceFactory} 管理，不触碰应用全局的
  * Reactor Netty 资源；{@code close()} 只销毁自己创建的资源。</p>
  */
-public final class WebClientHttpExecutor implements AsyncHttpExecutor {
+public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpExecutor {
 
     private static final Charset UTF_8 = Charset.forName("UTF-8");
     private static final int MAX_LINE_BYTES = 1024 * 1024;
@@ -94,6 +95,49 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor {
         }
     }
 
+    /**
+     * 诊断用：非 2xx 也返回状态码与完整正文。
+     *
+     * <p>复用同一 {@link WebClient} 与 {@link ReactorResourceFactory}，因此连接池
+     * 与 TLS 配置和真实调用一致。</p>
+     */
+    @Override
+    public HttpResult exchange(HttpRequest request) {
+        CompletableFuture<HttpResult> future = exchangeRaw(request);
+        try {
+            return future.get();
+        } catch (InterruptedException ex) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED);
+        } catch (ExecutionException ex) {
+            throw unwrap(ex.getCause());
+        }
+    }
+
+    /** {@link #exchange} 的异步内核；错误体按上限完整读回，不转成异常。 */
+    private CompletableFuture<HttpResult> exchangeRaw(HttpRequest request) {
+        final CompletableFuture<HttpResult> future = new CompletableFuture<HttpResult>();
+        if (!openOrFail(future) || cancelOrFail(future, request.getCancel())) {
+            return future;
+        }
+        try {
+            Mono<HttpResult> result = requestMono(request).flatMap(response -> {
+                int status = response.statusCode().value();
+                if (response.statusCode().is2xxSuccessful()) {
+                    return response.bodyToMono(String.class).defaultIfEmpty("")
+                            .map(body -> new HttpResult(status, body));
+                }
+                return errorBody(response).defaultIfEmpty("")
+                        .map(body -> new HttpResult(status, body));
+            });
+            subscribeMono(result, future, request.getCancel());
+        } catch (RuntimeException ex) {
+            future.completeExceptionally(mapError(ex, request.getCancel()));
+        }
+        return future;
+    }
+
     @Override
     public void executeStreaming(HttpRequest request, StreamListener listener) {
         CompletableFuture<Void> future = executeStreamingAsync(request, listener);
@@ -115,7 +159,7 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor {
             return future;
         }
         try {
-            Mono<HttpResult> result = exchange(request).flatMap(response -> {
+            Mono<HttpResult> result = requestMono(request).flatMap(response -> {
                 int status = response.statusCode().value();
                 if (response.statusCode().is2xxSuccessful()) {
                     return response.bodyToMono(String.class).defaultIfEmpty("")
@@ -140,7 +184,7 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor {
             return future;
         }
         try {
-            Flux<String> lines = exchange(request).flatMapMany(response -> {
+            Flux<String> lines = requestMono(request).flatMapMany(response -> {
                 int status = response.statusCode().value();
                 if (!response.statusCode().is2xxSuccessful()) {
                     return errorBody(response).defaultIfEmpty("")
@@ -188,18 +232,23 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor {
      * 构造请求。连接/响应头等待和 body 读空闲分别用两个 timeout：
      * 前者覆盖建连与首包，后者覆盖流式读取中的空闲。
      */
-    private Mono<ClientResponse> exchange(HttpRequest request) {
-        WebClient.RequestBodySpec spec = client.post().uri(request.getUrl());
-        if (!request.getHeaders().containsKey("Content-Type")) {
-            spec.contentType(MediaType.APPLICATION_JSON);
+    private Mono<ClientResponse> requestMono(HttpRequest request) {
+        WebClient.RequestHeadersSpec<?> spec;
+        if (request.isGet()) {
+            spec = client.get().uri(request.getUrl());
+        } else {
+            WebClient.RequestBodySpec post = client.post().uri(request.getUrl());
+            spec = post.body(BodyInserters.fromObject(request.getBody()));
         }
-        spec.headers(headers -> {
+        if (!request.getHeaders().containsKey("Content-Type")) {
+            spec = spec.header("Content-Type", MediaType.APPLICATION_JSON_VALUE);
+        }
+        spec = spec.headers(headers -> {
             for (Map.Entry<String, String> header : request.getHeaders().entrySet()) {
                 headers.set(header.getKey(), header.getValue());
             }
         });
-        Mono<ClientResponse> mono = spec.body(BodyInserters.fromObject(request.getBody()))
-                .exchange();
+        Mono<ClientResponse> mono = spec.exchange();
         if (request.getConnectTimeoutMs() > 0) {
             mono = mono.timeout(Duration.ofMillis(request.getConnectTimeoutMs()));
         }

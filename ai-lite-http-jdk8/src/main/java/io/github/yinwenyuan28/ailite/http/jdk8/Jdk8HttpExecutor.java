@@ -3,6 +3,7 @@ package io.github.yinwenyuan28.ailite.http.jdk8;
 import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
+import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
@@ -29,7 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>适合不能引入 OkHttp 的老项目。连接池能力弱于 OkHttp，但行为足够覆盖
  * Chat Completions、Responses 和 Anthropic Messages 的阻塞与 SSE 调用。</p>
  */
-public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
+public final class Jdk8HttpExecutor implements AsyncHttpExecutor, RawHttpExecutor {
 
     private final Executor executor;
     private final java.util.concurrent.ExecutorService ownedExecutor;
@@ -83,6 +84,32 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
         }
     }
 
+    /**
+     * 诊断用：非 2xx 也返回状态码与完整正文。
+     *
+     * <p>直接复用 {@link #open}，因此与 {@link #execute} 的请求头、超时、
+     * 取消绑定完全一致。</p>
+     */
+    @Override
+    public HttpResult exchange(HttpRequest request) {
+        HttpURLConnection connection = null;
+        try {
+            connection = open(request);
+            int status = connection.getResponseCode();
+            // 与 execute 的唯一区别：错误流也当正常结果读回，不抛异常。
+            InputStream stream = status >= 400
+                    ? connection.getErrorStream() : connection.getInputStream();
+            return new HttpResult(status, readAll(stream));
+        } catch (LlmCallException ex) {
+            throw ex;
+        } catch (IOException ex) {
+            disconnect(connection);
+            throw wrap(ex, request.getCancel());
+        } finally {
+            unbind(request.getCancel());
+        }
+    }
+
     @Override
     public void executeStreaming(HttpRequest request, StreamListener listener) {
         HttpURLConnection connection = null;
@@ -116,10 +143,9 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
 
     private static HttpURLConnection open(HttpRequest request) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(request.getUrl()).openConnection();
-        connection.setRequestMethod("POST");
+        connection.setRequestMethod(request.getMethod());
         connection.setConnectTimeout(request.getConnectTimeoutMs());
         connection.setReadTimeout(request.getReadTimeoutMs());
-        connection.setDoOutput(true);
         connection.setRequestProperty("Accept-Encoding", "identity");
         for (Map.Entry<String, String> header : request.getHeaders().entrySet()) {
             connection.setRequestProperty(header.getKey(), header.getValue());
@@ -139,12 +165,16 @@ public final class Jdk8HttpExecutor implements AsyncHttpExecutor {
                         LlmCallException.Kind.CANCELLED);
             }
         }
-        OutputStream output = connection.getOutputStream();
-        try {
-            output.write(request.getBody().getBytes(StandardCharsets.UTF_8));
-            output.flush();
-        } finally {
-            output.close();
+        // GET 不能写 body：HttpURLConnection 会把它当 POST，或因 doOutput 改变语义。
+        if (!request.isGet()) {
+            connection.setDoOutput(true);
+            OutputStream output = connection.getOutputStream();
+            try {
+                output.write(request.getBody().getBytes(StandardCharsets.UTF_8));
+                output.flush();
+            } finally {
+                output.close();
+            }
         }
         return connection;
     }
