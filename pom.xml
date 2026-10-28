@@ -44,13 +44,13 @@
 
         <!-- 编译基线是 Boot 2.1；CI 会用 -Dspring-boot.version=2.7.18 再验证一次。 -->
         <spring-boot.version>2.1.10.RELEASE</spring-boot.version>
-        <okhttp.version>4.12.0</okhttp.version>
+        <okhttp.version>4.12.1</okhttp.version>
         <!-- Boot 2.1 的 BOM 把 kotlin-stdlib 锁在 1.2.x，OkHttp 4.x 需要 1.8+。 -->
         <kotlin.version>1.9.25</kotlin.version>
         <junit.version>4.13.2</junit.version>
-        <assertj.version>3.11.1</assertj.version>
+        <assertj.version>3.27.7</assertj.version>
         <!-- sqlite-jdbc 3.45 仍支持 JDK 8。 -->
-        <sqlite.version>3.45.3.0</sqlite.version>
+        <sqlite.version>3.53.4.0</sqlite.version>
         <!--
             API 兼容性门禁的对比基线：上一个已发布到 Central 的版本。
             每次正式发布后手工前移这一行（随 release 提交一起改）。
@@ -238,7 +238,7 @@
                 <plugin>
                     <groupId>com.github.siom79.japicmp</groupId>
                     <artifactId>japicmp-maven-plugin</artifactId>
-                    <version>0.15.7</version>
+                    <version>0.26.5</version>
                     <configuration>
                         <!--
                             基线制品从 Maven Central 直接拉取。
@@ -277,7 +277,7 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
-                    <version>3.8.1</version>
+                    <version>3.16.0</version>
                     <configuration>
                         <source>${maven.compiler.source}</source>
                         <target>${maven.compiler.target}</target>
@@ -292,7 +292,7 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-jar-plugin</artifactId>
-                    <version>3.1.2</version>
+                    <version>3.5.1</version>
                 </plugin>
             </plugins>
         </pluginManagement>
@@ -426,7 +426,7 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-source-plugin</artifactId>
-                        <version>3.2.1</version>
+                        <version>3.4.0</version>
                         <executions>
                             <execution>
                                 <id>attach-sources</id>
@@ -439,7 +439,7 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-javadoc-plugin</artifactId>
-                        <version>3.2.0</version>
+                        <version>3.12.0</version>
                         <configuration>
                             <!-- 注释是中文且面向 JDK 8：关闭 doclint，避免误报阻断发布。 -->
                             <doclint>none</doclint>
