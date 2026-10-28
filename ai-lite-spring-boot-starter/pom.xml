@@ -17,7 +17,11 @@
     <dependencies>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
-            <artifactId>ai-lite-core</artifactId>
+            <artifactId>ai-lite-llm</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-agent</artifactId>
         </dependency>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>

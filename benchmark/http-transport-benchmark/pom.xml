@@ -24,7 +24,7 @@
     <dependencies>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
-            <artifactId>ai-lite-core</artifactId>
+            <artifactId>ai-lite-llm</artifactId>
             <version>0.1.8-SNAPSHOT</version>
         </dependency>
         <dependency>

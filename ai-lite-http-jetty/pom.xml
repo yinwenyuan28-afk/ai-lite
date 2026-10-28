@@ -17,7 +17,7 @@
     <dependencies>
         <dependency>
             <groupId>io.github.yinwenyuan28-afk</groupId>
-            <artifactId>ai-lite-core</artifactId>
+            <artifactId>ai-lite-llm</artifactId>
         </dependency>
         <!-- 版本由 Boot BOM 管理：2.1 为 9.4.22，2.7 为 9.4.53。 -->
         <dependency>
