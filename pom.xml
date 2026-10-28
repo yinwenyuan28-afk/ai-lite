@@ -44,7 +44,14 @@
 
         <!-- 编译基线是 Boot 2.1；CI 会用 -Dspring-boot.version=2.7.18 再验证一次。 -->
         <spring-boot.version>2.1.10.RELEASE</spring-boot.version>
-        <okhttp.version>4.12.0</okhttp.version>
+        <!--
+            4.12.1 是 4.12.x 线的安全补丁（2026-10-22 发布，4.12.0 停留在 2023 年）：
+            新增 okhttp3.internal.tls.CertificateBlocklist，屏蔽 8 个已知泄露证书的
+            SHA-256。公开方法签名与 4.12.0 完全一致，BridgeInterceptor 仅改
+            User-Agent 版本号。仓库已由 square/okhttp 整体转移为 lysine-dev/okhttp
+            （同一仓库 ID 与 star 数），该版本与 5.5.1 使用同一 GPG 签名密钥。
+        -->
+        <okhttp.version>4.12.1</okhttp.version>
         <!-- Boot 2.1 的 BOM 把 kotlin-stdlib 锁在 1.2.x，OkHttp 4.x 需要 1.8+。 -->
         <kotlin.version>1.9.25</kotlin.version>
         <junit.version>4.13.2</junit.version>

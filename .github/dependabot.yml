@@ -19,6 +19,20 @@ updates:
       # Boot 2.x 基线：Boot 相关依赖由 BOM 管理，禁止 Dependabot 单独升级。
       - dependency-name: "org.springframework.boot:*"
       - dependency-name: "org.springframework:*"
+      # 以下依赖的小版本升级也会破坏基线，必须人工逐个评估（2026-10-28 实测）：
+      # - compiler-plugin 3.16 要求 Maven 3.6.3+（本机 3.6.2 被拒），且默认编译行为变化
+      # - coroutines 1.11 依赖 kotlin-stdlib 2.2.20，与项目固定的 Kotlin 1.9.25 冲突
+      # - japicmp 0.26 的 excludes 语义变化，会改变契约检查结果
+      # - assertj 3.27 跨 16 个 minor，断言 API 有移除
+      # 这些升级由人工判断后改 pom，不走自动化 PR。
+      - dependency-name: "com.github.siom79.japicmp:japicmp-maven-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-compiler-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-jar-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-source-plugin"
+      - dependency-name: "org.apache.maven.plugins:maven-javadoc-plugin"
+      - dependency-name: "org.assertj:assertj-core"
+      - dependency-name: "org.jetbrains.kotlinx:kotlinx-coroutines-*"
+      - dependency-name: "org.jetbrains.kotlin:*"
     groups:
       # 同类小更新合并成一个 PR，减少噪音。
       maven-minor-patch:
