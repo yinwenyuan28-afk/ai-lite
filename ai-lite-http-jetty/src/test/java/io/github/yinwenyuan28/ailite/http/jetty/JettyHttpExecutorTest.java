@@ -193,10 +193,93 @@ public class JettyHttpExecutorTest {
                         assertThat(ex.getKind()).isEqualTo(LlmCallException.Kind.CONFIG));
     }
 
+    /**
+     * 回归：https 必须有 SslContextFactory。
+     *
+     * <p>不带证书也能测：把 https 指向一个明文服务器，握手必然失败。若回归成
+     * {@code new HttpClient()}，失败原因会变成 {@code Missing SslContextFactory}
+     * （在 send 时同步抛 NPE）；配了 SslContextFactory 才是握手阶段的 SSL 异常。</p>
+     */
+    @Test
+    public void httpsRequestHasSslContextFactoryConfigured() {
+        String url = "https://127.0.0.1:" + server.getPort() + "/v1/chat";
+
+        assertThatThrownBy(() -> executor.execute(
+                new HttpRequest(url, Collections.<String, String>emptyMap(), "{}", 3000, 3000, null)))
+                .isInstanceOfSatisfying(LlmCallException.class, ex -> {
+                    assertThat(ex.getMessage()).doesNotContain("Missing SslContextFactory");
+                    assertThat(describe(ex)).doesNotContain("Missing SslContextFactory");
+                });
+    }
+
+    /** 回归：exchange 不把 4xx 转成异常，错误正文原样返回给管理台。 */
+    @Test
+    public void exchangeReturnsErrorBodyInsteadOfThrowing() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(401)
+                .setBody("{\"error\":{\"message\":\"bad key\"}}"));
+
+        HttpResult result = executor.exchange(request("/v1/chat", null));
+
+        assertThat(result.getStatus()).isEqualTo(401);
+        assertThat(result.getBody()).contains("bad key");
+    }
+
+    /** 诊断探测需要 GET，且不得带请求体。 */
+    @Test
+    public void exchangeSupportsGetWithoutBody() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("{\"data\":[]}"));
+
+        HttpResult result = executor.exchange(new HttpRequest(HttpRequest.GET,
+                server.url("/v1/models").toString(),
+                Collections.<String, String>emptyMap(), null, 3000, 3000, null));
+
+        assertThat(result.getStatus()).isEqualTo(200);
+        RecordedRequest recorded = server.takeRequest(5, TimeUnit.SECONDS);
+        assertThat(recorded.getMethod()).isEqualTo("GET");
+        assertThat(recorded.getBodySize()).isEqualTo(0L);
+    }
+
+    /**
+     * 线程池小于 selector+2 时提前失败，并说明原因。
+     *
+     * <p>Jetty 自己的报错是 {@code Insufficient configured threads: required=8 < max=1}，
+     * 且发生在第一次请求而不是启动阶段，用户很难自己定位。</p>
+     */
+    @Test
+    public void tooSmallThreadPoolFailsWithActionableMessage() {
+        AiLiteConfig.Http config = new AiLiteConfig.Http();
+        config.getJetty().setThreads(Integer.valueOf(1));
+        JettyHttpExecutor small = new JettyHttpExecutor(config);
+        try {
+            assertThatThrownBy(() -> small.execute(request("/v1/chat", null)))
+                    .isInstanceOfSatisfying(LlmCallException.class, ex -> {
+                        assertThat(ex.getKind()).isEqualTo(LlmCallException.Kind.CONFIG);
+                        assertThat(ex.getMessage())
+                                .contains("ai-lite.http.jetty.threads")
+                                .contains("至少")
+                                .contains("selector");
+                    });
+        } finally {
+            small.close();
+        }
+    }
+
     private HttpRequest request(String path, LlmCancelHandle cancel) {
         return new HttpRequest(server.url(path).toString(),
                 Collections.<String, String>emptyMap(), "{\"x\":1}",
                 3000, 3000, cancel);
+    }
+
+    /** 把异常原因链拼成字符串，便于断言"没有命中某个根因"。 */
+    private static String describe(Throwable error) {
+        StringBuilder text = new StringBuilder();
+        Throwable current = error;
+        while (current != null) {
+            text.append(current.getClass().getName()).append(':')
+                    .append(current.getMessage()).append('|');
+            current = current.getCause();
+        }
+        return text.toString();
     }
 
     private static LlmCallException awaitFailure(CompletableFuture<?> future) {

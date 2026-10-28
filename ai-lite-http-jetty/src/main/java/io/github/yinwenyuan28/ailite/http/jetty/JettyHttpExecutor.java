@@ -5,6 +5,7 @@ import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
+import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
 import io.github.yinwenyuan28.ailite.internal.http.Utf8LineBuffer;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
@@ -17,6 +18,7 @@ import org.eclipse.jetty.client.api.Result;
 import org.eclipse.jetty.client.util.InputStreamResponseListener;
 import org.eclipse.jetty.client.util.StringContentProvider;
 import org.eclipse.jetty.http.HttpMethod;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 
 import java.io.BufferedReader;
@@ -54,7 +56,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 携带的。这里按 connect timeout 缓存客户端；组合数上限 {@value #MAX_CLIENTS}，
  * 避免异常配置导致线程/selector 泄漏。</p>
  */
-public final class JettyHttpExecutor implements AsyncHttpExecutor {
+public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecutor {
 
     private static final Charset UTF_8 = Charset.forName("UTF-8");
     private static final int MAX_LINE_BYTES = 1024 * 1024;
@@ -95,6 +97,36 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
             ContentResponse response = jettyRequest.send();
             return toResult(response.getStatus(),
                     new String(response.getContent(), UTF_8), response.getHeaders().get("Retry-After"));
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw failure(ex, request.getCancel());
+        } catch (TimeoutException ex) {
+            throw failure(ex, request.getCancel());
+        } catch (ExecutionException ex) {
+            throw failure(ex.getCause(), request.getCancel());
+        } catch (LlmCallException ex) {
+            throw ex;
+        } finally {
+            unbind(request.getCancel());
+        }
+    }
+
+    /**
+     * 诊断用：非 2xx 也返回状态码与完整正文。
+     *
+     * <p>与 {@link #execute} 走同一个 {@link HttpClient}（同一连接池、同一
+     * SslContextFactory），因此试跑看到的成败与真实模型调用一致。</p>
+     */
+    @Override
+    public HttpResult exchange(HttpRequest request) {
+        ensureOpen();
+        checkCancelled(request.getCancel());
+        Request jettyRequest = newRequest(request, false);
+        try {
+            ContentResponse response = jettyRequest.send();
+            // 与 execute 的唯一区别：不把非 2xx 转成异常。
+            return new HttpResult(response.getStatus(),
+                    new String(response.getContent(), UTF_8));
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw failure(ex, request.getCancel());
@@ -319,10 +351,13 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
     private Request newRequest(HttpRequest request, boolean streaming) {
         HttpClient client = client(request);
         Request jettyRequest = client.newRequest(request.getUrl())
-                .method(HttpMethod.POST)
-                // Jetty 9.4 的三参构造器顺序是 (contentType, content, charset)。
-                .content(new StringContentProvider(CONTENT_TYPE, request.getBody(), UTF_8))
+                .method(HttpMethod.fromString(request.getMethod()))
                 .followRedirects(false);
+        // GET 不带请求体；POST 才需要 content。
+        if (!request.isGet()) {
+            // Jetty 9.4 的三参构造器顺序是 (contentType, content, charset)。
+            jettyRequest.content(new StringContentProvider(CONTENT_TYPE, request.getBody(), UTF_8));
+        }
         if (request.getReadTimeoutMs() > 0) {
             jettyRequest.idleTimeout(request.getReadTimeoutMs(), TimeUnit.MILLISECONDS);
         }
@@ -370,7 +405,10 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
     }
 
     private HttpClient createClient(int connectTimeoutMs) {
-        HttpClient client = new HttpClient();
+        // https 必须有 SslContextFactory：Jetty 9.4 不带默认值，缺了会在 send 时抛
+        // NullPointerException: Missing SslContextFactory。Client 变体默认排除
+        // SSLv2/SSLv3、启用 hostname 校验，并使用 JVM 默认 truststore。
+        HttpClient client = new HttpClient(new SslContextFactory.Client());
         client.setConnectTimeout(connectTimeoutMs);
         client.setFollowRedirects(false);
         client.setIdleTimeout(0);
@@ -385,18 +423,65 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor {
         }
         Integer threads = config.getJetty().getThreads();
         if (threads != null && threads.intValue() > 0) {
+            int minThreads = minViableThreads();
+            if (threads.intValue() < minThreads) {
+                // 线程池里 selector 先占掉一部分，剩下的才留给连接与响应处理。
+                // 池小于 selector 数时 Jetty 的 ThreadPoolBudget 在 start() 直接拒绝，
+                // 表现为"应用起来了、第一次调模型才失败"，因此在这里提前说明清楚。
+                throw new LlmCallException("ai-lite.http.jetty.threads=" + threads
+                        + " 太小：本机 " + Runtime.getRuntime().availableProcessors()
+                        + " 核需要至少 " + minThreads + "。Jetty 用 "
+                        + selectorCount() + " 条 selector 线程驱动 NIO，"
+                        + "还需 2 条留给连接与响应处理；或删掉该配置让 Jetty 用默认池",
+                        null, LlmCallException.Kind.CONFIG);
+            }
             QueuedThreadPool pool = new QueuedThreadPool(threads.intValue(), threads.intValue());
             pool.setName("ai-lite-jetty-" + connectTimeoutMs);
             client.setExecutor(pool);
         }
         try {
             client.start();
+            // 必须在 start() 之后：Jetty 会在启动阶段重新注册内置协议处理器，
+            // 提前删除无效。这里去掉 401/407 的认证处理器——它们要求响应带
+            // WWW-Authenticate challenge，而 LLM 供应商一律用 Bearer 头认证，
+            // 401 时不带该头，Jetty 会抛 "HTTP protocol violation: Authentication
+            // challenge without WWW-Authenticate header"，把正常的鉴权失败变成
+            // 无法分类的传输错误。移除后 401 作为普通响应交回网关（Kind.HTTP）。
+            client.getProtocolHandlers().remove("www-authenticate");
+            client.getProtocolHandlers().remove("proxy-authenticate");
             return client;
         } catch (Exception ex) {
             stopQuietly(client);
             throw new LlmCallException("Jetty HTTP 客户端启动失败", ex,
                     LlmCallException.Kind.CONFIG);
         }
+    }
+
+    /**
+     * Jetty 的 selector 数：与 {@code SelectorManager.defaultSelectors} 一致，
+     * {@code max(1, cores / 2)}。
+     *
+     * @return selector 线程数
+     */
+    private static int selectorCount() {
+        return Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+    }
+
+    /**
+     * 固定大小线程池能启动的最小值：selector 数 + 2。
+     *
+     * <p>Jetty 的 {@code ThreadPoolBudget} 在 {@code start()} 里按"已租约线程数
+     * 严格小于池上限"校验，而 selector 只是租约的一部分（还要算保留线程与连接/
+     * 响应处理），于是固定池恰好等于 selector 数时会被拒绝，报错形如
+     * {@code required=8 < max=8}。留 2 条余量是所有核数下都成立的保守下界。</p>
+     *
+     * <p>在 9.4.22 与 9.4.53 上用 {@code -XX:ActiveProcessorCount} 实测：
+     * 2 核 → 3、4 核 → 4、5 核 → 4、8 核 → 6、16 核 → 10、32 核 → 18。</p>
+     *
+     * @return 最小可用线程数
+     */
+    private static int minViableThreads() {
+        return selectorCount() + 2;
     }
 
     private void ensureOpen() {
