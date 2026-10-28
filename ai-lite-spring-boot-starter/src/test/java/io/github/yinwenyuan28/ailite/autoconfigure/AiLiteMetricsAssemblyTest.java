@@ -87,12 +87,15 @@ public class AiLiteMetricsAssemblyTest {
                     LlmGateway gateway = context.getBean(LlmGateway.class);
                     gateway.one(LlmCall.profile("demo", "main",
                             Collections.singletonList(LlmMessage.user("hi"))));
-                    // 用户 store 收到记录（未被替换），指标同时生效。
                     CustomStoreConfig.Store store =
                             context.getBean(CustomStoreConfig.Store.class);
-                    assertThat(store.rows).hasSize(1);
                     MeterRegistry registry = context.getBean(MeterRegistry.class);
+                    // 记录经 AsyncLlmCallLogger 异步提交到 io 线程：store 落行与指标自增
+                    // 都不保证在 one() 返回时已完成，必须先等到指标出现，再断言 store。
                     awaitMeter(registry, "ailite.llm.calls");
+                    awaitStoreRows(store, 1);
+                    // 用户 store 收到记录（未被替换），指标同时生效。
+                    assertThat(store.rows).hasSize(1);
                     assertThat(registry.get("ailite.llm.calls")
                             .tag("biz", "demo").counter().count()).isEqualTo(1.0d);
                 });
@@ -102,6 +105,20 @@ public class AiLiteMetricsAssemblyTest {
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (registry.find(name).counter() == null && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
+    }
+
+    /**
+     * 等待用户 store 收到至少 expected 行。
+     *
+     * <p>写入由 {@code AsyncLlmCallLogger} 投递到执行器，属于异步副作用；
+     * 直接断言会产生竞态（CI 上比本地更容易复现）。</p>
+     */
+    private static void awaitStoreRows(CustomStoreConfig.Store store, int expected)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (store.rows.size() < expected && System.nanoTime() < deadline) {
             Thread.sleep(10L);
         }
     }
