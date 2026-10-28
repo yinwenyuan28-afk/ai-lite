@@ -47,6 +47,42 @@
 
 ### 变更（破坏性，升级前务必阅读）
 
+- **`ai-lite-core` 拆分为 `ai-lite-llm` 与 `ai-lite-agent`**。单次调用（`one` / `oneWithRetry` / `oneAsync` / `oneWithRetryAsync`）此前必须拖入 `AgentLoop`、`Workflow`、会话与压缩等整套编排代码。
+
+  | 模块 | 内容 | 依赖 |
+  | --- | --- | --- |
+  | `ai-lite-llm` | `LlmGateway`、协议适配器、HTTP SPI、`config`、`catalog`、`guard` | slf4j + jackson |
+  | `ai-lite-agent` | `AgentLoop`、`Workflow`、`AgentSessionLoop`、压缩与工具截断 | `ai-lite-llm` |
+  | `ai-lite-core` | **空 jar**，只做传递依赖的聚合坐标 | 上面两个 |
+
+  **包名全部不变**，因此源码一行都不用改；`ai-lite-core` 仍产出 jar（约 4 KB 的空包），现有依赖声明继续有效。想缩小依赖面，把 `ai-lite-core` 换成 `ai-lite-llm` 即可：
+
+  ```xml
+  <!-- 只要单次调用：网关 + 一个 HTTP 实现，不再拖入编排层 -->
+  <dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-llm</artifactId>
+    <version>0.1.8</version>
+  </dependency>
+  <dependency>
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-http-jdk8</artifactId>
+    <version>0.1.8</version>
+  </dependency>
+  ```
+
+  此时额外第三方依赖只有 `slf4j-api` + `jackson-databind`（后者再传递 `jackson-core` / `jackson-annotations`）。
+
+- **API 兼容门禁在 0.1.8 空转一个版本**。`japicmp` 比对的是上一个发布版（`ai-lite.release.version = 0.1.7`），而 0.1.7 里只有 `ai-lite-core` 这一个坐标、且含源码。拆分后：
+
+  | 模块 | 本轮 japicmp | 原因 |
+  | --- | --- | --- |
+  | `ai-lite-core` | 跳过 | 已无源码，旧基线里的类全部被判为"已删除" |
+  | `ai-lite-llm` | 跳过 | Central 上无 0.1.7 基线制品，拉 oldVersion 直接失败 |
+  | `ai-lite-agent` | 跳过 | 同上 |
+
+  **这意味着 0.1.8 没有 API 兼容性保护**。0.1.8 发布后需把 `ai-lite.release.version` 前移到 `0.1.8`，从 0.1.9 起门禁恢复生效。
+
 - **`ai-lite-store-jdbc` 现在要求显式配置表名**。`ai-lite.store.jdbc.table-name` 无默认值；引入模块但未配置会导致**应用启动失败**，错误消息会提示执行 `ai-lite-llm-call.sql` 建表。不需要 JDBC 调用记录的请设置 `ai-lite.store.jdbc.enabled=false`。
 
   ```yaml
