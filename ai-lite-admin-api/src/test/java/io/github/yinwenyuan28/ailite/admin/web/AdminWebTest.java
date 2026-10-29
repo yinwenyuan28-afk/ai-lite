@@ -1,11 +1,13 @@
 package io.github.yinwenyuan28.ailite.admin.web;
 
 import com.sun.net.httpserver.HttpServer;
+import io.github.yinwenyuan28.ailite.admin.jdbc.CallBodySettings;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcCallBodyPolicy;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalog;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalogTest;
 import io.github.yinwenyuan28.ailite.admin.jdbc.SqliteFiles;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
+import io.github.yinwenyuan28.ailite.llm.CallBodyPolicy;
 import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
@@ -502,6 +504,42 @@ public class AdminWebTest {
     }
 
     @Test
+    public void bodyLevelUsesConfiguredSettingTable() throws Exception {
+        JdbcTemplate template = SqliteFiles.open("setting-table");
+        JdbcRuntimeCatalogTest.createTables(template);
+        template.execute("CREATE TABLE MY_ADMIN_SETTING ("
+                + "SETTING_KEY VARCHAR(64) PRIMARY KEY, SETTING_VALUE VARCHAR(32),"
+                + "UPDATE_TIME TIMESTAMP)");
+        JdbcRuntimeCatalog scopedCatalog = new JdbcRuntimeCatalog(template,
+                "AI_LITE_PROVIDER_OVERLAY", "AI_LITE_MODEL", "AI_LITE_BIZ_BINDING", 0);
+        // 模拟容器里按 ai-lite.catalog.setting-table 构建的 Bean。
+        CallBodySettings settings = new JdbcCallBodyPolicy(template, "MY_ADMIN_SETTING");
+        MockMvc scoped = MockMvcBuilders.standaloneSetup(
+                        new AdminController(config, scopedCatalog, prompts, template, null,
+                                settings, httpExecutor))
+                .setMessageConverters(
+                        new ByteArrayHttpMessageConverter(),
+                        new MappingJackson2HttpMessageConverter(AiLiteJson.mapper()))
+                .build();
+
+        scoped.perform(put("/ai-lite/admin/api/calls/body-level")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"level\":\"all\"}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("all")));
+
+        // 关键断言：写进的是配置的表，不是硬编码的 AI_LITE_ADMIN_SETTING。
+        assertThat(template.queryForObject("SELECT COUNT(*) FROM MY_ADMIN_SETTING", Integer.class))
+                .isEqualTo(1);
+        try {
+            template.queryForObject("SELECT COUNT(*) FROM AI_LITE_ADMIN_SETTING", Integer.class);
+            org.junit.Assert.fail("不应写入硬编码表 AI_LITE_ADMIN_SETTING");
+        } catch (org.springframework.dao.DataAccessException expected) {
+            // 表从未被引用，正是期望结果。
+        }
+    }
+
+    @Test
     public void switchRegistersOnlyWhenEnabledOnWeb() {
         WebApplicationContextRunner web = new WebApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(AiLiteAdminAutoConfiguration.class))
@@ -524,10 +562,14 @@ public class AdminWebTest {
      */
     @Configuration
     static class ReadyBeans {
+        /** 最近一次装配使用的连接，供测试断言实际写入位置。 */
+        static volatile JdbcTemplate lastJdbc;
+
         @Bean
         public JdbcTemplate jdbcTemplate() {
             JdbcTemplate template = SqliteFiles.open("admin-switch");
             JdbcRuntimeCatalogTest.createTables(template);
+            lastJdbc = template;
             return template;
         }
 

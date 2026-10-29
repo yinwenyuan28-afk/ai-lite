@@ -1,6 +1,13 @@
 -- AI Lite 运行时目录。只有主键，不建额外唯一索引。
 -- API_KEY 列是供应商密钥，接口只返回脱敏值，不要写进日志。
 -- 按实际数据库调整 VARCHAR / TIMESTAMP。
+--
+-- 四张表的表名都可以改，改完同步修改对应的配置键：
+--   AI_LITE_PROVIDER_OVERLAY → ai-lite.catalog.provider-table
+--   AI_LITE_MODEL            → ai-lite.catalog.model-table
+--   AI_LITE_BIZ_BINDING      → ai-lite.catalog.biz-table
+--   AI_LITE_ADMIN_SETTING    → ai-lite.catalog.setting-table
+-- 表名只允许字母、数字和下划线；配错会在装配期或首次读写时明确报错。
 
 CREATE TABLE AI_LITE_PROVIDER_OVERLAY (
     PROVIDER_ID        VARCHAR(64)  NOT NULL,

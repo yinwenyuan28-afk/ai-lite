@@ -1,6 +1,7 @@
 package io.github.yinwenyuan28.ailite.admin.web;
 
 import io.github.yinwenyuan28.ailite.admin.call.CallLogQuery;
+import io.github.yinwenyuan28.ailite.admin.jdbc.CallBodySettings;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcCallBodyPolicy;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalog;
 import io.github.yinwenyuan28.ailite.admin.sync.ModelSyncClient;
@@ -58,7 +59,7 @@ public class AdminController {
     private final PromptManager prompts;
     private final JdbcTemplate jdbc;
     private final String callTable;
-    private final JdbcCallBodyPolicy bodyPolicy;
+    private final CallBodySettings bodyPolicy;
     private final HttpExecutor http;
 
     /**
@@ -77,10 +78,12 @@ public class AdminController {
     public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
                            JdbcTemplate jdbc, String callTable,
                            JdbcCallBodyPolicy bodyPolicy) {
-        this(config, catalog, prompts, jdbc, callTable, bodyPolicy, null);
+        this(config, catalog, prompts, jdbc, callTable, (CallBodySettings) bodyPolicy, null);
     }
 
     /**
+     * 兼容构造器：档位策略按接口接收，便于注入容器里带自定义表名的 Bean。
+     *
      * @param config     配置文件里的供应商与业务 id
      * @param catalog    运行时目录
      * @param prompts    提示词管理器，可为 null
@@ -92,6 +95,21 @@ public class AdminController {
     public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
                            JdbcTemplate jdbc, String callTable,
                            JdbcCallBodyPolicy bodyPolicy, HttpExecutor http) {
+        this(config, catalog, prompts, jdbc, callTable, (CallBodySettings) bodyPolicy, http);
+    }
+
+    /**
+     * @param config     配置文件里的供应商与业务 id
+     * @param catalog    运行时目录
+     * @param prompts    提示词管理器，可为 null
+     * @param jdbc       调用记录查询
+     * @param callTable  调用记录表名，未配置时为 null
+     * @param bodyPolicy 输入输出记录档位（接口类型，可注入配置了表名的实现），可为 null
+     * @param http       出站执行器（配置启用的传输）；null 表示退化为 HttpURLConnection
+     */
+    public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
+                           JdbcTemplate jdbc, String callTable,
+                           CallBodySettings bodyPolicy, HttpExecutor http) {
         this.config = config;
         this.catalog = catalog;
         this.prompts = prompts;

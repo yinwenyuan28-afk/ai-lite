@@ -1,10 +1,10 @@
 package io.github.yinwenyuan28.ailite.admin.web;
 
-import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcCallBodyPolicy;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalog;
 import io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
+import io.github.yinwenyuan28.ailite.admin.jdbc.CallBodySettings;
 import io.github.yinwenyuan28.ailite.prompt.PromptManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,6 +45,8 @@ public class AiLiteAdminAutoConfiguration {
      * @param jdbc        调用记录查询
      * @param environment 读取调用记录表名
      * @param http        配置启用的 HTTP 传输；取不到时诊断退化为 HttpURLConnection
+     * @param bodyPolicy  调用正文档位；取容器里已按 {@code ai-lite.catalog.setting-table}
+     *                    配置好的 Bean，不要在这里自己 new
      * @return 管理 API 控制器
      */
     @Bean
@@ -52,7 +54,8 @@ public class AiLiteAdminAutoConfiguration {
     public AdminController aiLiteAdminController(AiLiteConfig config, RuntimeCatalog catalog,
                                                  ObjectProvider<PromptManager> prompts,
                                                  JdbcTemplate jdbc, Environment environment,
-                                                 ObjectProvider<HttpExecutor> http) {
+                                                 ObjectProvider<HttpExecutor> http,
+                                                 ObjectProvider<CallBodySettings> bodyPolicy) {
         if (!(catalog instanceof JdbcRuntimeCatalog)) {
             throw new IllegalStateException("管理 API 需要 JDBC 目录，请配置数据源并执行 ai-lite-catalog.sql");
         }
@@ -63,8 +66,15 @@ public class AiLiteAdminAutoConfiguration {
             log.warn("管理页未取到 HttpExecutor，测试连通/测试调用将使用 HttpURLConnection 兜底，"
                     + "与 ai-lite.http.transport 配置的传输不是同一条链路");
         }
+        // 档位策略必须取容器里的 Bean：它带着 ai-lite.catalog.setting-table 配置。
+        // 这里曾直接 new JdbcCallBodyPolicy(jdbc)，导致自定义表名对管理页无效——
+        // 目录装配读的是配置表名、管理页读的是硬编码表名，两边结论不一致。
+        CallBodySettings policy = bodyPolicy.getIfAvailable();
+        if (policy == null) {
+            log.warn("管理页未取到 CallBodySettings，调用正文档位不可读写");
+        }
         return new AdminController(config, (JdbcRuntimeCatalog) catalog, prompts.getIfAvailable(), jdbc,
                 environment.getProperty("ai-lite.store.jdbc.table-name"),
-                new JdbcCallBodyPolicy(jdbc), executor);
+                policy, executor);
     }
 }

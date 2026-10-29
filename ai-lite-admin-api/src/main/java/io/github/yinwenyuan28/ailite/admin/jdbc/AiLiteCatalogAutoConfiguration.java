@@ -74,13 +74,18 @@ public class AiLiteCatalogAutoConfiguration {
         }
 
         /**
-         * @param jdbc JDBC
+         * 注册为 {@link CallBodySettings}：网关按 {@link CallBodyPolicy} 读档位，
+         * 管理台按 {@link CallBodySettings} 写档位，两者必须是同一个实例、同一张表。
+         *
+         * @param jdbc       JDBC
+         * @param properties 表名配置
          * @return 调用正文档位。表还没建时读取视为不记录
          */
         @Bean
         @ConditionalOnMissingBean(CallBodyPolicy.class)
-        public CallBodyPolicy aiLiteCallBodyPolicy(JdbcTemplate jdbc) {
-            return new JdbcCallBodyPolicy(jdbc);
+        public CallBodySettings aiLiteCallBodyPolicy(JdbcTemplate jdbc,
+                                                     AiLiteCatalogProperties properties) {
+            return new JdbcCallBodyPolicy(jdbc, properties.getSettingTable());
         }
 
         /**
