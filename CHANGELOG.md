@@ -3,6 +3,27 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.10] - 2026-10-28
+
+### 修复
+
+- **`AI_LITE_ADMIN_SETTING` 无法自定义表名，且失效方式静默**：目录的另外三张表早就可以通过 `ai-lite.catalog.*-table` 改名，唯独管理端开关表写死在 `JdbcCallBodyPolicy` 里。用户给表统一加业务前缀后，读档位的 SQL 打在不存在的表上，被 `catch (RuntimeException)` 吞掉并返回 `none`——管理员以为已经开了全文记录，实际一条都没记；而保存档位走另一条路径会抛异常，表现为"保存报错、但档位显示 none"，两个界面说法不一致。
+
+  现在新增 `ai-lite.catalog.setting-table`，四张表全部可配。同时收窄读失败的 catch：仍不因此让应用启动失败（这是可选功能），但首次失败会打一条带表名的 WARN，不再完全静默。
+
+- **管理页的档位读写绕过了配置的 Bean**：`AiLiteAdminAutoConfiguration` 之前直接 `new JdbcCallBodyPolicy(jdbc)`，用的是硬编码表名。即使给 `CallBodyPolicy` Bean 加了配置，管理页也不会用到——目录装配读一张表、管理页读写另一张表。现在改为注入容器里的 `CallBodySettings` Bean，两边必然同一张表。
+
+- **`AdminController` 的档位策略类型从具体类放宽为接口**：原构造器只接受 `JdbcCallBodyPolicy`，无法注入其他实现。现新增接受 `CallBodySettings` 的构造器，旧签名保留并转调（二进制兼容）。
+
+### 新增
+
+- **`CallBodySettings`**（`ai-lite-admin-api`）：在 `CallBodyPolicy` 的只读契约上补 `save(String)`。写档位是管理台独有的运维动作，因此放在 admin 模块，不往 `ai-lite-llm` 的 SPI 里加方法。
+- **`JdbcCallBodyPolicy(JdbcTemplate, String table)`**：带表名的构造器，表名经与目录表相同的白名单校验（只允许字母、数字和下划线），非法名在装配期即失败。
+
+### 升级提示
+
+配了 `ai-lite.catalog.setting-table` 的用户需按新表名建表；不配则沿用 `AI_LITE_ADMIN_SETTING`，行为不变。
+
 ## [0.1.9] - 2026-10-28
 
 ### 修复
@@ -251,6 +272,8 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.10]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.10
+[0.1.9]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.9
 [0.1.8]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.8
 [0.1.7]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.7
 [0.1.6]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.6

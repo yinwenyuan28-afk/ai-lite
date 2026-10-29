@@ -139,6 +139,7 @@ ai-lite:
     provider-table: AI_LITE_PROVIDER_OVERLAY
     model-table: AI_LITE_MODEL
     biz-table: AI_LITE_BIZ_BINDING
+    setting-table: AI_LITE_ADMIN_SETTING
   llm:
     biz-ids: [demo-chat]           # 新业务只加这里；编码规则同提示词 key
     providers:
@@ -157,6 +158,24 @@ ai-lite:
 | `catalog.provider-table` | `AI_LITE_PROVIDER_OVERLAY` | 覆盖地址、密钥、两个超时；空字段沿用配置文件 |
 | `catalog.model-table` | `AI_LITE_MODEL` | 从 `GET {baseUrl}/models` 增量同步，或手工添加 |
 | `catalog.biz-table` | `AI_LITE_BIZ_BINDING` | 一个业务 id 对应一个供应商、模型和思考档 |
+| `catalog.setting-table` | `AI_LITE_ADMIN_SETTING` | 管理端运行时开关表，目前只存 call-body 档位 |
+
+**目录四张表全部可以改名**，用于和既有库的命名规范对齐（例如统一加业务前缀）。
+表名只允许字母、数字和下划线，其他字符在装配期直接抛 `IllegalArgumentException`。
+改名后记得按新表名建表；`ai-lite-catalog.sql` 里的名字是默认值，需要自行替换：
+
+```sql
+CREATE TABLE MY_ADMIN_SETTING (
+    SETTING_KEY   VARCHAR(64) NOT NULL,
+    SETTING_VALUE VARCHAR(32),
+    UPDATE_TIME   TIMESTAMP,
+    PRIMARY KEY (SETTING_KEY)
+);
+```
+
+> **`setting-table` 配错时的表现**：读档位不会让应用启动失败（这是可选功能），
+> 但会按"不记录"处理并打一条带表名的 WARN；在管理页保存档位则直接报错并指出
+> 实际使用的表名。这样"表没建"和"档位就是 none"不至于混为一谈。
 
 建表脚本是 `ai-lite-admin-api/src/main/resources/ai-lite-catalog.sql`。提示词仍用 `ai-lite-prompt.sql`，调用日志仍用 `ai-lite-llm-call.sql`。
 
