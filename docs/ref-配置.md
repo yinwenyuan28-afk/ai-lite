@@ -136,6 +136,7 @@ ai-lite:
     page-enabled: false            # 另需引入 ai-lite-admin-ui；为 true 时提供 GET /ai-lite/admin
   catalog:
     cache-seconds: 5
+    setting-cache-seconds: 10      # 调用正文档位的缓存；0 = 不缓存
     provider-table: AI_LITE_PROVIDER_OVERLAY
     model-table: AI_LITE_MODEL
     biz-table: AI_LITE_BIZ_BINDING
@@ -154,7 +155,8 @@ ai-lite:
 | --- | --- | --- |
 | `admin.enabled` | `false` | `true` 且进程是 Servlet Web 应用时，才注册 `/ai-lite/admin/api/**`。自带页面不是这项依赖的一部分 |
 | `admin.page-enabled` | `false` | 为 `true` 时才提供自带页面 `GET /ai-lite/admin`。自己做前端时保持 `false`，只调 [管理 API](ref-管理API.md) |
-| `catalog.cache-seconds` | `5` | 目录读缓存秒数；写入后立刻清本机缓存 |
+| `catalog.cache-seconds` | `5` | 目录读缓存秒数；写入后立刻清本机缓存；0 表示每次都读库 |
+| `catalog.setting-cache-seconds` | `10` | 调用正文档位的缓存秒数。档位在每次调用记录时都要读，不缓存等于每次模型调用都多一条 SELECT；`save` 会直接更新缓存，本机改完立即生效，跨节点最长等这个 TTL |
 | `catalog.provider-table` | `AI_LITE_PROVIDER_OVERLAY` | 覆盖地址、密钥、两个超时；空字段沿用配置文件 |
 | `catalog.model-table` | `AI_LITE_MODEL` | 从 `GET {baseUrl}/models` 增量同步，或手工添加 |
 | `catalog.biz-table` | `AI_LITE_BIZ_BINDING` | 一个业务 id 对应一个供应商、模型和思考档 |

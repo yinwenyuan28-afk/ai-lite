@@ -12,6 +12,16 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class AiLiteCatalogProperties {
 
     private int cacheSeconds = 5;
+    /**
+     * 调用正文档位（{@code AI_LITE_ADMIN_SETTING} 的 {@code call-body} 行）的缓存秒数。
+     *
+     * <p>档位在每次调用记录时都要读一次，而它几小时才改一次，不缓存等于每次模型
+     * 调用都多一条 SELECT。缓存后改档位最多延迟这个秒数生效；管理页写档位时会
+     * 直接更新本机缓存，所以本机是立即生效的。</p>
+     *
+     * <p>小于等于 0 表示不缓存，退化为每次读库。</p>
+     */
+    private int settingCacheSeconds = 10;
     private String providerTable = "AI_LITE_PROVIDER_OVERLAY";
     private String modelTable = "AI_LITE_MODEL";
     private String bizTable = "AI_LITE_BIZ_BINDING";
@@ -58,5 +68,16 @@ public class AiLiteCatalogProperties {
 
     public void setSettingTable(String settingTable) {
         this.settingTable = settingTable;
+    }
+
+    /**
+     * @return 调用正文档位的缓存秒数；小于等于 0 表示不缓存
+     */
+    public int getSettingCacheSeconds() {
+        return settingCacheSeconds;
+    }
+
+    public void setSettingCacheSeconds(int settingCacheSeconds) {
+        this.settingCacheSeconds = settingCacheSeconds;
     }
 }

@@ -129,8 +129,8 @@ ai-lite:
 | 业务绑定 | 每次模型调用 | 有（同上） | 同上 | 5 秒 | `ai-lite.catalog.cache-seconds` |
 | 提示词生效版本 | 每次渲染 | 有 | `ConcurrentHashMap` | 60 秒 | `ai-lite.prompt.cache-seconds` |
 | 提示词目录（key 列表） | 每次渲染 | 不需要 | 启动时构建的 `LinkedHashMap` | 进程生命周期 | - |
-| 调用正文档位 | **每次调用记录** | **无** | - | - | - |
-| 会话（JDBC） | 每次续聊 | **无**（类存在但未装配） | - | - | 见 3.4 |
+| 调用正文档位 | 每次调用记录 | 有 | `volatile` 字段 + 时间戳 | 10 秒 | `ai-lite.catalog.setting-cache-seconds` |
+| 会话（JDBC） | 每次续聊 | **无**（类存在但未装配） | - | - | 见 3.5 |
 | 远端模型列表 | 手工触发同步时 | 无 | - | - | - |
 
 ### 3.2 目录缓存：一次读全表，5 秒 TTL
@@ -191,11 +191,9 @@ if (cached != null && !cached.expired()) {
 
 提示词目录（key 列表、占位符定义）在启动时由 `PromptCatalog` 构建成内存 `LinkedHashMap`，不过期，也不查库。目录模式下这份 key 列表来自 `ai-lite.llm.biz-ids`。
 
-### 3.4 没有缓存的两处
+### 3.4 调用正文档位：10 秒缓存，写后立即生效
 
-**调用正文档位：每次调用记录都查一次库。**
-
-`LlmGateway.record` 里直接调 `callBodyPolicy.level()`：
+`LlmGateway.record` 在每次调用记录时都会读一次档位：
 
 ```java
 String level = callBodyPolicy == null ? CallBodyPolicy.NONE : callBodyPolicy.level();
@@ -205,13 +203,22 @@ if (CallBodyPolicy.store(level, success)) {
 }
 ```
 
-而 `JdbcCallBodyPolicy.level()` 就是一条 `SELECT SETTING_VALUE FROM ... WHERE SETTING_KEY = ?`。**每次 LLM 调用（每轮都会 record）都会多一次数据库往返。**
+这个值几小时才被管理页改一次，所以 `JdbcCallBodyPolicy` 加了短 TTL 缓存：
+命中时零 SQL，未命中才发一条 `SELECT ... WHERE SETTING_KEY = ?`（主键命中）。
 
-这条 SQL 走的是一次主键/唯一键命中（`SETTING_KEY` 是主键），成本不高，但在高 QPS 下是纯浪费——这个值几乎不变，几小时才被管理页改一次。当前没有缓存，只能靠把档位设为 `none`（默认）来避免正文写入，但**查库这一步省不掉**，因为它要先读档位才知道要不要写。
+三个语义要点：
 
-如果这条库往返在实际压测里成了瓶颈，加一个短 TTL（比如 10 秒）的缓存即可，语义上也安全：档位改了最多 10 秒才生效，不影响正确性。
+- **写后立即生效。** `save()` 除了写库，还直接把缓存改成新值，所以本机改完
+  下一次读就是新档位，不用等 TTL。
+- **跨节点最长 10 秒窗口。** 缓存是进程内的，A 节点改档位 B 节点看不到，
+  要等自己的 TTL 过期。需要立刻同步时调 `invalidate()` 做广播。
+- **TTL 配 0 就退化成每次读库。** `ai-lite.catalog.setting-cache-seconds`
+  小于等于 0 表示不缓存，与引入缓存前的行为一致。
 
-**会话缓存：类有，但没有自动装配。**
+**为什么用 10 秒而不是更长**：档位影响的是"要不要写正文"这个可观测性配置，
+不是正确性开关。延迟 10 秒生效可以接受；再长会让运维改完档位后怀疑自己没改成功。
+
+### 3.5 会话缓存：类有，但没有自动装配
 
 `CachingAgentSessionStore`（持久层 + 热缓存组合）和 `RedisSessionCache` / `InMemorySessionCache` 都实现了，但**starter 不会自动用它们**。默认装配的只有：
 
@@ -231,11 +238,11 @@ public AgentSessionStore agentSessionStore(JdbcTemplate jdbc, StringRedisTemplat
 
 `CachingAgentSessionStore` 的语义是"先写库后写缓存，缓存故障只降级不失败"，可以放心包。`RedisSessionCache` 的第三个参数 `requireRedis` 决定 Redis 不可用时报错还是降级——生产环境建议 `false`，让它退化成直读库。
 
-### 3.5 顺带说明：会话的"过期"不是缓存
+### 3.6 顺带说明：会话的"过期"不是缓存
 
 `ai-lite.session.max-entries` 和 `ttl-seconds` 只作用于 `InMemoryAgentSessionStore`（默认实现），它们是内存存储的容量与过期策略，不是缓存策略。切到 JDBC 后这两个配置不再起作用，`ai-lite-session.sql` 里也没有对应的 TTL 列——过期要靠外部清理任务或业务自己处理。
 
-### 3.6 密钥轮换与熔断状态：内存，不落库
+### 3.7 密钥轮换与熔断状态：内存，不落库
 
 这两份状态在本进程内存里，不查库也不持久化：
 
@@ -255,7 +262,8 @@ public AgentSessionStore agentSessionStore(JdbcTemplate jdbc, StringRedisTemplat
 | 开了正文记录，正文表里没数据 | 先确认 `<主表>_BODY` 这张表真的存在；再看日志有没有 `llm call record failed` 的 warn |
 | 启动报某张表不存在 | 核对配置的表名和 DDL 里的表名是否一致，报错消息里给的是实际使用的名字 |
 | 启动报 `必须显式配置` | 没配 `ai-lite.store.jdbc.table-name` |
-| 会话读取很慢 | 引入 session-jdbc 后是直读库，没有缓存；必要时按 3.4 自己包 `CachingAgentSessionStore` |
+| 会话读取很慢 | 引入 session-jdbc 后是直读库，没有缓存；必要时按 3.5 自己包 `CachingAgentSessionStore` |
+| 改了档位，别的节点没立刻变 | 档位缓存 10 秒；调 `invalidate()` 广播可立即生效 |
 
 ## 5. 相关文档
 

@@ -3,6 +3,30 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [未发布]
+
+### 优化
+
+- **调用正文档位改为带缓存读取**：`LlmGateway.record` 在每次模型调用（包括 Agent 循环的每一轮，`record` 有十几处调用点）都会读一次档位，而 `JdbcCallBodyPolicy.level()` 原先每次都查库——等于每次调用白送一条 `SELECT`，可这个值几小时才被管理页改一次。
+
+  现在加了 10 秒 TTL 的进程内缓存，命中时零 SQL。三个语义要点：
+
+  - `save()` 除了写库还直接更新缓存，所以**本机改完档位立即生效**，不必等 TTL；
+  - 缓存是进程内的，跨节点最长有 10 秒窗口，需要立刻同步时调新增的 `invalidate()`；
+  - `ai-lite.catalog.setting-cache-seconds` 配 0 表示不缓存，退化为原来的每次读库。
+
+  缓存值为 `none` 时用独立的空值标记与"未缓存"区分开，避免默认档位下每次都被当成未命中。
+
+### 新增
+
+- **`ai-lite.catalog.setting-cache-seconds`**：调用正文档位的缓存秒数，默认 10。
+- **`JdbcCallBodyPolicy(JdbcTemplate, String table, int cacheSeconds)`** 三参构造器与 `invalidate()`；两参、单参构造器保留，行为变为带 10 秒缓存。
+
+### 升级提示
+
+- 不改配置的用户行为一致，只是档位读取多了最多 10 秒的本地缓存。
+- 依赖"改完档位立刻生效"的多节点部署：本机仍立即生效；其他节点最长 10 秒，或调 `invalidate()` 广播。
+
 ## [0.1.11] - 2026-10-29
 
 ### 修复
