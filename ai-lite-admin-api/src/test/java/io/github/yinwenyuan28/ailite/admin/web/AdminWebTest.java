@@ -539,6 +539,82 @@ public class AdminWebTest {
         }
     }
 
+    /**
+     * 摘要表改名后，管理页必须从跟随改名的正文表读正文。
+     *
+     * <p>回归重点：{@code CallLogQuery} 曾把 {@code AI_LITE_LLM_CALL_BODY} 写死，
+     * 于是 {@code ai-lite.store.jdbc.table-name=MY_CALL} 的用户会看到摘要列表正常、
+     * 正文永远为空，且没有任何报错。</p>
+     */
+    @Test
+    public void callBodyComesFromDerivedTableWhenCallTableRenamed() throws Exception {
+        JdbcTemplate template = SqliteFiles.open("call-body-table");
+        JdbcRuntimeCatalogTest.createTables(template);
+        template.execute("CREATE TABLE MY_CALL ("
+                + "CALL_ID VARCHAR(64) PRIMARY KEY, BIZ_ID VARCHAR(128), PROVIDER VARCHAR(64),"
+                + "MODEL_ID VARCHAR(128), API VARCHAR(64), PROFILE VARCHAR(64), THINKING_LEVEL VARCHAR(32),"
+                + "ROUND_NO INT, INPUT_TOKENS INT, OUTPUT_TOKENS INT, TOTAL_TOKENS INT, LATENCY_MS BIGINT,"
+                + "STOP_REASON VARCHAR(32), SUCCESS INT, ERROR_BRIEF VARCHAR(255), CREATE_TIME TIMESTAMP)");
+        template.execute("CREATE TABLE MY_CALL_BODY ("
+                + "CALL_ID VARCHAR(64) PRIMARY KEY, INPUT_TEXT CLOB, OUTPUT_TEXT CLOB)");
+        template.update("INSERT INTO MY_CALL (CALL_ID, BIZ_ID, SUCCESS, CREATE_TIME)"
+                + " VALUES ('c1', 'biz', 1, ?)", new Timestamp(1_000L));
+        template.update("INSERT INTO MY_CALL_BODY (CALL_ID, INPUT_TEXT, OUTPUT_TEXT)"
+                + " VALUES ('c1', '问', '答')");
+
+        JdbcRuntimeCatalog scopedCatalog = new JdbcRuntimeCatalog(template,
+                "AI_LITE_PROVIDER_OVERLAY", "AI_LITE_MODEL", "AI_LITE_BIZ_BINDING", 0);
+        // 只给摘要表名，正文表名留空 —— 必须按 <主表>_BODY 推导。
+        MockMvc scoped = MockMvcBuilders.standaloneSetup(
+                        new AdminController(config, scopedCatalog, prompts, template,
+                                "MY_CALL", null, new JdbcCallBodyPolicy(template), httpExecutor))
+                .setMessageConverters(
+                        new ByteArrayHttpMessageConverter(),
+                        new MappingJackson2HttpMessageConverter(AiLiteJson.mapper()))
+                .build();
+
+        scoped.perform(get("/ai-lite/admin/api/calls/c1"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("问")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("答")));
+    }
+
+    /**
+     * 显式配置的正文表名优先于推导。
+     */
+    @Test
+    public void explicitBodyTableNameWins() throws Exception {
+        JdbcTemplate template = SqliteFiles.open("call-body-explicit");
+        JdbcRuntimeCatalogTest.createTables(template);
+        template.execute("CREATE TABLE MY_CALL ("
+                + "CALL_ID VARCHAR(64) PRIMARY KEY, BIZ_ID VARCHAR(128), PROVIDER VARCHAR(64),"
+                + "MODEL_ID VARCHAR(128), API VARCHAR(64), PROFILE VARCHAR(64), THINKING_LEVEL VARCHAR(32),"
+                + "ROUND_NO INT, INPUT_TOKENS INT, OUTPUT_TOKENS INT, TOTAL_TOKENS INT, LATENCY_MS BIGINT,"
+                + "STOP_REASON VARCHAR(32), SUCCESS INT, ERROR_BRIEF VARCHAR(255), CREATE_TIME TIMESTAMP)");
+        template.execute("CREATE TABLE MY_CALL_DETAIL ("
+                + "CALL_ID VARCHAR(64) PRIMARY KEY, INPUT_TEXT CLOB, OUTPUT_TEXT CLOB)");
+        template.update("INSERT INTO MY_CALL (CALL_ID, BIZ_ID, SUCCESS, CREATE_TIME)"
+                + " VALUES ('c1', 'biz', 1, ?)", new Timestamp(1_000L));
+        template.update("INSERT INTO MY_CALL_DETAIL (CALL_ID, INPUT_TEXT, OUTPUT_TEXT)"
+                + " VALUES ('c1', '明细问', '明细答')");
+
+        JdbcRuntimeCatalog scopedCatalog = new JdbcRuntimeCatalog(template,
+                "AI_LITE_PROVIDER_OVERLAY", "AI_LITE_MODEL", "AI_LITE_BIZ_BINDING", 0);
+        MockMvc scoped = MockMvcBuilders.standaloneSetup(
+                        new AdminController(config, scopedCatalog, prompts, template,
+                                "MY_CALL", "MY_CALL_DETAIL", new JdbcCallBodyPolicy(template),
+                                httpExecutor))
+                .setMessageConverters(
+                        new ByteArrayHttpMessageConverter(),
+                        new MappingJackson2HttpMessageConverter(AiLiteJson.mapper()))
+                .build();
+
+        scoped.perform(get("/ai-lite/admin/api/calls/c1"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("明细问")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("明细答")));
+    }
+
     @Test
     public void switchRegistersOnlyWhenEnabledOnWeb() {
         WebApplicationContextRunner web = new WebApplicationContextRunner()
