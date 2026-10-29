@@ -9,7 +9,7 @@
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-prompt-jdbc</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.11</version>
 </dependency>
 ```
 
@@ -30,5 +30,25 @@ PromptStore store = new JdbcPromptStore(jdbcTemplate, transactionManager);
 - `AI_LITE_PROMPT_VERSION`：版本与模板正文
 - `AI_LITE_PROMPT_ACTIVE`：每个 key 的生效指针和 revision
 - `AI_LITE_PROMPT_AUDIT`：操作审计，不记录模板正文
+
+三张表名都可通过配置改名，默认值就是上表：
+
+```yaml
+ai-lite:
+  prompt:
+    jdbc:
+      version-table: AI_LITE_PROMPT_VERSION
+      active-table: AI_LITE_PROMPT_ACTIVE
+      audit-table: AI_LITE_PROMPT_AUDIT
+```
+
+直接构造时用五参构造器：
+
+```java
+PromptStore store = new JdbcPromptStore(jdbcTemplate,
+        "MY_PROMPT_VERSION", "MY_PROMPT_ACTIVE", "MY_PROMPT_AUDIT", transactionManager);
+```
+
+表名只允许字母、数字和下划线。三张表是一个整体，建议一起改。
 
 `(PROMPT_KEY, VERSION_NO)` 上有唯一索引，多节点并发起草时作为最后防线。

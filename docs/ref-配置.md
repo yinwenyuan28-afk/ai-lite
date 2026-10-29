@@ -186,7 +186,7 @@ CREATE TABLE MY_ADMIN_SETTING (
 - 供应商可以不写 `models`。调用用 `LlmCall.biz(bizId, messages)`。没有绑定时报「业务未配置模型」，不回退 `default-profile`。
 - 管理页的修改写入数据库，不改配置文件。接口不回密钥明文。覆盖密钥只替换单把 `api-key`，不编辑 `api-keys` 池。
 - 同步模型只返回远端 id。用户勾选后才插入新 id，已有行不改，消失的 id 不删。删除只能由用户发起。协议是 `anthropic-messages` 时不能列模型，要手工添加。
-- 调用记录默认不保存模型输入输出。`none` / `failure` / `all` 三档可在管理接口里改，正文写入 `AI_LITE_LLM_CALL_BODY`。
+- 调用记录默认不保存模型输入输出。`none` / `failure` / `all` 三档可在管理接口里改，正文写入正文表（默认 `AI_LITE_LLM_CALL_BODY`，跟随 `ai-lite.store.jdbc.table-name` 改名）。
 - 模型要补齐推理开关、上下文窗口、输出上限和思考格式之后才能被业务选中。思考格式的可选值和说明见 `GET /ai-lite/admin/api/thinking-formats`。
 
 ## 3. 执行器 `ai-lite.executor`
@@ -637,6 +637,32 @@ prompt:
 渲染优先级：生效版本 → 调用方兜底 → 配置默认模板。数据库不可用时 `render`
 不会抛异常；只有完全没有系统模板时才报错。
 
+### 6.1 提示词表名 `ai-lite.prompt.jdbc`
+
+引入 `ai-lite-prompt-jdbc` 后，三张表名都可以改，用于与既有库的命名规范对齐。
+
+```yaml
+prompt:
+  jdbc:
+    version-table: AI_LITE_PROMPT_VERSION   # 版本与模板正文
+    active-table: AI_LITE_PROMPT_ACTIVE     # 每个 key 的生效指针
+    audit-table: AI_LITE_PROMPT_AUDIT       # 操作审计
+```
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `version-table` | `AI_LITE_PROMPT_VERSION` | 版本与模板正文表 |
+| `active-table` | `AI_LITE_PROMPT_ACTIVE` | 生效指针与 revision |
+| `audit-table` | `AI_LITE_PROMPT_AUDIT` | 操作审计，不记录模板正文 |
+
+三个默认值就是 `ai-lite-prompt.sql` 里的表名，不配置时行为与旧版本完全一致。
+表名只允许字母、数字和下划线；配非法名字在启动期抛 `IllegalArgumentException`，
+不会拼进 SQL。
+
+三张表是一个整体（发布要依次写版本表、指针表和审计表），只改其中一两张会得到
+语义不完整的状态，所以建议一起改。目录模式下启动期会按**配置后的表名**探测
+版本表和指针表，探不到就报错并带出实际使用的表名，不会拿默认表名误导你。
+
 ## 7. 调用记录存储 `ai-lite.store.jdbc`
 
 引入 `ai-lite-store-jdbc` 且容器里有 `JdbcTemplate` 时生效，自动注册 `JdbcLlmCallStore`。
@@ -646,12 +672,14 @@ store:
   jdbc:
     enabled: true                    # 默认 true
     table-name: AI_LITE_LLM_CALL     # 必填，无默认值
+    body-table-name: AI_LITE_LLM_CALL_BODY   # 可选，默认 = table-name + "_BODY"
 ```
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | 关闭后不注册 `LlmCallStore` |
 | `table-name` | - | **必填**。调用记录表名，只允许字母、数字和下划线 |
+| `body-table-name` | `<table-name>_BODY` | 正文表名；不配时跟随主表推导 |
 
 > **为什么表名没有默认值**：调用记录写失败会被 `AsyncLlmCallLogger` 静默吞掉
 > （只留一行 warn），用户可能几周后才发现账单表一直是空的。强制显式配置是让
@@ -659,6 +687,12 @@ store:
 >
 > 引入模块但未配置 `table-name` → **应用启动失败**，错误消息会提示建表。
 > 不需要 JDBC 调用记录时设 `ai-lite.store.jdbc.enabled=false`。
+
+**正文表会跟随主表改名**。摘要写入和正文写入是两条独立语句，正文表不存在时
+摘要照样落库、异常只被异步日志吞掉，表现是"调用记录有了、正文永远为空"。因此
+`body-table-name` 默认按 `table-name + "_BODY"` 推导：把 `table-name` 改成
+`MY_CALL` 后，正文表自动变成 `MY_CALL_BODY`；想用别的名字再显式配
+`body-table-name`（管理页读取正文用的也是这个值，不会和写入侧跑偏）。
 
 **两个开关的区别**：写 `enabled: false` 是"我知道有这个功能但不用"；不配
 `table-name` 是"忘了配"，所以前者安静关闭、后者启动报错。

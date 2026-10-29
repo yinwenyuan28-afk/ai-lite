@@ -1,5 +1,9 @@
 -- AI Lite 提示词表。按实际数据库调整 VARCHAR/CLOB 类型。
--- 表名必须与 JdbcPromptStore 构造参数一致。
+-- 三张表名都可改，对应配置键：
+--   ai-lite.prompt.jdbc.version-table  -> AI_LITE_PROMPT_VERSION
+--   ai-lite.prompt.jdbc.active-table   -> AI_LITE_PROMPT_ACTIVE
+--   ai-lite.prompt.jdbc.audit-table    -> AI_LITE_PROMPT_AUDIT
+-- 改了配置就要把下面三处表名一起改（索引名不影响功能，可不改）。
 CREATE TABLE AI_LITE_PROMPT_VERSION (
     VERSION_ID      VARCHAR(64)  NOT NULL,
     PROMPT_KEY      VARCHAR(64)  NOT NULL,

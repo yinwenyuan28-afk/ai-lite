@@ -28,7 +28,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 
 ## 状态
 
-核心功能已可用：网关、三种协议适配器、Agent 循环（同步 + 异步泵结构、并行工具、整轮超时、回调执行策略、**同步流式**）、会话续聊（**typed entries、上下文预算与自动压缩、用量记账、会话列举**）、提示词中心、异步调用、显式重试、LLM 调用指标（Micrometer）、出口自我保护（按供应商并发限流、熔断、`Retry-After` 尊重、多 key 轮换，默认全关）、Workflow 同步/异步顺序执行和自动装配都已落地。当前 954 个测试用例、0 失败（JDK 8 全量构建；Redis 集成用例在无 Redis 环境时跳过，可用时随构建运行；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态、Workflow 取消/失败定位与蹦床（循环代替递归）推进、AgentLoop 异步推进循环的收尾与终态竞态、取消时不会立刻停的传输的兜底、回调策略线程隔离、并发闸门排队、熔断状态机、半开探测、key 轮换、**压缩条目的多路径持久化往返**、**四张目录表的自定义表名**等对抗性场景。虚拟模型路由不在范围内。配置字段见 [docs/ref-配置.md](docs/ref-配置.md)。
+核心功能已可用：网关、三种协议适配器、Agent 循环（同步 + 异步泵结构、并行工具、整轮超时、回调执行策略、**同步流式**）、会话续聊（**typed entries、上下文预算与自动压缩、用量记账、会话列举**）、提示词中心、异步调用、显式重试、LLM 调用指标（Micrometer）、出口自我保护（按供应商并发限流、熔断、`Retry-After` 尊重、多 key 轮换，默认全关）、Workflow 同步/异步顺序执行和自动装配都已落地。当前 968 个测试用例、0 失败（JDK 8 全量构建；Redis 集成用例在无 Redis 环境时跳过，可用时随构建运行；JDK 21+ 额外运行 5 个虚拟线程用例）。覆盖空响应、损坏 JSON、SSE 分片、并发写、发布回滚、异步取消、重试竞态、Workflow 取消/失败定位与蹦床（循环代替递归）推进、AgentLoop 异步推进循环的收尾与终态竞态、取消时不会立刻停的传输的兜底、回调策略线程隔离、并发闸门排队、熔断状态机、半开探测、key 轮换、**压缩条目的多路径持久化往返**、**四张目录表的自定义表名**、**提示词三表与调用正文表的自定义表名**等对抗性场景。虚拟模型路由不在范围内。配置字段见 [docs/ref-配置.md](docs/ref-配置.md)。
 
 > **会话数据格式变更**：0.1.8 起 `MESSAGES_JSON` 为"带 `type` 的条目数组"，不兼容 0.1.x
 > 的纯消息数组。项目尚未正式使用，故未提供迁移；详见 [CHANGELOG](CHANGELOG.md)。
@@ -75,7 +75,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-spring-boot-starter</artifactId>
-    <version>0.1.10</version>
+    <version>0.1.11</version>
 </dependency>
 ```
 
@@ -109,7 +109,7 @@ ai-lite:
 
 不引入 `ai-lite-admin-api` 时，旧路径仍然可用：在供应商下写 `models`，用 `profiles` 配合 `LlmCall.profile`。
 
-目录模式还要引入 `ai-lite-admin-api`、`ai-lite-prompt-jdbc`、`ai-lite-store-jdbc` 和一个 JDBC 数据源，并执行 `ai-lite-catalog.sql`、`ai-lite-prompt.sql`、`ai-lite-llm-call.sql`。业务 id 同时是提示词 key。管理 REST 默认关闭；调试时把 `ai-lite.admin.enabled` 设为 `true`。若要自带页面，再引入 `ai-lite-admin-ui` 并设 `ai-lite.admin.page-enabled: true`，浏览器打开 `http://localhost:8080/ai-lite/admin`。目录的四张表都可以用 `ai-lite.catalog.*-table` 改名（含 `setting-table`），详见 [配置参考](docs/ref-配置.md)。
+目录模式还要引入 `ai-lite-admin-api`、`ai-lite-prompt-jdbc`、`ai-lite-store-jdbc` 和一个 JDBC 数据源，并执行 `ai-lite-catalog.sql`、`ai-lite-prompt.sql`、`ai-lite-llm-call.sql`。业务 id 同时是提示词 key。管理 REST 默认关闭；调试时把 `ai-lite.admin.enabled` 设为 `true`。若要自带页面，再引入 `ai-lite-admin-ui` 并设 `ai-lite.admin.page-enabled: true`，浏览器打开 `http://localhost:8080/ai-lite/admin`。**所有表名都能改**：目录四张用 `ai-lite.catalog.*-table`，提示词三张用 `ai-lite.prompt.jdbc.*-table`，调用记录与正文用 `ai-lite.store.jdbc.table-name` / `body-table-name`（正文不配时跟随主表），详见 [配置参考](docs/ref-配置.md)。
 
 > `thinking-level` 的 `off` / `on` 建议加引号，否则 YAML 会把它解析成布尔值。
 > 库已兼容 `"false"` → off、`"true"` → high，但显式引号更清楚。
@@ -171,18 +171,18 @@ ai-lite:
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-jetty</artifactId>
-    <version>0.1.10</version>
+    <version>0.1.11</version>
 </dependency>
 <!-- 或者： -->
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-webclient</artifactId>
-    <version>0.1.10</version>
+    <version>0.1.11</version>
 </dependency>
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-ktor-cio</artifactId>
-    <version>0.1.10</version>
+    <version>0.1.11</version>
 </dependency>
 ```
 
@@ -226,7 +226,7 @@ promptManager.rollback(oldVersionId, "alice");
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-executor-coroutines</artifactId>
-    <version>0.1.10</version>
+    <version>0.1.11</version>
 </dependency>
 ```
 

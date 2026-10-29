@@ -3,6 +3,35 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.11] - 2026-10-29
+
+### 修复
+
+- **提示词三张表无法自定义表名**：`JdbcPromptStore` 的五参构造器早就接受 `versionTable` / `activeTable` / `auditTable`，但自动装配固定调用带默认值的两参版本，配置层没有任何入口，`ai-lite-prompt-jdbc` 里连 `@ConfigurationProperties` 类都没有。现在新增 `ai-lite.prompt.jdbc.version-table` / `active-table` / `audit-table`，默认值与 `ai-lite-prompt.sql` 一致，不配置时行为不变。
+
+- **目录装配拿硬编码表名探测提示词表**：`AiLiteCatalogAutoConfiguration` 里写死了 `requireTable(jdbc, "AI_LITE_PROMPT_VERSION", ...)`。即使手工声明一个自定义表名的 `JdbcPromptStore` Bean，目录模式也会去探测默认表、探不到即启动失败，错误消息还指回默认表名，用户完全看不出是自己配的表名没被采纳。现在改为通过新接口 `PromptTableNames` 问存储自己用的表名，并顺带把版本表**和**指针表都探一遍（两者在 `findActive` 里 join 使用，只探版本表会错得更晚）。
+
+- **调用正文表 `AI_LITE_LLM_CALL_BODY` 无法自定义，改名后静默失效**：`ai-lite.store.jdbc.table-name` 只作用于摘要表，正文表名硬编码在 `JdbcLlmCallStore` 与 `CallLogQuery` 的四处 SQL 里。用户把主表改成 `MY_CALL` 后，摘要写进 `MY_CALL`，正文仍去写 `AI_LITE_LLM_CALL_BODY`；该 INSERT 抛出的异常被 `AsyncLlmCallLogger` 吞掉只留一行 warn，表现为"调用记录有了、正文永远为空"，管理页也因探不到固定表名而安静地不显示正文列。现在新增 `ai-lite.store.jdbc.body-table-name`，不配时按 `table-name + "_BODY"` 推导（默认表推导结果仍是 `AI_LITE_LLM_CALL_BODY`，老用户零改动），管理页读正文用的也是同一个值，读写不会再指向不同的表。
+
+### 新增
+
+- **`PromptTableNames`**（`ai-lite-prompt`）：存储层的表名自述接口，供装配期探测使用。独立成接口而不加进 `PromptStore`，避免给已有实现类（含用户自定义实现）增加必须实现的方法。按既有 SPI 演化承诺，新能力走新接口。
+- **`AiLitePromptJdbcProperties`**（`ai-lite-prompt-jdbc`）：`ai-lite.prompt.jdbc.*-table` 三个表名，绑定后传给 `JdbcPromptStore` 的五参构造器。
+- **`CallLogTables`**（`ai-lite-llm`）：把"正文表跟随摘要表"这条推导规则收在一处，写侧（store-jdbc）与读侧（admin-api）共用，避免两边各写一份 `+ "_BODY"` 后悄悄跑偏。
+- **`JdbcLlmCallStore(JdbcTemplate, String table, String bodyTable)`** 三参构造器与 `getTable()` / `getBodyTable()`；单参、双参构造器保留且语义不变。
+- **`CallLogQuery.page/find` 增加带正文表名的重载**，旧签名保留并转调。
+- **`AdminController` 增加带 `callBodyTable` 的构造器**，自动装配从 `ai-lite.store.jdbc.body-table-name` 读取；旧构造器保留并转调。
+
+### 优化
+
+- **管理页调用记录翻页的 N+1 查询**：`CallLogQuery` 之前对**每一行**先探一次正文表、再查一次正文，翻 200 条就是 400 次数据库往返。现在整页只探一次表，再用一条 `IN` 查询批量取回正文。
+
+### 升级提示
+
+- 配了 `ai-lite.prompt.jdbc.*-table` 的用户需按新表名建表（三张一起改）。不配则沿用原表名。
+- 把 `ai-lite.store.jdbc.table-name` 改成自定义名的用户，正文表默认变为 `<主表>_BODY`。此前正文表因硬编码而实际没写成，这次升级后需要按新名字建表，正文才开始真正落库。
+- 未配置任何新键的用户行为完全不变。
+
 ## [0.1.10] - 2026-10-28
 
 ### 修复
@@ -272,6 +301,7 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.11]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.11
 [0.1.10]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.10
 [0.1.9]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.9
 [0.1.8]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.8

@@ -9,7 +9,7 @@
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-session-jdbc</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.11</version>
 </dependency>
 ```
 

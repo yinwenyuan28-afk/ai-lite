@@ -22,7 +22,7 @@ JDBC 版 `LlmCallStore`：把每次模型调用的账单摘要写进数据库。
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-store-jdbc</artifactId>
-    <version>0.1.7</version>
+    <version>0.1.11</version>
 </dependency>
 ```
 
@@ -31,6 +31,7 @@ JDBC 版 `LlmCallStore`：把每次模型调用的账单摘要写进数据库。
 ```sql
 -- 见 src/main/resources/ai-lite-llm-call.sql
 CREATE TABLE AI_LITE_LLM_CALL ( ... );
+CREATE TABLE AI_LITE_LLM_CALL_BODY ( ... );   -- 开启输入输出记录时才需要
 ```
 
 再配置表名：
@@ -41,7 +42,12 @@ ai-lite:
     jdbc:
       enabled: true
       table-name: AI_LITE_LLM_CALL
+      # 可选。默认 = table-name + "_BODY"
+      body-table-name: AI_LITE_LLM_CALL_BODY
 ```
+
+正文表名默认跟随主表推导：把 `table-name` 改成 `MY_CALL` 后自动使用
+`MY_CALL_BODY`，正文请一并建到那张表。显式给 `body-table-name` 则以配置为准。
 
 ## 为什么表名必须显式配置
 
