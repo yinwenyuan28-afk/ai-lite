@@ -266,6 +266,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 
 - [术语表](docs/ref-术语表.md)：全部术语的人话解释，按层分组。
 - [配置参考](docs/ref-配置.md)：所有 `ai-lite.*` 配置键，含出口保护 `guard` 的完整字段。
+- [数据表与缓存](docs/desc-数据表与缓存.md)：10 张表的用途、能否改名、怎么配；哪些常读数据有缓存、多久、怎么失效。
 - [发布参考](docs/ref-发布.md)：版本策略、发布清单、CI 矩阵、Maven Central 配置。
 
 **内部留档（docs/plan/ 设计审查与调研 + docs/testing/ 测试设计）**
