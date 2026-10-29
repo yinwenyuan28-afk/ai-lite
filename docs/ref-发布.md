@@ -43,7 +43,43 @@ namespace 要求：Central 的 `io.github.yinwenyuan28-afk` namespace 需在 Por
 
 发布方式：`autoPublish=false`，部署后到 Portal 的 Publish 阶段人工确认再上线（可发现签名/元数据问题后重试）。
 
-## 4.1 排障笔记：Central 返回 401 时怎么判断
+## 4.1 发布额度与文件数（重要）
+
+Maven Central 自 2026-10-01 起对发布量设硬阈值，**按组织、按自然月独立计算**（不滚动）。三个指标都算：文件数、单次发布体积、发布次数。具体阈值只在该组织的 [Usage Center](https://central.sonatype.com/publishing/usage)（Publishing → Usage Center）里可见，文档只给了全站分布：**第 90 百分位是 1,167 文件/月、78 MB/次、7 次/月**，限额就设在 90 百分位。
+
+### 这个库的消耗
+
+发布 17 个模块 + parent pom，共 **68 个产物**。每个产物贡献的文件数取决于校验和档位：
+
+| 组成 | 每产物文件数 |
+| --- | --- |
+| 本体 | 1 |
+| `.asc` GPG 签名 | 1 |
+| `.md5` + `.sha1`（必需） | 2 |
+| `.sha256` + `.sha512`（可选） | 2 |
+
+- 默认 `checksums=all`：6 个/产物 → **单次发版 408 个文件**
+- 已配置 `checksums=required`：4 个/产物 → **单次发版 272 个文件**
+
+`ai-lite-llm` 比其他模块多 6 个（有一个对外发布的 `tests.jar`）；`ai-lite-core` 是空 jar 聚合坐标，只有 2 个产物。
+
+**272 个仍占月度限额的 23%，一个月最多发 4 次。** 所以发版节奏要克制：文档、注释、纯测试改动不值得单独发版；日常改动用 SNAPSHOT 或 GitHub Packages 验证。
+
+### 为什么设 `required` 而不是 `none`
+
+Central 的强制要求只有 `.md5` 与 `.sha1`（官方 Requirements「Provide File Checksums」：`.md5` 和 `.sha1` required，`.sha256`/`.sha512` supported but not mandatory）。设 `none` 会在校验阶段因缺少必需校验和而失败。所以 `required` 是合法的下限。
+
+> 该参数由 `central-publishing-maven-plugin` 0.12.0 读取（`PublishMojo` 里对 `checksums` 做 `ChecksumRequest.isValidValue` 校验），`REQUIRED` 分支只生成 MD5/SHA1，`NONE` 分支一个都不生成——这是反编译插件 jar 确认的行为，不是文档推断。
+
+### 超限了怎么办
+
+1. **30 天宽限期**：超限当月不立即拦截，给 30 天处理。宽限期结束后，**该指标**的新发布会被拒（不是全面封禁）。
+2. **宽限期重置条件**：连续 2 个月低于限额后重置。这意味着超限后即便下个月合规，宽限期也不会立刻消失。
+3. **申请提高限额或豁免**：写 `central-support@sonatype.com`，注明 namespace、组织、项目说明、发布模式说明、以及用量是持续性还是偶发。官方明确欢迎按需申请，合法社区开源项目不受影响。
+
+发邮件时可以直接引用这个事实：单次 272 个文件来自 17 个模块的刻意分层（每种 HTTP 传输、每种存储后端独立坐标，供用户按需引入），不是刷包。
+
+## 4.2 排障笔记：Central 返回 401 时怎么判断
 
 排查发布失败时很重要的一点：**不要用「无上传体的 POST」去验证 token**。Central 的 `/api/v1/publisher/upload` 只接受 `multipart/form-data`，任何缺少 bundle 的请求都会返回 401 或 500，**与凭证好坏无关**。曾据此误判「token 失效」，白花了半天。
 
@@ -74,7 +110,7 @@ namespace 要求：Central 的 `io.github.yinwenyuan28-afk` namespace 需在 Por
 | 只有部分模块进 bundle（缺 parent/依赖） | 用 `-pl` 单独发布某模块时拿不到父 POM 继承的 url/licenses/scm/developers，必须整批 reactor 发布 |
 | `Javadocs must be provided but not found in entries` | 纯 Kotlin 模块（`sourceDirectory=src/main/kotlin`）产不出 javadoc jar。用 `prepare-package` 把源码复制到 `target/javadoc-src`，再由 `maven-jar-plugin` 打 `-javadoc` 分类制品；**必须显式 `<include>**/*.kt</include>`**，否则该插件按 class 规则过滤，产出空 jar |
 
-### 4.2 首次发布踩坑复盘（2026-10-26，0.1.0 → 0.1.7）
+### 4.3 首次发布踩坑复盘（2026-10-26，0.1.0 → 0.1.7）
 
 从 0.1.0 到真正通过 Portal 校验，连续失败 5 轮。值得记录的不是每个错误本身，而是**判断方法上的失误**——它们让排查多花了好几倍时间。
 

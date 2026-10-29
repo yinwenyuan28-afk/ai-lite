@@ -518,6 +518,24 @@
                                 <artifact>ai-lite-demo</artifact>
                             </excludeArtifacts>
                             <autoPublish>false</autoPublish>
+                            <!--
+                                只生成 md5 + sha1。Maven Central 的文件数按"每个上传文件"
+                                计算，默认 all 会额外生成 sha256/sha512 两份——每模块多
+                                8 个文件（4 个产物 × 2 种算法）。
+
+                                Central 的硬性要求只有 md5 与 sha1（见官方 Requirements
+                                「Provide File Checksums」：".md5 and .sha1 are required,
+                                .sha256 and .sha512 are supported but not mandatory"），
+                                所以 required 是合法下限，不能设 none——那样校验阶段会因
+                                缺少必需校验和而失败。
+
+                                为什么在意这个：本库有 17 个发布模块，单次发版的全套文件数
+                                约 408 个（含 parent pom），而免费额度是每月 1,167 个
+                                （官方文档第 90 百分位），一个自然月发 3 次就会超。
+                                每个产物贡献 6 个文件（本体 + .asc + 4 种校验和），
+                                降到 required 后是 4 个，单次发版约 272 个，降三分之一。
+                            -->
+                            <checksums>required</checksums>
                         </configuration>
                     </plugin>
                 </plugins>
