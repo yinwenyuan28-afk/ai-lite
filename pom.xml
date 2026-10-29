@@ -7,7 +7,7 @@
     <!-- groupId 与 GitHub 用户名对应。 -->
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-parent</artifactId>
-    <version>0.1.10</version>
+    <version>0.1.11</version>
     <packaging>pom</packaging>
 
     <name>AI Lite</name>
@@ -62,6 +62,10 @@
             API 兼容性门禁的对比基线：上一个已发布到 Central 的版本。
             每次正式发布后手工前移这一行（随 release 提交一起改）。
             0.1.8 发布时漏了前移，0.1.9 补上；此后每次发版都要跟着走。
+
+            当前停在 0.1.9：0.1.10 的 bundle 已上传到 Central Portal 但还没手动
+            Publish，中央仓库里取不到 0.1.10 的 jar。等 0.1.10 真正发布后再前移，
+            否则 -Pcontract-check 会在离线/镜像未同步时假失败。
         -->
         <ai-lite.release.version>0.1.9</ai-lite.release.version>
     </properties>
