@@ -59,6 +59,7 @@ public class AdminController {
     private final PromptManager prompts;
     private final JdbcTemplate jdbc;
     private final String callTable;
+    private final String callBodyTable;
     private final CallBodySettings bodyPolicy;
     private final HttpExecutor http;
 
@@ -78,7 +79,8 @@ public class AdminController {
     public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
                            JdbcTemplate jdbc, String callTable,
                            JdbcCallBodyPolicy bodyPolicy) {
-        this(config, catalog, prompts, jdbc, callTable, (CallBodySettings) bodyPolicy, null);
+        this(config, catalog, prompts, jdbc, callTable, null,
+                (CallBodySettings) bodyPolicy, null);
     }
 
     /**
@@ -95,7 +97,8 @@ public class AdminController {
     public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
                            JdbcTemplate jdbc, String callTable,
                            JdbcCallBodyPolicy bodyPolicy, HttpExecutor http) {
-        this(config, catalog, prompts, jdbc, callTable, (CallBodySettings) bodyPolicy, http);
+        this(config, catalog, prompts, jdbc, callTable, null,
+                (CallBodySettings) bodyPolicy, http);
     }
 
     /**
@@ -110,11 +113,28 @@ public class AdminController {
     public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
                            JdbcTemplate jdbc, String callTable,
                            CallBodySettings bodyPolicy, HttpExecutor http) {
+        this(config, catalog, prompts, jdbc, callTable, null, bodyPolicy, http);
+    }
+
+    /**
+     * @param config        配置文件里的供应商与业务 id
+     * @param catalog       运行时目录
+     * @param prompts       提示词管理器，可为 null
+     * @param jdbc          调用记录查询
+     * @param callTable     调用记录表名，未配置时为 null
+     * @param callBodyTable 调用正文表名；null 表示按摘要表名推导
+     * @param bodyPolicy    输入输出记录档位（接口类型，可注入配置了表名的实现），可为 null
+     * @param http          出站执行器（配置启用的传输）；null 表示退化为 HttpURLConnection
+     */
+    public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
+                           JdbcTemplate jdbc, String callTable, String callBodyTable,
+                           CallBodySettings bodyPolicy, HttpExecutor http) {
         this.config = config;
         this.catalog = catalog;
         this.prompts = prompts;
         this.jdbc = jdbc;
         this.callTable = callTable;
+        this.callBodyTable = callBodyTable;
         this.bodyPolicy = bodyPolicy;
         this.http = http;
     }
@@ -602,7 +622,8 @@ public class AdminController {
         if (from < 0) {
             throw new IllegalArgumentException("offset 不能为负");
         }
-        return ok(CallLogQuery.page(jdbc, callTable, bizId, provider, modelId, success, size, from));
+        return ok(CallLogQuery.page(jdbc, callTable, callBodyTable, bizId, provider, modelId,
+                success, size, from));
     }
 
     /**
@@ -611,7 +632,7 @@ public class AdminController {
      */
     @GetMapping("/ai-lite/admin/api/calls/{callId}")
     public Map<String, Object> callDetail(@PathVariable("callId") String callId) {
-        Map<String, Object> row = CallLogQuery.find(jdbc, callTable, callId);
+        Map<String, Object> row = CallLogQuery.find(jdbc, callTable, callBodyTable, callId);
         if (row == null) {
             throw new IllegalArgumentException("调用记录不存在");
         }

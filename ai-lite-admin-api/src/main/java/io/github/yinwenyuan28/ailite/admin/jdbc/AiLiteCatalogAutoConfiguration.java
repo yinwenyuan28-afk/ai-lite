@@ -4,6 +4,7 @@ import io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog;
 import io.github.yinwenyuan28.ailite.llm.CallBodyPolicy;
 import io.github.yinwenyuan28.ailite.prompt.PromptCatalog;
 import io.github.yinwenyuan28.ailite.prompt.PromptStore;
+import io.github.yinwenyuan28.ailite.prompt.PromptTableNames;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.AutoConfigureAfter;
@@ -68,9 +69,35 @@ public class AiLiteCatalogAutoConfiguration {
                 throw new IllegalStateException(AiLiteCatalogMissingPromptStoreAutoConfiguration.MESSAGE);
             }
             CatalogBizIds.normalize(bizProperties.getBizIds());
-            JdbcRuntimeCatalog.requireTable(jdbc, "AI_LITE_PROMPT_VERSION", "ai-lite-prompt.sql");
+            // 必须按容器里的 PromptStore 实际表名探测。以前这里写死
+            // "AI_LITE_PROMPT_VERSION"，一旦用户用 ai-lite.prompt.jdbc.version-table
+            // 改了名（或自带 PromptStore Bean），就会拿默认表名去探、探不到即启动失败，
+            // 而错误消息又指回默认表名，用户完全看不出是自己配的表名没被采纳。
+            requirePromptTable(context);
             return new JdbcRuntimeCatalog(jdbc, properties.getProviderTable(), properties.getModelTable(),
                     properties.getBizTable(), properties.getCacheSeconds());
+        }
+
+        /**
+         * 确认提示词版本/指针表可用。
+         *
+         * <p>表名可能已被 {@code ai-lite.prompt.jdbc.version-table} 改掉，因此必须问
+         * 存储自己用的是什么表名。版本表与指针表在 {@code findActive} 里 join 使用，
+         * 只探版本表不够：缺指针表同样会让发布落不了库，只是错得更晚。</p>
+         *
+         * @param context 应用上下文，用来读存储上报的实际表名
+         */
+        private static void requirePromptTable(org.springframework.context.ApplicationContext context) {
+            JdbcTemplate jdbc = context.getBean(JdbcTemplate.class);
+            PromptStore store = context.getBean(PromptStore.class);
+            if (store instanceof PromptTableNames) {
+                PromptTableNames names = (PromptTableNames) store;
+                JdbcRuntimeCatalog.requireTable(jdbc, names.getVersionTable(), "ai-lite-prompt.sql");
+                JdbcRuntimeCatalog.requireTable(jdbc, names.getActiveTable(), "ai-lite-prompt.sql");
+                return;
+            }
+            // 自定义 PromptStore 不自述表名时只能按默认表名探测。
+            JdbcRuntimeCatalog.requireTable(jdbc, "AI_LITE_PROMPT_VERSION", "ai-lite-prompt.sql");
         }
 
         /**

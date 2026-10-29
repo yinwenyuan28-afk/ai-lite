@@ -1,5 +1,6 @@
 package io.github.yinwenyuan28.ailite.store.jdbc;
 
+import io.github.yinwenyuan28.ailite.llm.CallLogTables;
 import io.github.yinwenyuan28.ailite.llm.LlmCallRecord;
 import io.github.yinwenyuan28.ailite.llm.LlmCallStore;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -8,7 +9,10 @@ import java.sql.Timestamp;
 
 /**
  * JDBC 调用记录存储。摘要写入调用表。输入输出只在记录对象带了正文时写入
- * {@code AI_LITE_LLM_CALL_BODY}，并且会去掉密钥。
+ * 正文表，并且会去掉密钥。
+ *
+ * <p>正文表名默认跟随摘要表名推导（{@code <摘要表>_BODY}），也可显式指定。
+ * 见 {@link CallLogTables}：两张表分开改名的历史遗留会让写入静默失败。</p>
  *
  * <p>表结构见 {@code src/main/resources/ai-lite-llm-call.sql}。</p>
  */
@@ -16,17 +20,28 @@ public final class JdbcLlmCallStore implements LlmCallStore {
 
     private final JdbcTemplate jdbc;
     private final String table;
+    private final String bodyTable;
 
     public JdbcLlmCallStore(JdbcTemplate jdbc) {
-        this(jdbc, "AI_LITE_LLM_CALL");
+        this(jdbc, CallLogTables.DEFAULT_TABLE, null);
     }
 
     public JdbcLlmCallStore(JdbcTemplate jdbc, String table) {
+        this(jdbc, table, null);
+    }
+
+    /**
+     * @param jdbc      JdbcTemplate
+     * @param table     摘要表名
+     * @param bodyTable 正文表名；null 或空表示按 {@code table + "_BODY"} 推导
+     */
+    public JdbcLlmCallStore(JdbcTemplate jdbc, String table, String bodyTable) {
         if (jdbc == null) {
             throw new IllegalArgumentException("JdbcTemplate 不能为空");
         }
         this.jdbc = jdbc;
         this.table = safeTable(table);
+        this.bodyTable = safeTable(CallLogTables.resolveBodyTable(this.table, bodyTable));
     }
 
     @Override
@@ -48,9 +63,30 @@ public final class JdbcLlmCallStore implements LlmCallStore {
         if (record.getInputBody() == null && record.getOutputBody() == null) {
             return;
         }
-        jdbc.update("INSERT INTO AI_LITE_LLM_CALL_BODY (CALL_ID, INPUT_TEXT, OUTPUT_TEXT)"
+        jdbc.update("INSERT INTO " + bodyTable + " (CALL_ID, INPUT_TEXT, OUTPUT_TEXT)"
                         + " VALUES (?, ?, ?)",
                 record.getCallId(), emptyToNull(record.getInputBody()), emptyToNull(record.getOutputBody()));
+    }
+
+    /**
+     * 摘要表名。
+     *
+     * @return 摘要表名
+     */
+    public String getTable() {
+        return table;
+    }
+
+    /**
+     * 正文表名。
+     *
+     * <p>供管理端查询正文时用同一张表——读侧不能自己拼 {@code "_BODY"}，
+     * 否则显式配置了 {@code body-table-name} 时读写会指向不同的表。</p>
+     *
+     * @return 正文表名
+     */
+    public String getBodyTable() {
+        return bodyTable;
     }
 
     private static String emptyToNull(String text) {

@@ -71,7 +71,8 @@ public class AiLiteStoreJdbcAutoConfiguration {
             if (tableName == null || tableName.trim().isEmpty()) {
                 throw new IllegalStateException(MISSING_TABLE_MESSAGE);
             }
-            return new JdbcLlmCallStore(jdbcTemplate, tableName);
+            return new JdbcLlmCallStore(jdbcTemplate, tableName,
+                    properties.resolveBodyTableName());
         }
     }
 }

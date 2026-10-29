@@ -75,6 +75,7 @@ public class AiLiteAdminAutoConfiguration {
         }
         return new AdminController(config, (JdbcRuntimeCatalog) catalog, prompts.getIfAvailable(), jdbc,
                 environment.getProperty("ai-lite.store.jdbc.table-name"),
+                environment.getProperty("ai-lite.store.jdbc.body-table-name"),
                 policy, executor);
     }
 }

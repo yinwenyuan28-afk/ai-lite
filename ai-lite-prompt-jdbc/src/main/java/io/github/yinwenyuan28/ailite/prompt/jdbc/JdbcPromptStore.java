@@ -4,6 +4,7 @@ import io.github.yinwenyuan28.ailite.prompt.PromptAudit;
 import io.github.yinwenyuan28.ailite.prompt.PromptException;
 import io.github.yinwenyuan28.ailite.prompt.PromptStatus;
 import io.github.yinwenyuan28.ailite.prompt.PromptStore;
+import io.github.yinwenyuan28.ailite.prompt.PromptTableNames;
 import io.github.yinwenyuan28.ailite.prompt.PromptVersion;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementCreator;
@@ -27,7 +28,7 @@ import java.util.Optional;
  * 传入 {@link PlatformTransactionManager} 时使用事务模板，否则依赖连接自身的自动提交。
  * 多节点并发创建草稿时，请保留 (PROMPT_KEY, VERSION_NO) 唯一索引作为最后防线。</p>
  */
-public final class JdbcPromptStore implements PromptStore {
+public final class JdbcPromptStore implements PromptStore, PromptTableNames {
 
     private final JdbcTemplate jdbc;
     private final String versionTable;
@@ -61,6 +62,32 @@ public final class JdbcPromptStore implements PromptStore {
         this.activeTable = safeTable(activeTable);
         this.auditTable = safeTable(auditTable);
         this.transactions = txManager == null ? null : new TransactionTemplate(txManager);
+    }
+
+    /**
+     * 生效版本表的实际表名。
+     *
+     * <p>供装配层做建表探测用：目录模式要求提示词发布落库，需要在启动期确认表存在，
+     * 而表名可能已被 {@code ai-lite.prompt.jdbc.version-table} 改掉。</p>
+     *
+     * @return 版本表名
+     */
+    public String getVersionTable() {
+        return versionTable;
+    }
+
+    /**
+     * @return 生效指针表名
+     */
+    public String getActiveTable() {
+        return activeTable;
+    }
+
+    /**
+     * @return 审计表名
+     */
+    public String getAuditTable() {
+        return auditTable;
     }
 
     @Override
