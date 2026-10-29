@@ -7,7 +7,7 @@
     <!-- groupId 与 GitHub 用户名对应。 -->
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-parent</artifactId>
-    <version>0.1.11</version>
+    <version>0.1.12</version>
     <packaging>pom</packaging>
 
     <name>AI Lite</name>

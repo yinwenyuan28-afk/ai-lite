@@ -3,7 +3,12 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
-## [未发布]
+## [0.1.12] - 2026-10-29
+
+> **对 Maven Central 用户，这个版本等于 0.1.10 + 0.1.11 + 0.1.12 的合集。**
+> 0.1.10 与 0.1.11 的 bundle 曾上传到 Central Portal 但没有 Publish，中央仓库里
+> 取不到，因此从 0.1.9 升级上来时下面三个版本的改动会一起生效。相邻两版的说明
+> 见各自的段落。
 
 ### 优化
 
@@ -21,11 +26,13 @@
 
 - **`ai-lite.catalog.setting-cache-seconds`**：调用正文档位的缓存秒数，默认 10。
 - **`JdbcCallBodyPolicy(JdbcTemplate, String table, int cacheSeconds)`** 三参构造器与 `invalidate()`；两参、单参构造器保留，行为变为带 10 秒缓存。
+- **数据表与缓存文档**（[docs/desc-数据表与缓存.md](docs/desc-数据表与缓存.md)）：10 张表的用途与改名方式、常读数据的缓存机制一览。
 
 ### 升级提示
 
 - 不改配置的用户行为一致，只是档位读取多了最多 10 秒的本地缓存。
 - 依赖"改完档位立刻生效"的多节点部署：本机仍立即生效；其他节点最长 10 秒，或调 `invalidate()` 广播。
+- **从 0.1.9 升级的用户请同时阅读 0.1.10 与 0.1.11 两节**：这两版的表名配置键、`RawHttpExecutor`、Jetty 的三处修复都是一起生效的。
 
 ## [0.1.11] - 2026-10-29
 
@@ -325,6 +332,7 @@
 - 虚拟模型路由 / 供应商故障转移不在范围内。
 - Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
 
+[0.1.12]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.12
 [0.1.11]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.11
 [0.1.10]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.10
 [0.1.9]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.9

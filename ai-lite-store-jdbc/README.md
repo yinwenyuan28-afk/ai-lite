@@ -22,7 +22,7 @@ JDBC 版 `LlmCallStore`：把每次模型调用的账单摘要写进数据库。
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-store-jdbc</artifactId>
-    <version>0.1.11</version>
+    <version>0.1.12</version>
 </dependency>
 ```
 

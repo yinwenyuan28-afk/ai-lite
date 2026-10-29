@@ -75,7 +75,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-spring-boot-starter</artifactId>
-    <version>0.1.11</version>
+    <version>0.1.12</version>
 </dependency>
 ```
 
@@ -171,18 +171,18 @@ ai-lite:
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-jetty</artifactId>
-    <version>0.1.11</version>
+    <version>0.1.12</version>
 </dependency>
 <!-- 或者： -->
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-webclient</artifactId>
-    <version>0.1.11</version>
+    <version>0.1.12</version>
 </dependency>
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-http-ktor-cio</artifactId>
-    <version>0.1.11</version>
+    <version>0.1.12</version>
 </dependency>
 ```
 
@@ -226,7 +226,7 @@ promptManager.rollback(oldVersionId, "alice");
 <dependency>
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-executor-coroutines</artifactId>
-    <version>0.1.11</version>
+    <version>0.1.12</version>
 </dependency>
 ```
 
