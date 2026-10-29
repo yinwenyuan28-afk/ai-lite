@@ -49,7 +49,7 @@ Maven Central 自 2026-10-01 起对发布量设硬阈值，**按组织、按自�
 
 ### 这个库的消耗
 
-发布 17 个模块 + parent pom，共 **68 个产物**。每个产物贡献的文件数取决于校验和档位：
+发布 17 个模块 + parent pom，共 **67 个产物**（15 个普通模块各 4 个 + `ai-lite-core` 2 个 + parent pom 1 个；`ai-lite-llm` 不再额外发布 `tests.jar`）。每个产物贡献的文件数取决于校验和档位：
 
 | 组成 | 每产物文件数 |
 | --- | --- |
@@ -58,12 +58,23 @@ Maven Central 自 2026-10-01 起对发布量设硬阈值，**按组织、按自�
 | `.md5` + `.sha1`（必需） | 2 |
 | `.sha256` + `.sha512`（可选） | 2 |
 
-- 默认 `checksums=all`：6 个/产物 → **单次发版 408 个文件**
-- 已配置 `checksums=required`：4 个/产物 → **单次发版 272 个文件**
+- 默认 `checksums=all`：6 个/产物 → 单次发版 402 个文件
+- 已配置 `checksums=required`：4 个/产物 → **单次发版 268 个文件**
 
-`ai-lite-llm` 比其他模块多 6 个（有一个对外发布的 `tests.jar`）；`ai-lite-core` 是空 jar 聚合坐标，只有 2 个产物。
+`ai-lite-core` 是空 jar 聚合坐标，只有 2 个产物（无源码故不生成 sources/javadoc）。
 
-**272 个仍占月度限额的 23%，一个月最多发 4 次。** 所以发版节奏要克制：文档、注释、纯测试改动不值得单独发版；日常改动用 SNAPSHOT 或 GitHub Packages 验证。
+**268 个仍占月度限额的 23%，一个月最多发 4 次。** 所以发版节奏要克制：文档、注释、纯测试改动不值得单独发版；日常改动用 SNAPSHOT 或 GitHub Packages 验证。
+
+### 不发布 test-jar
+
+`ai-lite-llm` 曾通过 `maven-jar-plugin` 的 `test-jar` 目标对外发布 `-tests.jar`，供 `ai-lite-agent` 复用测试夹具。**已移除**，原因有两条：
+
+1. 它会把 `ai-lite-llm` 的全部测试类（150+ 个）推到 Maven Central，而测试类不在 API 契约门禁的保护范围内——japicmp 只比对主 jar。用户一旦依赖这些类，一次内部重构就会让对方的构建失败，而这些类从未承诺稳定性。
+2. 每个 classifier 产物额外占用 4 个发布文件额度。
+
+`ai-lite-agent` 现在自带一份 `GatewayTestSupport` 测试副本（同包名，30 多个调用方无需改 import）。改夹具时两份要同时改。
+
+`central-publishing-maven-plugin` 的 `excludeArtifacts` 只能按 artifactId 排除整个模块（反编译确认只比较 `getArtifactId()`），无法只排除某个 classifier，所以不能靠配置解决，只能不 attach。
 
 ### 为什么设 `required` 而不是 `none`
 
@@ -77,7 +88,7 @@ Central 的强制要求只有 `.md5` 与 `.sha1`（官方 Requirements「Provide
 2. **宽限期重置条件**：连续 2 个月低于限额后重置。这意味着超限后即便下个月合规，宽限期也不会立刻消失。
 3. **申请提高限额或豁免**：写 `central-support@sonatype.com`，注明 namespace、组织、项目说明、发布模式说明、以及用量是持续性还是偶发。官方明确欢迎按需申请，合法社区开源项目不受影响。
 
-发邮件时可以直接引用这个事实：单次 272 个文件来自 17 个模块的刻意分层（每种 HTTP 传输、每种存储后端独立坐标，供用户按需引入），不是刷包。
+发邮件时可以直接引用这个事实：单次 268 个文件来自 17 个模块的刻意分层（每种 HTTP 传输、每种存储后端独立坐标，供用户按需引入），不是刷包。
 
 ## 4.2 排障笔记：Central 返回 401 时怎么判断
 

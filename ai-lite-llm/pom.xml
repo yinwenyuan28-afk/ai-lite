@@ -39,21 +39,18 @@
     <build>
         <plugins>
             <!--
-                对外提供 test-jar：ai-lite-agent 的测试复用这里的 GatewayTestSupport，
-                避免同一份测试夹具复制两份后各自漂移。
+                这里曾配置 maven-jar-plugin 的 test-jar 目标，供 ai-lite-agent 复用
+                测试夹具 GatewayTestSupport。已移除，原因有两条：
+
+                1) 它把本模块的全部测试类（150+ 个）一并发布到 Maven Central。
+                   测试类不在 API 契约门禁（japicmp 只比对主 jar）的保护范围内，
+                   用户若依赖它们，一次内部重构就会让对方的构建失败；而这些类
+                   从未承诺过稳定性。
+                2) 每个 classifier 产物会额外占用 4 个 Central 发布文件额度，
+                   本组织已触达月度文件数上限。
+
+                agent 侧改为自带一份测试副本（同包名，import 无需改动）。
             -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-jar-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <id>test-jar</id>
-                        <goals>
-                            <goal>test-jar</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
             <!--
                 本模块首次发版为 0.1.8，Maven Central 上没有 0.1.7 基线，
                 japicmp 拉不到 oldVersion 会直接失败。基线从 0.1.8 起建立。

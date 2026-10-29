@@ -20,15 +20,12 @@
             <artifactId>ai-lite-llm</artifactId>
         </dependency>
 
-        <!-- 复用 llm 侧的 GatewayTestSupport，避免测试夹具复制两份。 -->
-        <dependency>
-            <groupId>io.github.yinwenyuan28-afk</groupId>
-            <artifactId>ai-lite-llm</artifactId>
-            <version>${project.version}</version>
-            <type>test-jar</type>
-            <classifier>tests</classifier>
-            <scope>test</scope>
-        </dependency>
+        <!--
+            GatewayTestSupport 是 agent 模块内的本地测试副本，不再通过 test-jar
+            依赖 ai-lite-llm。原因见该文件的类注释：发布 test-jar 会把 llm 的
+            全部测试类（150+ 个）推到 Maven Central，而它们不在 API 契约门禁
+            的保护范围内，用户一旦依赖就会在内部重构后编译失败。
+        -->
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
