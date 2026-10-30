@@ -226,6 +226,135 @@ public final class LlmGateway {
     }
 
     /**
+     * 问一次并边生成边回调，同时按策略重试瞬时错误。
+     *
+     * <p><b>默认口径（{@link StreamRetryMode#BEFORE_FIRST_DELTA}）的可重试窗口只到
+     * 首个增量为止。</b>本次尝试一旦把任何一段增量交给 {@code onDelta}，就不再重试：
+     * 模型流式没有断点续传，重发请求会让服务端从头重新生成，已交付内容无法撤回，
+     * 客户端会看到「前段 + 重发全文」的重复输出。因此「已交付」是硬闸门——即使失败
+     * 本身属于可重试类别，也会立刻原样抛出。</p>
+     *
+     * <p>失败若发生在首个增量之前（连接失败、响应头前超时、4xx/5xx、空响应），
+     * 此时外部零感知，重发完全安全，行为与 {@link #oneWithRetry} 一致：独立校验、
+     * 独立写调用记录、退避尊重 {@code Retry-After}、支持总时限与取消。</p>
+     *
+     * @param call             调用参数
+     * @param onDelta          增量回调，可为 null
+     * @param policy           重试策略
+     * @param cancel           取消句柄，可为 null
+     * @param mode             重试窗口口径，null 等同 {@link StreamRetryMode#BEFORE_FIRST_DELTA}
+     * @param onAttemptDiscarded 一次尝试的输出作废、即将重发时触发；仅在
+     *                        {@link StreamRetryMode#ALWAYS} 且该次尝试交付过增量时才可能调用。
+     *                        调用方在这里清掉已展示内容，否则会看到重复文本。可为 null。
+     * @return 调用结果
+     */
+    public LlmResult oneByStreamWithRetry(LlmCall call, Consumer<String> onDelta,
+                                          RetryPolicy policy, LlmCancelHandle cancel,
+                                          StreamRetryMode mode,
+                                          Runnable onAttemptDiscarded) {
+        if (policy == null) {
+            throw new LlmCallException("重试策略不能为空", null, LlmCallException.Kind.CONFIG);
+        }
+        final StreamRetryMode effectiveMode = mode == null
+                ? StreamRetryMode.BEFORE_FIRST_DELTA : mode;
+        final boolean retryAfterDelivery = effectiveMode == StreamRetryMode.ALWAYS;
+        long startNanos = System.nanoTime();
+        Long deadlineNanos = RetrySupport.deadlineNanos(startNanos, policy.getTotalDeadlineMs());
+        List<LlmCallException> failures = new ArrayList<LlmCallException>();
+        for (int attempt = 1; attempt <= policy.getMaxAttempts(); attempt++) {
+            if (cancel != null && cancel.isCancelled()) {
+                return oneByStream(call, onDelta, cancel);
+            }
+            if (RetrySupport.deadlineReached(deadlineNanos, System.nanoTime())) {
+                throw RetrySupport.deadlineFailure(failures);
+            }
+            // 每次尝试独立计量「是否已交付」：上一次尝试吐过增量就不该走到这里，
+            // 但显式重置保证语义只由失败的这一次尝试决定。
+            final AtomicBoolean emitted = new AtomicBoolean(false);
+            Consumer<String> guarded = onDelta == null ? null : new Consumer<String>() {
+                @Override
+                public void accept(String delta) {
+                    // 先置位再交付：交付一旦发生就不可撤回，后续任何失败都不许重试。
+                    emitted.set(true);
+                    onDelta.accept(delta);
+                }
+            };
+            try {
+                return oneByStream(call, guarded, cancel);
+            } catch (LlmCallException ex) {
+                failures.add(ex);
+                boolean streamAlreadyDelivered = emitted.get();
+                // 默认口径下已交付即停手；ALWAYS 口径下允许带着已交付内容继续重发。
+                if ((!retryAfterDelivery && streamAlreadyDelivered)
+                        || !policy.shouldRetry(ex)
+                        || attempt >= policy.getMaxAttempts()) {
+                    throw RetrySupport.withSuppressed(ex, failures);
+                }
+                if (cancel != null && cancel.isCancelled()) {
+                    return oneByStream(call, onDelta, cancel);
+                }
+                long delay = policy.delayMs(attempt);
+                if (ex.getRetryAfterMs() != null) {
+                    delay = Math.min(ex.getRetryAfterMs().longValue(), policy.getMaxBackoffMs());
+                }
+                if (deadlineNanos != null) {
+                    long now = System.nanoTime();
+                    if (RetrySupport.deadlineReached(deadlineNanos, now)) {
+                        throw RetrySupport.deadlineFailure(failures);
+                    }
+                    delay = RetrySupport.clampDelayMs(delay, deadlineNanos, now);
+                }
+                // 先让调用方清掉已展示内容，再等待与重发；否则用户会先看到重复文本。
+                if (streamAlreadyDelivered && onAttemptDiscarded != null) {
+                    try {
+                        onAttemptDiscarded.run();
+                    } catch (RuntimeException callbackFailure) {
+                        // 清理失败不能改变重试行为，也不能把原始失败顶掉。
+                        log.warn("流式重试清理回调异常，继续重试: {}", callbackFailure.toString());
+                    }
+                }
+                policy.notifyRetry(attempt, delay, ex);
+                if (!sleepCancellable(delay, cancel)) {
+                    return oneByStream(call, onDelta, cancel);
+                }
+            }
+        }
+        throw RetrySupport.deadlineFailure(failures);
+    }
+
+    /**
+     * 问一次并边生成边回调，同时按策略重试瞬时错误（默认窗口：首个增量之前）。
+     *
+     * @param call    调用参数
+     * @param onDelta 增量回调，可为 null
+     * @param policy  重试策略
+     * @param cancel  取消句柄，可为 null
+     * @return 调用结果
+     */
+    public LlmResult oneByStreamWithRetry(LlmCall call, Consumer<String> onDelta,
+                                          RetryPolicy policy, LlmCancelHandle cancel) {
+        return oneByStreamWithRetry(call, onDelta, policy, cancel,
+                StreamRetryMode.BEFORE_FIRST_DELTA, null);
+    }
+
+    /**
+     * 带显式重试的流式单次调用，使用默认取消句柄。
+     *
+     * <p>不提供 {@code (call, onDelta, policy, StreamRetryMode)} 形式的重载：它与
+     * {@code (call, onDelta, policy, LlmCancelHandle)} 在传 {@code null} 时会二义。
+     * 需要指定窗口口径时用 6 参版本，取消句柄传 {@code null} 即可。</p>
+     *
+     * @param call    调用参数
+     * @param onDelta 增量回调，可为 null
+     * @param policy  重试策略
+     * @return 调用结果
+     */
+    public LlmResult oneByStreamWithRetry(LlmCall call, Consumer<String> onDelta,
+                                          RetryPolicy policy) {
+        return oneByStreamWithRetry(call, onDelta, policy, (LlmCancelHandle) null);
+    }
+
+    /**
      * 分片睡眠，保证取消或总时限不会等到整段退避结束。
      *
      * @return true 表示正常睡完；false 表示被取消

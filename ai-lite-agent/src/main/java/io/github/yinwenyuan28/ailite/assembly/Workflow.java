@@ -8,6 +8,7 @@ import io.github.yinwenyuan28.ailite.llm.LlmResult;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
 import io.github.yinwenyuan28.ailite.llm.RetryPolicy;
+import io.github.yinwenyuan28.ailite.llm.StreamRetryMode;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -314,6 +315,66 @@ public final class Workflow {
             public LlmResult execute(LlmGateway gateway, LlmCancelHandle runCancel) {
                 return gateway.one(snapshot,
                         runCancel != null ? runCancel : defaultCancel);
+            }
+        };
+    }
+
+    /**
+     * 带显式重试的流式单次调用步骤。重试策略只作用于这一步。
+     *
+     * <p>与 {@link LlmGateway#oneByStreamWithRetry} 同一契约：默认只在首个增量
+     * 交付前重试，一旦 {@code onDelta} 收到过内容就停止重试。</p>
+     *
+     * @param call    调用参数
+     * @param onDelta 增量回调，可为 null
+     * @param policy  重试策略
+     * @return 同步步骤
+     */
+    public static SyncStep oneByStreamStepWithRetry(LlmCall call, Consumer<String> onDelta,
+                                                    RetryPolicy policy) {
+        return oneByStreamStepWithRetry(call, onDelta, policy,
+                StreamRetryMode.BEFORE_FIRST_DELTA, null);
+    }
+
+    /**
+     * 带显式重试的流式单次调用步骤，可指定重试窗口口径与输出作废通知。
+     *
+     * <p>{@code mode} 取 {@link StreamRetryMode#ALWAYS} 时，已交付的增量也会被
+     * 整段重发；此时必须在 {@code onAttemptDiscarded} 里清掉已展示内容，否则
+     * 用户会看到重复文本。</p>
+     *
+     * @param call               调用参数
+     * @param onDelta            增量回调，可为 null
+     * @param policy             重试策略
+     * @param mode               重试窗口口径，null 等同 {@link StreamRetryMode#BEFORE_FIRST_DELTA}
+     * @param onAttemptDiscarded 上一次尝试输出作废、即将重发时触发；可为 null
+     * @return 同步步骤
+     */
+    public static SyncStep oneByStreamStepWithRetry(LlmCall call, Consumer<String> onDelta,
+                                                    RetryPolicy policy, StreamRetryMode mode,
+                                                    Runnable onAttemptDiscarded) {
+        if (call == null) {
+            throw new LlmCallException("调用不能为空");
+        }
+        if (policy == null) {
+            throw new LlmCallException("重试策略不能为空", null,
+                    LlmCallException.Kind.CONFIG);
+        }
+        final LlmCall snapshot = call.copy();
+        final Consumer<String> delta = onDelta;
+        final RetryPolicy retry = policy;
+        final StreamRetryMode window = mode;
+        final Runnable discarded = onAttemptDiscarded;
+        return new SyncStep() {
+            @Override
+            public LlmResult execute(LlmGateway gateway) {
+                return gateway.oneByStreamWithRetry(snapshot, delta, retry, null, window, discarded);
+            }
+
+            @Override
+            public LlmResult execute(LlmGateway gateway, LlmCancelHandle runCancel) {
+                return gateway.oneByStreamWithRetry(snapshot, delta, retry, runCancel, window,
+                        discarded);
             }
         };
     }

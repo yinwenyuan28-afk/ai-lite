@@ -66,11 +66,22 @@ public final class GatewayTestSupport {
 
     public static final class FakeTransport implements LlmTransport {
 
-        private final LinkedList<LlmCompletion> responses = new LinkedList<LlmCompletion>();
+        private final LinkedList<Object> responses = new LinkedList<Object>();
         private final List<LlmRequest> requests = new ArrayList<LlmRequest>();
 
         public FakeTransport enqueue(LlmCompletion completion) {
             responses.add(completion);
+            return this;
+        }
+
+        /**
+         * 排入一次失败：下一次请求直接抛出该异常，用于覆盖重试路径。
+         *
+         * @param failure 要抛出的异常
+         * @return this
+         */
+        public FakeTransport fail(LlmCallException failure) {
+            responses.add(failure);
             return this;
         }
 
@@ -89,7 +100,11 @@ public final class GatewayTestSupport {
             if (responses.isEmpty()) {
                 return new LlmCompletion("", null, LlmStopReason.STOP, LlmUsage.zero(), null);
             }
-            return responses.removeFirst();
+            Object outcome = responses.removeFirst();
+            if (outcome instanceof LlmCallException) {
+                throw (LlmCallException) outcome;
+            }
+            return (LlmCompletion) outcome;
         }
     }
 }

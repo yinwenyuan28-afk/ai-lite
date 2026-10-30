@@ -11,8 +11,10 @@
 ## 1. 结论
 
 - **`LlmGateway.one` 不做自动重试。** 一次调用只调用一次 transport，失败就结束。
-- **单次入口提供显式重试：同步 `oneWithRetry(call, policy, cancel?)` 与异步
-  `oneWithRetryAsync(call, policy, cancel?)`。** 默认关闭，调用方显式选择；只覆盖非流式模型调用。
+- **单次入口提供显式重试：同步 `oneWithRetry(call, policy, cancel?)`、同步流式
+  `oneByStreamWithRetry(call, onDelta, policy, cancel?)` 与异步
+  `oneWithRetryAsync(call, policy, cancel?)`。** 默认关闭，调用方显式选择。流式版
+  的可重试窗口只到首个增量为止，详见 §4.1。
 - **异步重试不占 I/O 线程。** 退避任务投递到专用 `ai-lite-retry-*` 调度器，
   HTTP 客户端回调线程只做固定的几步判断（几十纳秒级，不随并发量增长）。
 - **`OkHttpExecutor` 关闭了 OkHttp 的连接重试**（`retryOnConnectionFailure(false)`），避免和上层策略叠加。
@@ -181,7 +183,7 @@ LlmResult callWithRetry(LlmGateway gateway, LlmCall call, int maxAttempts,
 | HTTP 500 / 502 / 503 / 504 | 上游临时故障 |
 | 连接超时、读取超时 | 网络抖动或上游过载 |
 | 连接被重置、DNS 临时失败 | 可识别的瞬时 IO 错误 |
-| 流式尚未收到首个 delta | 此时没有已提交的部分输出，重试安全 |
+| 流式尚未收到首个 delta | 此时没有已提交的部分输出，重试安全；由 `oneByStreamWithRetry` 自动判定 |
 
 ### 4.2 不可重试
 
@@ -193,7 +195,20 @@ LlmResult callWithRetry(LlmGateway gateway, LlmCall call, int maxAttempts,
 | 内容审核拒绝 | 重试只会再次被拒绝 |
 | 上下文超长 | 需要截断或换模型，不是重试 |
 | 取消 | 用户意图优先，L2 明确禁止再推进 |
-| 流式已经收到 delta | 重试会产生重复输出，调用方需自己决定是否续写 |
+| 流式已经收到 delta | 默认口径下重试会产生重复输出，`oneByStreamWithRetry` 会无视可重试分类直接停止。若显式选择 `StreamRetryMode.ALWAYS`，则由调用方负责在 `onAttemptDiscarded` 里清掉已展示内容，然后再重发 |
+
+### 4.3 流式重试的两种窗口口径
+
+`oneByStreamWithRetry` 的第 5 个参数 `StreamRetryMode` 决定「已交付增量之后还要不要重发」：
+
+| 口径 | 行为 | 谁负责清理 |
+| --- | --- | --- |
+| `BEFORE_FIRST_DELTA`（默认） | 一旦交付过增量就停手，异常原样抛出 | 不需要清理，已展示内容保留 |
+| `ALWAYS` | 无视交付状态，有重试机会就整段重发 | **调用方**：`onAttemptDiscarded` 在重发前触发，必须在此清屏 |
+
+`ALWAYS` 的代价必须说清：重发的物理含义是「同样的请求再发一遍」，服务端从头重新生成，第一次的文本已经交给 `onDelta` 且无法撤回。frontend 若整体替换气泡内容则无碍；append-only 的终端、已落库的文本、已推入 TTS 队列的音频都会出问题。
+
+`ALWAYS` 只放宽「已交付」这一道闸门，不改变错误分类：400/401 之类仍然不重试，`maxAttempts` 与总时限仍然生效。
 
 ---
 

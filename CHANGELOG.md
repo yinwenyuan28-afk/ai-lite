@@ -3,6 +3,24 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [未发布]
+
+### 新增
+
+- **`LlmGateway.oneByStreamWithRetry(call, onDelta, policy, cancel?)`**：同步流式单次调用 + 显式重试。结构与 `oneWithRetry` 一致（独立校验、独立写调用记录、退避尊重 `Retry-After`、支持总时限与取消）。
+- **`StreamRetryMode`**：控制「已交付增量之后要不要重发」。默认 `BEFORE_FIRST_DELTA`（首个增量前才重试）；`ALWAYS` 无视交付状态整段重发。
+- **`Workflow.oneByStreamStepWithRetry(call, onDelta, policy)`**：把上面的能力包装成同步步骤，可与其它 `SyncStep` 混排执行。
+
+### 设计口径：默认在首个增量前停手，可选强制重发
+
+默认口径下，本次尝试一旦把任何一段增量交给 `onDelta` 就不再重试——即使失败本身属于可重试类别（如 503、连接重置）也立刻原样抛出。原因是模型流式没有断点续传：重发请求会让服务端从头生成，已交付内容无法撤回，客户端会看到「前段 + 重发全文」的重复输出。
+
+这条边界与业界主流一致：OpenAI 官方 SDK 明确不自动重试已消费的流（重放会重复已交付输出）；Vercel AI SDK 的 `maxRetries` 只覆盖初始调用，跨越该边界是 2026-09 才以独立选项 `streamRetries` 追加的能力；Spring AI 曾尝试让 `RetryTemplate` 覆盖流式，因 reactive stream 下行为不符而移除。
+
+本版提供 `StreamRetryMode.ALWAYS` 作为显式选择：无视交付状态、有重试机会就整段重发。**调用方必须在 `onAttemptDiscarded` 里清掉已展示内容**，否则就是重复输出。它只放宽「已交付」这一道闸门，不改变错误分类，`maxAttempts` 与总时限仍然生效。适用前端整体替换气泡；不适合 append-only 终端、已落库文本或已入 TTS 队列的音频。
+
+仍**不做**自动的「尝试隔离 + 增量暂存 + 工具幂等」那一套（Vercel `streamRetries` 的内部机制）：那需要改流式回调整条链路，是独立功能，不应该塞进 `RetryPolicy`。
+
 ## [0.1.12] - 2026-10-29
 
 > **对 Maven Central 用户，这个版本等于 0.1.10 + 0.1.11 + 0.1.12 的合集。**

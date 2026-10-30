@@ -75,6 +75,30 @@ public class WorkflowTest {
     }
 
     @Test
+    public void streamRetryStepRetriesBeforeFirstDeltaOnly() {
+        GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport()
+                .fail(new LlmCallException("boom", new java.io.IOException("io"),
+                        LlmCallException.Kind.TRANSPORT))
+                .enqueue(stop("answer"));
+        Workflow workflow = new Workflow(gateway(transport));
+        final List<String> deltas = new java.util.ArrayList<String>();
+
+        LlmResult result = workflow.execute(Workflow.oneByStreamStepWithRetry(
+                call(), new java.util.function.Consumer<String>() {
+                    @Override
+                    public void accept(String delta) {
+                        deltas.add(delta);
+                    }
+                }, io.github.yinwenyuan28.ailite.llm.RetryPolicy.builder()
+                        .maxAttempts(3).initialBackoffMs(0L).maxBackoffMs(0L)
+                        .jitter(false).build()));
+
+        assertThat(result.getContent()).isEqualTo("answer");
+        assertThat(transport.requests()).hasSize(2);
+        assertThat(deltas).isEmpty();
+    }
+
+    @Test
     public void agentLoopCannotBeAWorkflowStep() {
         GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport();
         LlmGateway gateway = gateway(transport);
