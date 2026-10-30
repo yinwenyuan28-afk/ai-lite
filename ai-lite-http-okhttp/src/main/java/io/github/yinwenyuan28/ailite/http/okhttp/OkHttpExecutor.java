@@ -24,7 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * OkHttp 4.x 实现。
+ * OkHttp 实现（API 选用 3.x/4.x 都有的签名，便于宿主 classpath 仍是 OkHttp 3.8 时跑通）。
  *
  * <p>所有请求共用一个连接池和 dispatcher；每次调用只在 newBuilder 上覆盖超时，
  * 不会为一次请求新建整套线程和连接资源。</p>
@@ -268,10 +268,18 @@ public final class OkHttpExecutor implements AsyncHttpExecutor, RawHttpExecutor 
         }
         // GET 不能带 body；OkHttp 会对带 body 的 GET 抛异常。
         builder.method(request.getMethod(), request.isGet()
-                ? null : RequestBody.create(request.getBody(), JSON));
+                ? null : jsonBody(request.getBody()));
         Call call = client.newCall(builder.build());
         bind(request.getCancel(), call);
         return call;
+    }
+
+    /**
+     * 参数顺序是 create(类型, 正文)。OkHttp 3.8 只有这一种；4.12 也还保留。
+     * create(正文, 类型) 是 4.x 才有的，在 3.8 上会 NoSuchMethodError。
+     */
+    private static RequestBody jsonBody(String body) {
+        return RequestBody.create(JSON, body == null ? "" : body);
     }
 
     private static void ensureSuccessful(Response response) throws IOException {

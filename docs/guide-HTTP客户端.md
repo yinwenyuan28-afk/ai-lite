@@ -285,7 +285,7 @@ LlmGateway                 业务入口：校验、解析模型、记录、取�
 
 ### 3.2 默认实现
 
-Starter 默认引入 OkHttp 4.12：
+Starter 的编译依赖是 OkHttp 4.12。调用只使用 3.8 和 4.12 都有的方法，宿主 classpath 上已有 OkHttp 3.8 时可以跑：
 
 - `retryOnConnectionFailure(false)`，避免与上层重试叠加；
 - `Dispatcher.maxRequests` 默认 64，`maxRequestsPerHost` 默认 5；

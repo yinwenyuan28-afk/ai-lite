@@ -51,7 +51,7 @@ JDK 8 没有虚拟线程，但等待模型响应时不必占住**调用线程**�
 | `ai-lite-core` | 纯 Java：模型、网关、编排、会话抽象 |
 | `ai-lite-prompt` | 提示词目录、版本、发布回滚、审计与渲染 |
 | `ai-lite-prompt-jdbc` | 提示词 JDBC 存储 |
-| `ai-lite-http-okhttp` | 默认 HTTP 实现（OkHttp 4.12，调用线程异步；底层仍占 Dispatcher 线程） |
+| `ai-lite-http-okhttp` | 默认 HTTP 实现（编译依赖 OkHttp 4.12，调用线程异步；底层仍占 Dispatcher 线程）。调用只使用 3.8 和 4.12 都有的方法，宿主 classpath 上已有 OkHttp 3.8 时可以跑 |
 | `ai-lite-http-okhttp-jdk21` | OkHttp 虚拟线程 Dispatcher（JDK 21 才编译，可选） |
 | `ai-lite-http-jetty` | Jetty 9.4 NIO 传输（跨 Boot 2.1/2.7，可选） |
 | `ai-lite-http-webclient` | Spring WebClient 5.1 API 响应式传输（可选） |
