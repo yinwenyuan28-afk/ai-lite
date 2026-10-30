@@ -191,6 +191,17 @@ CREATE TABLE MY_ADMIN_SETTING (
 - 调用记录默认不保存模型输入输出。`none` / `failure` / `all` 三档可在管理接口里改，正文写入正文表（默认 `AI_LITE_LLM_CALL_BODY`，跟随 `ai-lite.store.jdbc.table-name` 改名）。
 - 模型要补齐推理开关、上下文窗口、输出上限和思考格式之后才能被业务选中。思考格式的可选值和说明见 `GET /ai-lite/admin/api/thinking-formats`。
 
+**业务侧注入目录 Bean**：装配出来的类型是 `RuntimeCatalog`（实现类是 `JdbcRuntimeCatalog`）。构造器、字段、`@Autowired` 请按接口注入；需要写目录（`saveOverlay`、`insertModelIfAbsent` 等）时再转型。不要按 `JdbcRuntimeCatalog` 注入——旧版 Bean 方法返回类型是接口，Spring 会对不上并报 `NoSuchBeanDefinitionException`。自带管理端也是先注入接口再转型。
+
+```java
+public MyService(RuntimeCatalog catalog) {
+    if (!(catalog instanceof JdbcRuntimeCatalog)) {
+        throw new IllegalStateException("需要目录模式的 JdbcRuntimeCatalog");
+    }
+    this.catalog = (JdbcRuntimeCatalog) catalog;
+}
+```
+
 ## 3. 执行器 `ai-lite.executor`
 
 `ExecutorProvider.io()` 执行的是**阻塞副作用任务**：会话加载/落盘、工具执行、调用记录落表，以及协程模式下显式提交的阻塞代码。模型网络等待由异步 transport 和 HTTP 回调承担，不占这个池。四种模式的完整说明和对比见 [desc-架构总览.md](desc-架构总览.md) 的 5.2 节。

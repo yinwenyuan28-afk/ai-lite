@@ -2,6 +2,8 @@
 
 自带页面不是必须依赖。引入 `ai-lite-admin-api` 并把 `ai-lite.admin.enabled` 设为 `true` 后，下面这些接口就在应用自己的端口上。若还要自带控制台，再引入 `ai-lite-admin-ui` 并设 `ai-lite.admin.page-enabled: true`，地址是 `GET /ai-lite/admin`。
 
+自己写管理服务时，注入目录请用 `RuntimeCatalog`，需要写操作再转 `JdbcRuntimeCatalog`；不要按具体类型注入。说明见 [配置参考 §2.4](ref-配置.md)。
+
 接口没有口令。不要把打开了管理接口的端口暴露到公网。
 
 统一响应：成功 `{ "ok": true, "data": ... }`，失败 `{ "ok": false, "message": "..." }`，参数错误是 HTTP 400。响应里没有密钥明文。

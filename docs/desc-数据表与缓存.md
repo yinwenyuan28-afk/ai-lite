@@ -135,7 +135,7 @@ ai-lite:
 
 ### 3.2 目录缓存：一次读全表，5 秒 TTL
 
-`JdbcRuntimeCatalog` 不按行缓存，而是把三张表**整表读进一个内存快照**，`findProvider` / `findModel` / `findBinding` 都查这个快照。
+`JdbcRuntimeCatalog` 不按行缓存，而是把三张表**整表读进一个内存快照**，`findProvider` / `findModel` / `findBinding` 都查这个快照。业务代码注入时用接口 `RuntimeCatalog`，需要写目录时再转成 `JdbcRuntimeCatalog`；按具体类型注入会踩 Spring 类型匹配坑，见 [配置参考 §2.4](ref-配置.md)。
 
 ```java
 private Snapshot load() {

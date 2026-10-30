@@ -58,10 +58,10 @@ public class AiLiteCatalogAutoConfiguration {
          */
         @Bean
         @ConditionalOnMissingBean(RuntimeCatalog.class)
-        public RuntimeCatalog aiLiteRuntimeCatalog(JdbcTemplate jdbc, AiLiteCatalogProperties properties,
-                                                   AiLiteLlmBizProperties bizProperties,
-                                                   Environment environment,
-                                                   org.springframework.context.ApplicationContext context) {
+        public JdbcRuntimeCatalog aiLiteRuntimeCatalog(JdbcTemplate jdbc, AiLiteCatalogProperties properties,
+                                                       AiLiteLlmBizProperties bizProperties,
+                                                       Environment environment,
+                                                       org.springframework.context.ApplicationContext context) {
             if (environment.getProperty("ai-lite.prompt.keys[0].key") != null) {
                 log.warn("目录模式以业务 id 作为提示词，忽略 ai-lite.prompt.keys");
             }
