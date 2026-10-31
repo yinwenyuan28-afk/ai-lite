@@ -3,13 +3,14 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
-## [未发布]
+## [0.1.13] - 2026-10-30
 
 ### 新增
 
 - **`LlmGateway.oneByStreamWithRetry(call, onDelta, policy, cancel?)`**：同步流式单次调用 + 显式重试。结构与 `oneWithRetry` 一致（独立校验、独立写调用记录、退避尊重 `Retry-After`、支持总时限与取消）。
 - **`StreamRetryMode`**：控制「已交付增量之后要不要重发」。默认 `BEFORE_FIRST_DELTA`（首个增量前才重试）；`ALWAYS` 无视交付状态整段重发。
 - **`Workflow.oneByStreamStepWithRetry(call, onDelta, policy)`**：把上面的能力包装成同步步骤，可与其它 `SyncStep` 混排执行。
+- **`AiLiteAsyncSupportChecker`**：启动期体检调用方的 Servlet 过滤器链是否支持异步。把 ai-lite 的异步结果直接作为 Controller 返回值时，只要有一个过滤器没开 `asyncSupported`，接口就会抛 `Async support must be enabled...`，且表现为「响应失败、业务却已成功」——接口返回 200 但前端拿不到数据，日志里却有业务成功记录，极易误判成业务 bug。体检遍历 `FilterRegistrationBean`，能覆盖 `@WebFilter` 与依赖 jar 带进来的过滤器（后者靠 grep 源码搜不到）。开关 `ai-lite.admin.async-check.enabled`（默认开），`verbose` 可打印全部过滤器的状态与来源。只告警、不阻断启动。详见 [异步支持排查与修复](docs/guide-异步支持排查.md)。
 
 ### 设计口径：默认在首个增量前停手，可选强制重发
 
