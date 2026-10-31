@@ -132,158 +132,31 @@ future.thenAccept(result -> System.out.println(result.getContent()));
 ```
 
 > **提示：把异步结果直接返回给 Spring MVC 时，必须确认整条过滤器链都支持 async。**
-> 详见下面的[排查与修复步骤](#排查异步支持问题)。
+> 详见 [异步支持排查与修复](docs/guide-异步支持排查.md)，starter 提供启动期自动体检。
 
-### 4.1 排查异步支持问题
+### 4.1 异步返回值与 Servlet 异步
 
-ai-lite 自身的流式走回调（`AgentStreamListener`），不依赖 Servlet 异步。但如果你把 `CompletableFuture` / `SseEmitter` 直接作为 Controller 返回值，就会走 Servlet 异步机制，此时有一个容易被忽略的约束。
+ai-lite 自身的流式走回调（`AgentStreamListener`），**不依赖 Servlet 异步**。只有当你把 `CompletableFuture` / `SseEmitter` 直接作为 Controller 返回值时，才会走 Servlet 异步机制，此时必须满足一个约束：
 
-#### 症状
+> Servlet 规范要求 **servlet 和参与异步处理的每一个过滤器** 都支持异步。这是全链路的与运算，任何一环不支持，整个异步机制就不可用。
 
-这个错误的欺骗性很强，认准三个特征：
+违反时会抛 `Async support must be enabled on a servlet and for all filters involved in async request processing`，而且是「**响应失败、业务却已成功**」的迷惑现象——接口返回 200 但前端没数据，日志里却有成功的记录。
 
-- 接口报错，或**返回 200 但前端拿不到数据**
-- 后台日志里能看到**业务已经成功执行完**（结果、耗时都有）
-- 日志里可能同时出现 `Async support must be enabled on a servlet and for all filters involved in async request processing`
+#### 内置体检
 
-「业务成功」和「响应失败」同时为真，因为 `startAsync()` 在过滤器上被拒绝时，响应当场判定失败，但后台任务仍在继续跑，跑完的结果无处回填。
+引入 `ai-lite-admin-api` 后启动时自动检查调用方的过滤器链：
 
-#### 原因
-
-Servlet 规范要求：**servlet 和参与异步处理的每一个 filter 都必须支持异步**。这是全链路的与运算，任何一环不支持就整体失败。
-
-#### 排查
-
-不要靠读代码猜，写个启动期自检一次看全：
-
-```java
-@Slf4j
-@Component
-public class AsyncSupportSelfCheck {
-
-    private final ApplicationContext ctx;
-
-    public AsyncSupportSelfCheck(ApplicationContext ctx) {
-        this.ctx = ctx;
-    }
-
-    @PostConstruct
-    public void check() {
-        for (FilterRegistrationBean<?> bean
-                : ctx.getBeansOfType(FilterRegistrationBean.class).values()) {
-            String name = bean.getFilter() == null
-                    ? "unknown" : bean.getFilter().getClass().getName();
-            if (!bean.isAsyncSupported()) {
-                log.error("过滤器 {} 未开启 asyncSupported，异步返回值的接口会在它这里失败", name);
-            }
-        }
-    }
-}
+```yaml
+ai-lite:
+  admin:
+    async-check:
+      enabled: true      # 默认开启
+      verbose: false     # 打开后打印每个过滤器的 async 状态与来源
 ```
 
-要点：
+只打日志、不阻断启动。排查时把 `verbose` 打开，一次就能看清整条链——包括**依赖 jar 带进来的过滤器**，而这类过滤器靠 grep 源码是搜不到的。
 
-- `@WebFilter` 注册的过滤器也会被 Spring Boot 转成 `FilterRegistrationBean`（由 `WebFilterHandler` 完成），所以这个遍历能同时覆盖两种注册方式
-- 用 `PostConstruct` 而不是运行期检查，启动一次就暴露
-- 遍历传 `FilterRegistrationBean.class` 时返回原始类型，逐个赋给带通配符的变量可避开泛型不匹配
-
-#### 修复
-
-**情况一：过滤器在你自己项目里**
-
-```java
-// @WebFilter 注册：注解的 asyncSupported 默认是 false，必须显式写
-@WebFilter(urlPatterns = "/*", asyncSupported = true)
-public class MyFilter extends OncePerRequestFilter { ... }
-```
-
-```java
-// FilterRegistrationBean 注册：Spring Boot 2.x 默认已是 true，显式写只为明确意图
-@Bean
-public FilterRegistrationBean<MyFilter> myFilter() {
-    FilterRegistrationBean<MyFilter> bean = new FilterRegistrationBean<>(new MyFilter());
-    bean.setAsyncSupported(true);
-    return bean;
-}
-```
-
-**情况二：过滤器在依赖 jar 里，改不了源码**
-
-用 `BeanPostProcessor` 在实例化之后改标志位：
-
-```java
-@Configuration
-public class AsyncFilterPatch {
-
-    private static final Set<String> TARGETS =
-            Collections.singleton("com.example.LegacyFilter");
-
-    @Bean
-    public static BeanPostProcessor forceAsyncSupported() {
-        return new BeanPostProcessor() {
-            @Override
-            public Object postProcessAfterInitialization(Object bean, String beanName) {
-                if (!(bean instanceof FilterRegistrationBean)) {
-                    return bean;
-                }
-                FilterRegistrationBean<?> reg = (FilterRegistrationBean<?>) bean;
-                if (reg.getFilter() != null
-                        && TARGETS.contains(reg.getFilter().getClass().getName())) {
-                    reg.setAsyncSupported(true);
-                }
-                return bean;
-            }
-        };
-    }
-}
-```
-
-#### 为什么必须是 BeanPostProcessor，不能定义同名 Bean
-
-这是这个修复的关键。把 `@WebFilter` 变成容器里真实过滤器的完整链路：
-
-```
-① BeanFactoryPostProcessor（ServletComponentRegisteringPostProcessor）
-   扫描 @WebFilter → 注册 FilterRegistrationBean 的 BeanDefinition
-        ↓                        ← 定义同名 Bean 会被这一步覆盖
-② Bean 实例化
-        ↓
-③ BeanPostProcessor             ← 在这里改实例字段才有效
-        ↓
-④ ServletContextInitializerBeans 收集所有注册项
-        ↓
-⑤ 注册进 Servlet 容器（asyncSupported 在此定型）
-```
-
-`@WebFilter` 的扫描注册发生在 `BeanFactoryPostProcessor` 阶段，晚于 `@Bean` 方法注册定义，所以同名 Bean 会被反向覆盖。`BeanPostProcessor` 在实例化之后、收集注册之前，这个位置改的值才会影响最终注册。
-
-一句话：**改定义要早（BeanFactoryPostProcessor），改实例状态要晚但必须在定型之前（BeanPostProcessor）。**
-
-另外注意 `@Bean` 方法要声明为 `static`——`BeanPostProcessor` 需要早于普通 Bean 实例化，非静态方法会导致配置类自身被提前创建，引出「BeanPostProcessor 未被所有 Bean 应用」的告警和潜在循环依赖。
-
-#### 安全提醒
-
-只对明确的类名白名单生效，不要无差别把所有过滤器的 async 都打开——有些过滤器关掉异步是有意设计。改动前先看它的 `doFilter` 是否真有异步语义。
-
-
-`toolLoopAsync` 与 `roundAsync` 的语义和阻塞版本一致。取消时创建 `LlmCancelHandle` 并传给 `oneByStreamAsync` / `toolLoopByStreamAsync`，或者直接取消返回的 future。
-
-需要重试瞬时错误时，用同一份 `RetryPolicy` 选择同步或异步入口：
-
-```java
-RetryPolicy policy = RetryPolicy.builder()
-        .maxAttempts(3)
-        .initialBackoffMs(200)
-        .maxBackoffMs(2000)
-        .totalDeadlineMs(10000L)
-        .build();
-
-CompletableFuture<LlmResult> future = gateway.oneWithRetryAsync(call, policy, cancel);
-```
-
-异步版每次尝试独立新建取消句柄，外层句柄只代理“终止整个重试”；退避任务投递到
-`ai-lite-retry-*`，HTTP 客户端回调线程只做判断，不 sleep。调度器 Bean 名为
-`aiLiteRetryScheduler`，可用同名 Bean 覆盖。
+完整说明见 [异步支持排查与修复](docs/guide-异步支持排查.md)：症状识别、为什么会「成功又失败」、三种注册方式各自的修法，以及为什么改依赖 jar 里的过滤器必须用 `BeanPostProcessor` 而不是定义同名 Bean。
 
 ### 4.2 选择 HTTP 传输
 
@@ -387,6 +260,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [上层调用 API 使用指南](docs/guide-上层调用API.md)：入门（五分钟接入）+ 全层 API 字典；日常查 API 从这里走。
 - [HTTP 客户端使用指南](docs/guide-HTTP客户端.md)：六种传输怎么选怎么切、调优、自定义 `HttpExecutor`，附单次调用 API 速查与常见问题。
 - [Workflow 异步执行器使用指南](docs/guide-Workflow异步执行器.md)：多步骤流程的 `SyncStep` / `AsyncStep`、取消、重试与 Spring MVC 集成。
+- [异步支持排查与修复](docs/guide-异步支持排查.md)：接口「200 但无数据、业务却成功」的排查与修复；含启动期体检、Servlet 异步的过滤器链约束、依赖 jar 里过滤器的补开方法。
 
 **原理说明（为什么这样运作）**
 

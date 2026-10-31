@@ -31,6 +31,16 @@
             <groupId>org.springframework</groupId>
             <artifactId>spring-webmvc</artifactId>
         </dependency>
+        <!--
+            spring-webmvc 把 servlet API 标成 provided，编译期拿不到。
+            异步支持体检要遍历 FilterRegistrationBean 并读 Filter/WebFilter，
+            因此这里显式声明为 provided：不打包、由宿主容器提供。
+        -->
+        <dependency>
+            <groupId>javax.servlet</groupId>
+            <artifactId>javax.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-autoconfigure</artifactId>
@@ -51,12 +61,7 @@
             <artifactId>ai-lite-http-jdk8</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- spring-webmvc 把 servlet 标成 provided，测试编译 MockMvc 响应时需要它。运行期由宿主的 Web 启动器提供。 -->
-        <dependency>
-            <groupId>javax.servlet</groupId>
-            <artifactId>javax.servlet-api</artifactId>
-            <scope>test</scope>
-        </dependency>
+        <!-- servlet-api 已在上方以 provided 声明：编译与测试可见，运行期由宿主容器提供。 -->
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
