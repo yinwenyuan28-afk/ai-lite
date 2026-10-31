@@ -57,7 +57,7 @@
         <junit.version>4.13.2</junit.version>
         <assertj.version>3.11.1</assertj.version>
         <!-- sqlite-jdbc 3.45 仍支持 JDK 8。 -->
-        <sqlite.version>3.45.3.0</sqlite.version>
+        <sqlite.version>3.53.4.0</sqlite.version>
         <!--
             API 兼容性门禁的对比基线：上一个已发布到 Central 的版本。
             每次正式发布后手工前移这一行（随 release 提交一起改）。
