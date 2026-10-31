@@ -3,6 +3,14 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.14] - 2026-10-30
+
+### 修复
+
+- **`AiLiteAsyncSupportChecker` 在 JDK 11+ 编译失败**：0.1.13 用了 `@PostConstruct`，它来自 `javax.annotation`，JDK 11 起已不再内置。改用 Spring 的 `InitializingBean#afterPropertiesSet`，JDK 8 到 21 均可用。0.1.13 的 `deploy` 未发布到 Central（见下），从 0.1.12 升级的用户不会遇到这个问题。
+
+> **0.1.13 的 Central 发布未上线**：该版本 bundle 上传后 CI 的 JDK 17/21 矩阵编译失败，已用 0.1.14 修正。Central 上从 0.1.12 直接升到 0.1.14 即可。
+
 ## [0.1.13] - 2026-10-30
 
 ### 新增
