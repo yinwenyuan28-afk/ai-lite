@@ -2,10 +2,10 @@ package io.github.yinwenyuan28.ailite.admin.web;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 
-import javax.annotation.PostConstruct;
 import javax.servlet.annotation.WebFilter;
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +36,7 @@ import java.util.List;
  * <p><b>只告警不阻断。</b>过滤器链往往含大量第三方组件，某些过滤器与异步无关、
  * 关掉异步是有意设计；直接让应用起不来属于误伤。把类名明确打出来，定位成本已足够低。</p>
  */
-public class AiLiteAsyncSupportChecker {
+public class AiLiteAsyncSupportChecker implements InitializingBean {
 
     private static final Logger log = LoggerFactory.getLogger(AiLiteAsyncSupportChecker.class);
 
@@ -54,10 +54,21 @@ public class AiLiteAsyncSupportChecker {
     }
 
     /**
+     * Bean 初始化完成后执行一次体检。
+     *
+     * <p>用 {@link InitializingBean} 而不是 {@code @PostConstruct}：后者来自
+     * {@code javax.annotation}，JDK 11+ 已不再内置该包，会让本模块在 JDK 17/21
+     * 下编译失败（CI 矩阵就挂在这一点上）。Spring 的接口在 JDK 8 到 21 都可用。</p>
+     */
+    @Override
+    public void afterPropertiesSet() {
+        runCheck();
+    }
+
+    /**
      * 启动期执行一次体检。
      */
-    @PostConstruct
-    public void check() {
+    public void runCheck() {
         if (!properties.isEnabled()) {
             return;
         }

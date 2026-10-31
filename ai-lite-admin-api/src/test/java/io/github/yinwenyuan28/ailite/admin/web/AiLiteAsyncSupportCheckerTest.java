@@ -74,7 +74,7 @@ public class AiLiteAsyncSupportCheckerTest {
         // 便于运维手动触发诊断
         AiLiteAsyncSupportChecker checker = new AiLiteAsyncSupportChecker(
                 beanFactory(bean), properties);
-        checker.check();
+        checker.runCheck();
 
         assertThat(checker.check(false)).containsExactly(PlainFilter.class.getName());
     }
