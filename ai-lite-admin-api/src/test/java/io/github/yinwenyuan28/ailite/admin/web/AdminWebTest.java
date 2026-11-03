@@ -355,6 +355,51 @@ public class AdminWebTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("未登记")));
     }
 
+    /**
+     * 同一业务 id 可以在多个已声明的供应商之间切换，切换后解析结果立即指向新供应商。
+     *
+     * <p>这是「多供应商 + 管理台切换」的完整闭环：配置里声明 demo 与 claude，
+     * 管理台先绑到 demo，再改绑到 claude，运行时目录读到的必须是 claude。
+     * 覆盖三件事：绑定写入生效、切换不需要重启、未声明的供应商被拒绝。</p>
+     */
+    @Test
+    public void bizCanSwitchBetweenDeclaredProviders() throws Exception {
+        // 两个供应商各建一个模型并补齐能力参数，否则无法被绑定。
+        catalog.insertModelIfAbsent("demo", "qwen");
+        catalog.saveCapabilities("demo", "qwen", true, 32768, 4096, "chat-template");
+        catalog.insertModelIfAbsent("claude", "sonnet");
+        catalog.saveCapabilities("claude", "sonnet", true, 200000, 8192, "anthropic-adaptive");
+
+        mockMvc.perform(put("/ai-lite/admin/api/biz/demo-chat")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"providerId\":\"demo\",\"modelId\":\"qwen\",\"thinkingLevel\":\"off\"}"))
+                .andExpect(status().isOk());
+        assertThat(catalog.findBinding("demo-chat").getProviderId()).isEqualTo("demo");
+        assertThat(catalog.findBinding("demo-chat").getModelId()).isEqualTo("qwen");
+
+        // 切到另一个供应商：同一个业务 id，换 provider + model + 思考档。
+        mockMvc.perform(put("/ai-lite/admin/api/biz/demo-chat")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"providerId\":\"claude\",\"modelId\":\"sonnet\","
+                                + "\"thinkingLevel\":\"high\"}"))
+                .andExpect(status().isOk());
+        assertThat(catalog.findBinding("demo-chat").getProviderId()).isEqualTo("claude");
+        assertThat(catalog.findBinding("demo-chat").getModelId()).isEqualTo("sonnet");
+        assertThat(catalog.findBinding("demo-chat").getThinkingLevel()).isEqualTo("high");
+
+        // 数据库里只有一行，切换是覆盖而不是新增。
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM AI_LITE_BIZ_BINDING WHERE BIZ_ID = 'demo-chat'", Integer.class))
+                .isEqualTo(1);
+
+        // 未在配置里声明的供应商不能被绑定。
+        mockMvc.perform(put("/ai-lite/admin/api/biz/demo-chat")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"providerId\":\"not-declared\",\"modelId\":\"sonnet\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("未知供应商")));
+    }
+
     @Test
     public void publishThenRenderReadsNewTemplate() throws Exception {
         String draft = mockMvc.perform(post("/ai-lite/admin/api/biz/demo-chat/prompt/draft")
