@@ -189,7 +189,7 @@ public final class ModelResolver {
         }
         CatalogModel row = catalog.findModel(providerId, binding.getModelId().trim());
         if (row == null || !row.isReady()) {
-            throw new LlmCallException("模型尚未补齐能力参数: " + binding.getModelId(), null, LlmCallException.Kind.CONFIG);
+            throw new LlmCallException("模型未就绪: " + binding.getModelId(), null, LlmCallException.Kind.CONFIG);
         }
         AiLiteConfig.Provider effective = applyOverlay(source, catalog.findProvider(providerId));
         return resolve(providerId, effective, toConfigModel(row), binding.getThinkingLevel());

@@ -6,6 +6,10 @@ import java.util.List;
 
 /**
  * 目录中的一个模型。能力参数在未就绪时可以为空，这时不能被业务选中。
+ *
+ * <p>「就绪」是一个人工开关（{@code READY} 列），与能力参数是否填好无关：
+ * 参数可能填了但还没验证，也可能压根没填。只有显式的启用动作会改变它，
+ * 保存能力参数不影响该状态。</p>
  */
 public final class CatalogModel {
 
@@ -23,7 +27,7 @@ public final class CatalogModel {
     /**
      * @param providerId      供应商 id
      * @param modelId         模型 id
-     * @param ready           能力参数已补齐
+     * @param ready           是否已启用（人工开关，与能力参数是否填好无关）
      * @param reasoning       是否支持推理
      * @param inputModes      入参类型，可空
      * @param contextWindow   上下文窗口，可空

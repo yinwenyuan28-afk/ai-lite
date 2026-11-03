@@ -55,6 +55,7 @@ public class JdbcRuntimeCatalogTest {
     public void syncDoesNotOverwriteReadyModel() {
         assertThat(catalog.insertModelIfAbsent("demo", "qwen")).isTrue();
         catalog.saveCapabilities("demo", "qwen", true, 32768, 4096, "chat-template");
+        catalog.setReady("demo", "qwen", true);
 
         assertThat(catalog.insertModelIfAbsent("demo", "qwen")).isFalse();
 
@@ -71,7 +72,56 @@ public class JdbcRuntimeCatalogTest {
 
         assertThatThrownBy(() -> catalog.saveBinding(new BizBinding("demo-chat", "demo", "qwen", "off")))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("模型尚未补齐能力参数");
+                .hasMessageContaining("模型未就绪");
+    }
+
+    /**
+     * 就绪与能力参数解耦：填完参数不算就绪，必须显式 setReady。
+     */
+    @Test
+    public void capabilitiesDoNotImplyReady() {
+        catalog.insertModelIfAbsent("demo", "qwen");
+        catalog.saveCapabilities("demo", "qwen", true, 32768, 4096, "chat-template");
+
+        assertThat(catalog.findModel("demo", "qwen").isReady()).isFalse();
+        assertThatThrownBy(() -> catalog.saveBinding(new BizBinding("demo-chat", "demo", "qwen", "off")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("模型未就绪");
+
+        catalog.setReady("demo", "qwen", true);
+        assertThat(catalog.findModel("demo", "qwen").isReady()).isTrue();
+        catalog.saveBinding(new BizBinding("demo-chat", "demo", "qwen", "off"));
+        assertThat(catalog.findBinding("demo-chat").getModelId()).isEqualTo("qwen");
+    }
+
+    /**
+     * 停用不回退能力参数，也不解除绑定。
+     */
+    @Test
+    public void disableKeepsCapabilitiesAndBinding() {
+        catalog.insertModelIfAbsent("demo", "qwen");
+        catalog.saveCapabilities("demo", "qwen", true, 32768, 4096, "chat-template");
+        catalog.setReady("demo", "qwen", true);
+        catalog.saveBinding(new BizBinding("demo-chat", "demo", "qwen", "off"));
+
+        catalog.setReady("demo", "qwen", false);
+
+        CatalogModel model = catalog.findModel("demo", "qwen");
+        assertThat(model.isReady()).isFalse();
+        // 能力参数保留。
+        assertThat(model.getContextWindow()).isEqualTo(Integer.valueOf(32768));
+        assertThat(model.getThinkingFormat()).isEqualTo("chat-template");
+        // 绑定保留：静默解绑会让业务在无人察觉时失去模型。
+        assertThat(catalog.findBinding("demo-chat")).isNotNull();
+    }
+
+    @Test
+    public void setReadyOnMissingModelFails() {
+        assertThatThrownBy(() -> catalog.setReady("demo", "nope", true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("模型不存在");
+        assertThatThrownBy(() -> catalog.setReady("demo", " ", true))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

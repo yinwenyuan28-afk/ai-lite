@@ -51,7 +51,7 @@ public class ModelResolverCatalogTest {
 
         assertThatThrownBy(() -> resolver.resolveBiz("demo-chat"))
                 .isInstanceOf(LlmCallException.class)
-                .hasMessageContaining("模型尚未补齐能力参数: qwen");
+                .hasMessageContaining("模型未就绪: qwen");
     }
 
     @Test

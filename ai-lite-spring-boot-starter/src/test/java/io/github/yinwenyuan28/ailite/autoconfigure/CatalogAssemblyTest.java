@@ -50,6 +50,7 @@ public class CatalogAssemblyTest {
                     io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog.class);
             catalog.insertModelIfAbsent("demo", "qwen");
             catalog.saveCapabilities("demo", "qwen", false, 32768, 4096, "reasoning-effort");
+            catalog.setReady("demo", "qwen", true);
             catalog.saveBinding(new BizBinding("demo-chat", "demo", "qwen", "off"));
 
             assertThat(resolver.resolveBiz("demo-chat").getModelId()).isEqualTo("qwen");

@@ -288,6 +288,7 @@ public class AdminWebTest {
                 "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
         catalog.insertModelIfAbsent("demo", "qwen");
         catalog.saveCapabilities("demo", "qwen", true, 32768, 4096, "chat-template");
+        catalog.setReady("demo", "qwen", true);
 
         mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models/sync"))
                 .andExpect(status().isOk())
@@ -335,24 +336,80 @@ public class AdminWebTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"providerId\":\"demo\",\"modelId\":\"qwen\",\"thinkingLevel\":\"off\"}"))
                 .andExpect(status().isBadRequest())
-                .andExpect(content().string(org.hamcrest.Matchers.containsString("尚未补齐")));
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("模型未就绪")));
 
+        // 填齐能力参数后仍不能绑定：就绪是独立开关，不由"填参数"触发。
         mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
                                 + "\"thinkingFormat\":\"chat-template\"}"))
-                .andExpect(status().isOk());
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"ready\":false")));
+        assertThat(catalog.findModel("demo", "qwen").isReady()).isFalse();
+        mockMvc.perform(put("/ai-lite/admin/api/biz/demo-chat")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"providerId\":\"demo\",\"modelId\":\"qwen\",\"thinkingLevel\":\"off\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("模型未就绪")));
+
+        // 显式标记就绪后才能绑定。
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen/ready")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"ready\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"ready\":true")));
+        assertThat(catalog.findModel("demo", "qwen").isReady()).isTrue();
+
         mockMvc.perform(put("/ai-lite/admin/api/biz/demo-chat")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"providerId\":\"demo\",\"modelId\":\"qwen\",\"thinkingLevel\":\"off\"}"))
                 .andExpect(status().isOk());
         assertThat(catalog.findBinding("demo-chat").getModelId()).isEqualTo("qwen");
 
+        // 停用后：绑定保留，但解析路径会拒绝。绑定不被静默删除。
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen/ready")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"ready\":false}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"ready\":false")));
+        assertThat(catalog.findModel("demo", "qwen").isReady()).isFalse();
+        assertThat(catalog.findBinding("demo-chat")).isNotNull();
+
         mockMvc.perform(put("/ai-lite/admin/api/biz/unknown")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"providerId\":\"demo\",\"modelId\":\"qwen\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("未登记")));
+    }
+
+    /**
+     * 就绪接口的入参校验与未知模型处理。
+     */
+    @Test
+    public void setReadyValidatesInputAndMissingModel() throws Exception {
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"modelId\":\"ghost\"}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/ghost/ready")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("请指定 ready")));
+
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/not-exist/ready")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"ready\":true}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("模型不存在")));
+
+        // 未声明的供应商同样被拒。
+        mockMvc.perform(put("/ai-lite/admin/api/providers/nobody/models/ghost/ready")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"ready\":true}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("未知供应商")));
     }
 
     /**
@@ -364,11 +421,13 @@ public class AdminWebTest {
      */
     @Test
     public void bizCanSwitchBetweenDeclaredProviders() throws Exception {
-        // 两个供应商各建一个模型并补齐能力参数，否则无法被绑定。
+        // 两个供应商各建一个模型并补齐能力参数，再单独标记为就绪。
         catalog.insertModelIfAbsent("demo", "qwen");
         catalog.saveCapabilities("demo", "qwen", true, 32768, 4096, "chat-template");
+        catalog.setReady("demo", "qwen", true);
         catalog.insertModelIfAbsent("claude", "sonnet");
         catalog.saveCapabilities("claude", "sonnet", true, 200000, 8192, "anthropic-adaptive");
+        catalog.setReady("claude", "sonnet", true);
 
         mockMvc.perform(put("/ai-lite/admin/api/biz/demo-chat")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -450,10 +509,10 @@ public class AdminWebTest {
         catalog.insertModelIfAbsent("demo", "zzz");
         catalog.insertModelIfAbsent("demo", "aaa");
         catalog.saveCapabilities("demo", "zzz", true, 1024, 128, "reasoning-effort");
+        catalog.setReady("demo", "zzz", true);
         final String[] seenRequest = new String[1];
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/chat/completions", new com.sun.net.httpserver.HttpHandler() {
-            @Override
             public void handle(com.sun.net.httpserver.HttpExchange exchange) throws java.io.IOException {
                 java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
                 byte[] chunk = new byte[1024];
@@ -538,6 +597,7 @@ public class AdminWebTest {
 
         catalog.insertModelIfAbsent("demo", "qwen");
         catalog.saveCapabilities("demo", "qwen", false, 1024, 128, "none");
+        catalog.setReady("demo", "qwen", true);
         mockMvc.perform(put("/ai-lite/admin/api/biz/demo-chat")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"providerId\":\"demo\",\"modelId\":\"qwen\",\"thinkingLevel\":\"off\"}"))

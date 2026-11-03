@@ -86,6 +86,7 @@ public class ModelSyncClientTest {
 
         String modelId = catalog.findModel("wangxin", firstModelId()).getModelId();
         catalog.saveCapabilities("wangxin", modelId, false, 32768, 4096, "none");
+        catalog.setReady("wangxin", modelId, true);
 
         ModelSyncClient.SyncStats second = ModelSyncClient.sync(
                 "openai-completions", WANGXIN_BASE, apiKey, catalog, "wangxin");

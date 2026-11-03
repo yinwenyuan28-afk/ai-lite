@@ -196,7 +196,11 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
     }
 
     /**
-     * 补齐能力参数并标为可选。
+     * 保存能力参数。**不改就绪状态**——就绪由 {@link #setReady} 单独控制。
+     *
+     * <p>早先这里会顺手把 {@code READY} 置 1，导致"填了参数就等于启用"。但能力参数
+     * 与"这个模型能不能被业务选中"是两件事：参数可能只是照抄了默认值还没验证，
+     * 或者模型供应商那边还没开通。启用应当是一个明确的、可回退的决定。</p>
      *
      * @param providerId     供应商 id
      * @param modelId        模型 id
@@ -208,12 +212,39 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
     public void saveCapabilities(String providerId, String modelId, boolean reasoning,
                                  int contextWindow, int maxTokens, String thinkingFormat) {
         int updated = jdbc.update("UPDATE " + modelTable
-                        + " SET READY = 1, REASONING = ?, INPUT_MODES = ?, CONTEXT_WINDOW = ?,"
+                        + " SET REASONING = ?, INPUT_MODES = ?, CONTEXT_WINDOW = ?,"
                         + " MAX_TOKENS = ?, THINKING_FORMAT = ?, UPDATE_TIME = ?"
                         + " WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
                 reasoning ? Integer.valueOf(1) : Integer.valueOf(0), "text",
                 Integer.valueOf(contextWindow), Integer.valueOf(maxTokens), thinkingFormat, now(),
                 providerId, modelId);
+        if (updated == 0) {
+            throw new IllegalStateException("模型不存在: " + modelId);
+        }
+        invalidate();
+    }
+
+    /**
+     * 设置模型是否就绪（即能否被业务选中）。
+     *
+     * <p>这是唯一能改变 {@code READY} 的动作。置为未就绪不会解除已有的业务绑定：
+     * 绑定继续存在，但下一次调用会在解析阶段报"模型未就绪"。
+     * 这是刻意的——静默解绑会让业务在无人察觉的情况下失去模型。</p>
+     *
+     * @param providerId 供应商 id
+     * @param modelId    模型 id
+     * @param ready      true 表示可被业务选中
+     * @throws IllegalStateException 模型不存在时抛出
+     */
+    public void setReady(String providerId, String modelId, boolean ready) {
+        if (providerId == null || providerId.trim().isEmpty()
+                || modelId == null || modelId.trim().isEmpty()) {
+            throw new IllegalArgumentException("供应商 id 与模型 id 不能为空");
+        }
+        int updated = jdbc.update("UPDATE " + modelTable
+                        + " SET READY = ?, UPDATE_TIME = ? WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
+                ready ? Integer.valueOf(1) : Integer.valueOf(0), now(),
+                providerId.trim(), modelId.trim());
         if (updated == 0) {
             throw new IllegalStateException("模型不存在: " + modelId);
         }
@@ -228,7 +259,7 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
     public void saveBinding(BizBinding binding) {
         CatalogModel model = findModel(binding.getProviderId(), binding.getModelId());
         if (model == null || !model.isReady()) {
-            throw new IllegalStateException("模型尚未补齐能力参数: " + binding.getModelId());
+            throw new IllegalStateException("模型未就绪，不能绑定业务: " + binding.getModelId());
         }
         jdbc.update("DELETE FROM " + bizTable + " WHERE BIZ_ID = ?", binding.getBizId());
         jdbc.update("INSERT INTO " + bizTable

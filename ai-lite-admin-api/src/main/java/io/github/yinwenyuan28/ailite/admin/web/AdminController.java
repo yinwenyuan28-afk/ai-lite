@@ -338,7 +338,7 @@ public class AdminController {
     }
 
     /**
-     * 保存能力参数并标为可选。
+     * 保存能力参数。**不改变就绪状态**，启用与否走 {@code PUT .../ready}。
      *
      * @param name    供应商 id
      * @param modelId 模型 id
@@ -370,6 +370,29 @@ public class AdminController {
             throw new IllegalArgumentException("未知思考格式: " + format);
         }
         catalog.saveCapabilities(name, modelId, reasoning, contextWindow, maxTokens, format);
+        return ok(modelView(catalog.findModel(name, modelId), false));
+    }
+
+    /**
+     * 启用或停用模型。就绪状态只由这个接口改变，与能力参数是否填齐无关。
+     *
+     * <p>停用不会解除已有业务绑定，只是让下一次调用在解析阶段失败——
+     * 静默解绑会让业务在无人察觉时失去模型。</p>
+     *
+     * @param name    供应商 id
+     * @param modelId 模型 id
+     * @param body    {@code {"ready": true|false}}
+     * @return 更新后的模型行
+     */
+    @PutMapping("/ai-lite/admin/api/providers/{name}/models/{modelId:.+}/ready")
+    public Map<String, Object> setModelReady(@PathVariable("name") String name,
+                                             @PathVariable("modelId") String modelId,
+                                             @RequestBody(required = false) Map<String, Object> body) {
+        requireProvider(name);
+        if (body == null || !body.containsKey("ready") || body.get("ready") == null) {
+            throw new IllegalArgumentException("请指定 ready（true 或 false）");
+        }
+        catalog.setReady(name, modelId, bool(body.get("ready")));
         return ok(modelView(catalog.findModel(name, modelId), false));
     }
 
