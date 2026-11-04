@@ -30,6 +30,32 @@ mvn spring-boot:run
 
 业务 id 是 `demo-chat`。在页面上把它绑定到一个已就绪的模型并发布提示词之后，可以加 `--ai-lite.demo.run=true` 发一次 `LlmCall.biz`。
 
+## 管理页
+
+三个页签：供应商与模型、业务与提示词、调用日志。页面只用自己渲染的控件（下拉、开关、勾选、弹窗都是自定义的），
+不出现浏览器原生 `select` / `checkbox` / `alert`。
+
+- **供应商与模型**：供应商默认收起，点标题展开；可以改协议、地址、密钥和超时，测连通，同步远端模型。协议下拉旁边会直接显示「实际请求地址」，换协议时能看清 `base-url` 后面接了什么。模型表每行有
+  就绪开关——它是唯一的启用入口，点了立刻写库；还有「编辑 / 测试 / 删除」。
+- **业务与提示词**：每个业务一张折叠卡片，默认收起。展开后可绑定已就绪模型、编辑系统/用户模板、预览、保存草稿、发布、回滚，并查看版本记录与审计。
+- **调用日志**：设置输入输出记录档位，按业务/供应商/模型/结果筛选与分页；每条可看详情。
+
+「就绪」与「能力参数」是两件事：填完参数不会自动启用，要单独打开就绪开关。输入类型里勾了「图片」，
+这个模型才允许接收图片消息。
+
+### 改管理页样式
+
+`admin.css` 是 Tailwind 的编译产物，已提交并打进 jar，运行时不依赖 Node。改样式要改源文件后重新构建：
+
+```bash
+cd ai-lite-admin-ui/frontend
+npm install          # 首次
+npm run build        # 生成 ../src/main/resources/ai-lite-admin/admin.css
+```
+
+源文件是 `ai-lite-admin-ui/frontend/admin.src.css`，页面结构在 `ai-lite-admin-ui/src/main/resources/ai-lite-admin/`
+下的 `index.html` 与 `admin.js`。Tailwind 按这两个文件里出现的类名生成样式，所以新增类名后必须重新构建。
+
 ## 配置字段
 
 | 字段 | 说明 |
