@@ -352,6 +352,67 @@ body {
   min-width: 0;
 }
 
+/* ============ 行编辑表与 JSON 输入 ============ */
+
+/*
+ * 「增加一行 / 删掉一行」的键值编辑器。用于请求头与思考档映射：
+ * 两者都是扁平的键值对，行编辑比让用户手写 JSON 直观得多。
+ */
+.rows-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rows-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.rows-line .input {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.rows-editor > .btn {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+/* JSON 输入区：标签与「格式化」按钮同一行。 */
+.json-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.json-head .field-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-slate-700);
+}
+
+/* 折叠的「这次会发什么」预览。 */
+.request-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--color-slate-100);
+}
+
+.request-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background-color: var(--color-slate-50);
+}
+
 .input,
 .textarea {
   width: 100%;
@@ -509,6 +570,13 @@ body {
   transform: rotate(180deg);
 }
 
+/*
+ * 浮层菜单。为了不被卡片的 overflow 裁切，它挂在 body 上（见 admin.js 的 openMenu）。
+ *
+ * z-index 只是一个基准值：弹窗是 60，所以菜单出现在弹窗里时会被遮罩盖住。
+ * 因此打开菜单时 JS 会按「当前最上层弹窗 + 1」动态抬高（raiseAboveModals）。
+ * 这里不要改成比弹窗更大的固定值——弹窗还能叠弹窗，固定值会让下一层再出问题。
+ */
 .select-menu {
   position: fixed;
   z-index: 40;

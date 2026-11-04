@@ -12,7 +12,8 @@
   "use strict";
 
   var API_ROOT = "/ai-lite/admin/api";
-  var THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  /** 思考档 id 列表。测试调用与业务绑定用它们拼下拉。 */
+  var THINKING_LEVEL_IDS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
   var INPUT_MODES = [
     { id: "text", label: "文本" },
     { id: "image", label: "图片" },
@@ -20,6 +21,56 @@
     { id: "video", label: "视频" },
     { id: "file", label: "文件" }
   ];
+
+  /**
+   * 思考档的展示项，供行编辑表当左列下拉用。
+   *
+   * <p>与 {@link THINKING_LEVEL_IDS} 分开：那个是纯 id 数组，旧的测试调用弹窗
+   * 直接拿它拼下拉；这个是 { id, label } 结构，行编辑表的 select 需要。
+   * 曾用同一个名字定义两次，后者覆盖前者，导致旧弹窗把整个对象当成 id，
+   * 选项显示成 [object Object]。</p>
+   */
+  var THINKING_LEVEL_OPTIONS = [
+    { id: "off", label: "off（关闭）" },
+    { id: "minimal", label: "minimal" },
+    { id: "low", label: "low" },
+    { id: "medium", label: "medium" },
+    { id: "high", label: "high" },
+    { id: "xhigh", label: "xhigh" },
+    { id: "max", label: "max" }
+  ];
+
+  /**
+   * 把接口返回的 Map 转成行编辑表要的数组。null 表示「没配」，返回空数组。
+   *
+   * @param map 形如 {"low": "low"} 的对象
+   * @return [{key, value}]
+   */
+  function mapToRows(map) {
+    if (!map) {
+      return [];
+    }
+    return Object.keys(map).map(function (key) {
+      var value = map[key];
+      return { key: key, value: value == null ? "" : String(value) };
+    });
+  }
+
+  /**
+   * 把接口返回的对象转成 JSON 文本，供 JSON 输入框显示。
+   *
+   * @param value 对象或 null
+   * @return 格式化后的 JSON 文本；null 返回空串
+   */
+  function jsonText(value) {
+    if (value == null) {
+      return "";
+    }
+    if (typeof value === "object" && Object.keys(value).length === 0) {
+      return "";
+    }
+    return JSON.stringify(value, null, 2);
+  }
 
   /* ---------------- HTTP ---------------- */
 
@@ -228,6 +279,205 @@
     return row;
   }
 
+  /* ---------------- 行编辑表 ---------------- */
+
+  /**
+   * 可增删行的键值编辑器，用于请求头和思考档映射。
+   *
+   * @param options.label      左侧标签
+   * @param options.hint       说明文字
+   * @param options.initial    初始行，形如 [{key: "...", value: "..."}]
+   * @param options.keyOptions 左列的下拉选项；不传则左列是文本框
+   * @param options.valuePlaceholder 右列占位符
+   * @param options.onChange   行变化回调
+   * @return 带 getValue() 的控件
+   */
+  function editableRows(options) {
+    var opts = options || {};
+    var wrap = el("div", "field");
+    wrap.appendChild(el("span", "field-label", opts.label));
+    var hint = el("p", "field-hint", opts.hint || "");
+    var list = el("div", "rows-editor");
+    var state = (opts.initial || []).map(function (item) {
+      return { key: item.key == null ? "" : String(item.key),
+               value: item.value == null ? "" : String(item.value) };
+    });
+
+    function render() {
+      list.innerHTML = "";
+      state.forEach(function (row, index) {
+        var line = el("div", "rows-line");
+        var keyControl;
+        if (opts.keyOptions) {
+          keyControl = select(opts.keyOptions, row.key, function (next) {
+            row.key = next;
+            if (opts.onChange) {
+              opts.onChange();
+            }
+          });
+        } else {
+          keyControl = textInput(row.key, {
+            placeholder: opts.keyPlaceholder || "名称",
+            mono: true
+          });
+          keyControl.addEventListener("input", function () {
+            row.key = keyControl.value;
+            if (opts.onChange) {
+              opts.onChange();
+            }
+          });
+        }
+        var valueControl = textInput(row.value, {
+          placeholder: opts.valuePlaceholder || "值",
+          mono: true
+        });
+        valueControl.addEventListener("input", function () {
+          row.value = valueControl.value;
+          if (opts.onChange) {
+            opts.onChange();
+          }
+        });
+        line.appendChild(keyControl);
+        line.appendChild(valueControl);
+        var remove = button("", {
+          size: "sm",
+          icon: "trash",
+          title: "删除这一行",
+          onClick: function () {
+            state.splice(index, 1);
+            render();
+            if (opts.onChange) {
+              opts.onChange();
+            }
+          }
+        });
+        line.appendChild(remove);
+        list.appendChild(line);
+      });
+      var add = button("增加一行", {
+        size: "sm",
+        icon: "plus",
+        onClick: function () {
+          state.push({ key: "", value: "" });
+          render();
+          if (opts.onChange) {
+            opts.onChange();
+          }
+        }
+      });
+      list.appendChild(add);
+    }
+
+    render();
+    wrap.appendChild(list);
+    wrap.appendChild(hint);
+    wrap.hintNode = hint;
+    wrap.getValue = function () {
+      var result = {};
+      var seen = {};
+      state.forEach(function (row) {
+        var key = row.key.trim();
+        if (!key) {
+          return;
+        }
+        var lower = key.toLowerCase();
+        if (seen[lower]) {
+          return;
+        }
+        seen[lower] = true;
+        result[key] = row.value;
+      });
+      return result;
+    };
+    /** 左列是下拉时，右列留空表示「这一项不支持」；返回带 null 的映射。 */
+    wrap.getValueAllowingNull = function () {
+      var result = {};
+      state.forEach(function (row) {
+        var key = row.key.trim();
+        if (!key) {
+          return;
+        }
+        result[key] = row.value.trim() === "" ? null : row.value;
+      });
+      return result;
+    };
+    wrap.initialRows = state.length;
+    return wrap;
+  }
+
+  /* ---------------- JSON 输入 ---------------- */
+
+  /**
+   * JSON 文本框，带格式化按钮与就地错误提示。
+   *
+   * @param options.label       标签
+   * @param options.hint        说明
+   * @param options.value       初始 JSON 文本（可为空）
+   * @param options.onChange    内容变化回调
+   * @return 带 getValue()（返回解析后的对象，语法错误时返回 undefined）的控件
+   */
+  function jsonField(options) {
+    var opts = options || {};
+    var wrap = el("div", "field");
+    var head = el("div", "json-head");
+    head.appendChild(el("span", "field-label", opts.label));
+    var formatBtn = button("格式化", { size: "sm" });
+    head.appendChild(formatBtn);
+    wrap.appendChild(head);
+
+    var area = textArea(opts.value || "", {
+      mono: true,
+      rows: opts.rows || 3,
+      placeholder: opts.placeholder || "{}"
+    });
+    wrap.appendChild(area);
+
+    var hint = el("p", "field-hint", opts.hint || "");
+    wrap.appendChild(hint);
+    wrap.hintNode = hint;
+
+    var error = el("p", "field-hint error", "");
+    error.hidden = true;
+    wrap.appendChild(error);
+
+    function parse() {
+      var text = area.value.trim();
+      if (!text) {
+        error.hidden = true;
+        return {};
+      }
+      try {
+        var value = JSON.parse(text);
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new Error("必须是 JSON 对象");
+        }
+        error.hidden = true;
+        return value;
+      } catch (ex) {
+        error.textContent = "JSON 无法解析：" + ex.message;
+        error.hidden = false;
+        return undefined;
+      }
+    }
+
+    area.addEventListener("input", function () {
+      parse();
+      if (opts.onChange) {
+        opts.onChange();
+      }
+    });
+
+    formatBtn.addEventListener("click", function () {
+      var value = parse();
+      if (value !== undefined) {
+        area.value = JSON.stringify(value, null, 2);
+      }
+    });
+
+    wrap.getValue = parse;
+    return wrap;
+  }
+
   function checkboxList(options, selectedIds, onChange) {
     var wrap = el("div", "checkbox-list");
     var selected = {};
@@ -327,12 +577,37 @@
       }
     }
 
+    /**
+     * 让浮层菜单高于当前所有弹窗。
+     *
+     * <p>菜单为了不被 overflow 裁切而挂在 body 上，但 CSS 里它的 z-index 是 40，
+     * 低于弹窗的 60。放在弹窗里打开时（测试调用选的思考档、编辑模型时的思考格式），
+     * 菜单会被半透明遮罩盖住，看起来像"点不动"。弹窗还能叠弹窗（确认框叠在弹窗上），
+     * 所以不能写死一个更高的值——按当前最上层弹窗动态加一。</p>
+     */
+    function raiseAboveModals() {
+      var top = 0;
+      var backdrops = document.querySelectorAll(".modal-backdrop");
+      for (var i = 0; i < backdrops.length; i++) {
+        var z = parseInt(window.getComputedStyle(backdrops[i]).zIndex, 10);
+        if (!isNaN(z) && z > top) {
+          top = z;
+        }
+      }
+      if (top > 0) {
+        menu.style.zIndex = String(top + 1);
+      } else {
+        menu.style.zIndex = "";
+      }
+    }
+
     function openMenu() {
       if (!menu.hidden) {
         return;
       }
       document.body.appendChild(menu);
       menu.hidden = false;
+      raiseAboveModals();
       wrap.setAttribute("data-open", "true");
       trigger.setAttribute("aria-expanded", "true");
       positionMenu();
@@ -762,6 +1037,33 @@
     grid.appendChild(field("读取超时（毫秒）", read));
     section.appendChild(grid);
 
+    // 供应商级请求参数：与地址、密钥同处保存，因为它们都是「调用时带什么」。
+    var providerHeadersField = editableRows({
+      label: "供应商请求头" + (provider.providerHeadersOverridden ? "" : "（来自配置文件）"),
+      hint: "该供应商下所有模型都会带这些头。与模型级同名（忽略大小写）时，模型级覆盖这里。"
+        + "从这里保存会整份替换配置文件里的 headers，不是逐键叠加。"
+        + "Authorization 与 Content-Type 由库管理，不能在这里配。",
+      keyPlaceholder: "头名，如 X-Request-Source",
+      valuePlaceholder: "头值",
+      initial: mapToRows(provider.providerHeaders)
+    });
+    section.appendChild(providerHeadersField);
+    if (!provider.providerHeadersOverridden
+      && provider.providerHeaders && Object.keys(provider.providerHeaders).length) {
+      var fromYamlNote = el("p", "field-hint",
+        "当前值来自配置文件。保存任意一项覆盖后，这一份会成为数据库里的值。");
+      section.appendChild(fromYamlNote);
+    }
+
+    var providerExtraField = jsonField({
+      label: "供应商附加请求体" + (provider.providerExtraBodyOverridden ? "" : "（来自配置文件）"),
+      hint: "该供应商下所有模型共用的私有字段，例如 vLLM 的 chat_template_kwargs。"
+        + "保存会整份替换配置文件里的 extra-body。",
+      value: jsonText(provider.providerExtraBody),
+      placeholder: "{\"chat_template_kwargs\": {\"enable_thinking\": true}}"
+    });
+    section.appendChild(providerExtraField);
+
     get("/apis").then(function (apis) {
       apiOptions = apis.map(function (item) {
         return { id: item.id, label: item.label, path: item.path, detail: item.detail };
@@ -820,12 +1122,20 @@
     save.addEventListener("click", function () {
       save.disabled = true;
       report("正在保存…", "info");
+      var providerExtraValue = providerExtraField.getValue();
+      if (providerExtraValue === undefined) {
+        save.disabled = false;
+        report("附加请求体不是合法 JSON 对象，请修正后再保存。", "error");
+        return;
+      }
       post("/providers/" + enc(provider.name) + "/overlay", {
         api: apiSelect.getValue(),
         baseUrl: baseUrl.value,
         apiKey: apiKey.value,
         connectTimeoutMs: connect.value,
-        readTimeoutMs: read.value
+        readTimeoutMs: read.value,
+        providerHeaders: providerHeadersField.getValue(),
+        providerExtraBody: providerExtraValue
       }).then(function () {
         toast("覆盖已写入数据库。", "ok");
         loadProviders();
@@ -1094,17 +1404,133 @@
       formatOptions = formats.map(function (item) {
         return { id: item.id, label: item.label, desc: item.detail };
       });
-      formatSelect.setValue(model ? model.thinkingFormat : (formatOptions[0] || {}).id);
+      // 必须先替换选项再设值：占位选项里没有真实 id，直接 setValue 会落空。
+      formatSelect.setOptions(formatOptions,
+        model ? model.thinkingFormat : (formatOptions[0] || {}).id);
       showFormatHelp();
     }).catch(function (error) {
       formatHint.textContent = error.message;
       formatHint.classList.add("error");
     });
 
+    /* ---------------- 请求参数（高级） ---------------- */
+
+    // 思考档 → 供应商档。右列留空表示「这一档不支持」，对应 JSON 里的 null。
+    var levelRows = editableRows({
+      label: "思考档映射",
+      hint: "左列是本库的思考档，右列是发给供应商的值。右列留空表示这个模型不支持该档。"
+        + "不填任何行时，沿用配置文件与库内默认：只会把 xhigh/max 降到 high。",
+      keyOptions: THINKING_LEVEL_OPTIONS,
+      valuePlaceholder: "留空 = 不支持",
+      initial: mapToRows(model && model.thinkingLevelMap)
+    });
+    body.appendChild(levelRows);
+
+    var modelHeaders = editableRows({
+      label: "模型请求头",
+      hint: "只对这个模型生效。与供应商级同名（忽略大小写）时，这里的值覆盖供应商级。"
+        + "Authorization 与 Content-Type 由库管理，不能在这里配。",
+      keyPlaceholder: "头名，如 X-Model-Version",
+      valuePlaceholder: "头值",
+      initial: mapToRows(model && model.modelHeaders)
+    });
+    body.appendChild(modelHeaders);
+
+    var samplerParams = jsonField({
+      label: "采样参数",
+      hint: "合并进请求体的默认采样参数，例如 {\"temperature\": 0.2}。"
+        + "不填表示沿用配置文件。",
+      value: jsonText(model && model.samplerParams),
+      placeholder: "{\"temperature\": 0.7}"
+    });
+    body.appendChild(samplerParams);
+
+    var samplerByLevel = jsonField({
+      label: "分档采样参数",
+      hint: "按生效思考档再叠一层，例如 {\"high\": {\"top_p\": 0.95}}。会覆盖上面的同名键。",
+      value: jsonText(model && model.samplerParamsByLevel),
+      placeholder: "{\"high\": {\"top_p\": 0.95}}"
+    });
+    body.appendChild(samplerByLevel);
+
+    var extraBody = jsonField({
+      label: "附加请求体",
+      hint: "供应商私有字段，深合并进请求体，例如 {\"chat_template_kwargs\": {\"enable_thinking\": true}}。",
+      value: jsonText(model && model.extraBody),
+      placeholder: "{\"vendor_field\": \"value\"}"
+    });
+    body.appendChild(extraBody);
+
+    var preview = el("div", "request-preview");
+    var previewHead = el("div", "json-head");
+    var previewToggle = button("这次会发什么", { size: "sm" });
+    var previewRefresh = button("刷新", { size: "sm", icon: "refresh" });
+    previewRefresh.hidden = true;
+    previewHead.appendChild(previewToggle);
+    previewHead.appendChild(previewRefresh);
+    var previewBody = el("div", "request-preview-body");
+    previewBody.hidden = true;
+    previewToggle.addEventListener("click", function () {
+      previewBody.hidden = !previewBody.hidden;
+      previewRefresh.hidden = previewBody.hidden;
+      if (!previewBody.hidden) {
+        renderPreview();
+      }
+    });
+    previewRefresh.addEventListener("click", renderPreview);
+    preview.appendChild(previewHead);
+    preview.appendChild(previewBody);
+    body.appendChild(preview);
+
+    /**
+     * 渲染「合并后的请求头与附加字段」预览。只列键与来源，不显示具体的值。
+     */
+    function renderPreview() {
+      previewBody.innerHTML = "";
+      var merged = {};
+      (provider.providerHeaders ? Object.keys(provider.providerHeaders) : [])
+        .forEach(function (key) { merged[key.toLowerCase()] = { name: key, from: "供应商级" }; });
+      var modelHeads = modelHeaders.getValue();
+      Object.keys(modelHeads).forEach(function (key) {
+        merged[key.toLowerCase()] = { name: key, from: "模型级" };
+      });
+      var list = el("div", "kv-grid");
+      if (!Object.keys(merged).length) {
+        list.appendChild(el("span", "kv-key", "请求头"));
+        list.appendChild(el("span", "kv-value", "只有 Content-Type 与 Authorization"));
+      } else {
+        Object.keys(merged).forEach(function (key) {
+          list.appendChild(el("span", "kv-key", merged[key].name));
+          list.appendChild(el("span", "kv-value", "来自" + merged[key].from));
+        });
+      }
+      previewBody.appendChild(el("p", "field-hint", "请求头（键名与来源）："));
+      previewBody.appendChild(list);
+
+      var sampler = samplerParams.getValue();
+      if (sampler === undefined) {
+        previewBody.appendChild(el("p", "field-hint error", "采样参数 JSON 有语法错误，请先修正。"));
+        return;
+      }
+      var extra = extraBody.getValue();
+      if (extra === undefined) {
+        previewBody.appendChild(el("p", "field-hint error", "附加请求体 JSON 有语法错误，请先修正。"));
+        return;
+      }
+      var keys = Object.keys(sampler).concat(Object.keys(extra));
+      previewBody.appendChild(el("p", "field-hint",
+        keys.length ? "请求体附加字段：" + keys.join("、") : "请求体附加字段：无"));
+    }
+
+    modelHeaders.addEventListener("change", function () {
+      if (!previewBody.hidden) {
+        renderPreview();
+      }
+    });
+
     var modal = openModal({
       title: isEdit ? "修改模型" : "新增模型",
-      desc: isEdit ? model.modelId : "先创建一条未就绪记录，再补齐能力参数。",
-      body: body,
+      desc: isEdit ? model.modelId : "先创建一条未就绪记录，再补齐能力参数。",      body: body,
       onMount: function (dialog) {
         dialog.addAction(button("取消", { onClick: dialog.close }));
         dialog.addAction(button(isEdit ? "保存" : "创建", {
@@ -1139,13 +1565,34 @@
         report("请选择思考格式。", "error");
         return;
       }
+      var samplerValue = samplerParams.getValue();
+      if (samplerValue === undefined) {
+        report("采样参数不是合法 JSON 对象，请修正后再保存。", "error");
+        return;
+      }
+      var byLevelValue = samplerByLevel.getValue();
+      if (byLevelValue === undefined) {
+        report("分档采样参数不是合法 JSON 对象，请修正后再保存。", "error");
+        return;
+      }
+      var extraValue = extraBody.getValue();
+      if (extraValue === undefined) {
+        report("附加请求体不是合法 JSON 对象，请修正后再保存。", "error");
+        return;
+      }
       var payload = {
         reasoning: reasoningSwitch.getValue(),
         inputModes: modes.getValue(),
         contextWindow: contextValue,
         maxTokens: maxValue,
         thinkingFormat: format,
-        displayName: displayName.value
+        displayName: displayName.value,
+        // 思考档映射右列留空 = 不支持（JSON 里的 null），所以用允许 null 的取法。
+        thinkingLevelMap: levelRows.getValueAllowingNull(),
+        samplerParams: samplerValue,
+        samplerParamsByLevel: byLevelValue,
+        modelHeaders: modelHeaders.getValue(),
+        extraBody: extraValue
       };
       saveBtn.disabled = true;
       report("正在保存…", "info");
@@ -1240,7 +1687,7 @@
 
   function openTryDialog(provider, model, tableStatus, dumpHost) {
     var body = el("div", "section");
-    var levelSelect = select(THINKING_LEVELS.map(function (level) {
+    var levelSelect = select(THINKING_LEVEL_IDS.map(function (level) {
       return { id: level, label: level };
     }), "off", function () {});
     body.appendChild(field("思考档", levelSelect,
@@ -1416,7 +1863,7 @@
     var currentKey = biz.binding
       ? biz.binding.providerId + "\n" + biz.binding.modelId : null;
     var modelSelect = select(options, currentKey, function () {});
-    var levelSelect = select(THINKING_LEVELS.map(function (level) {
+    var levelSelect = select(THINKING_LEVEL_IDS.map(function (level) {
       return { id: level, label: level };
     }), biz.binding ? biz.binding.thinkingLevel : "off", function () {});
 
