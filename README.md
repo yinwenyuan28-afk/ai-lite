@@ -276,6 +276,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [术语表](docs/ref-术语表.md)：全部术语的人话解释，按层分组。
 - [配置参考](docs/ref-配置.md)：所有 `ai-lite.*` 配置键，含出口保护 `guard` 的完整字段。
 - [数据表与缓存](docs/desc-数据表与缓存.md)：10 张表的用途、能否改名、怎么配；哪些常读数据有缓存、多久、怎么失效。
+- [配置和运行时配置](docs/desc-配置和运行时配置.md)：哪些配置在 YAML、哪些在数据库、落到哪张表；改完本机怎么刷新、多节点怎么跟上、业务调用到底用没用上。
 - [发布参考](docs/ref-发布.md)：版本策略、发布清单、CI 矩阵、Maven Central 配置。
 
 **内部留档（docs/plan/ 设计审查与调研 + docs/testing/ 测试设计）**
@@ -290,6 +291,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [夯实限流熔断](docs/plan/夯实限流熔断-plan.md)：出口保护（并发限流、熔断、Retry-After、多 key 轮换）的设计与审查记录。
 - [夯实 Agent 运行时能力](docs/plan/夯实Agent运行时能力-plan.md)：typed entries、上下文预算与自动压缩、工具结果截断、同步流式、用量记账、会话列举的实现记录——含三处"静默丢压缩条目"缺陷的定位、T3-G 往返门禁，以及实施中另外发现的四个缺陷。
 - [夯实对外契约冻结](docs/plan/夯实对外契约冻结-plan.md)：API 稳定性审计、`.internal` 包边界、SPI 演化承诺与 japicmp 门禁。
+- [夯实模型级请求参数管理](docs/plan/夯实模型级请求参数管理-plan.md)：给 `AI_LITE_MODEL` 补五个 JSON 列，让目录模式下的请求体与 YAML 路径一致（思考档映射、采样参数、请求头、附加请求体）。
 - [测试索引](docs/testing/测试索引.md)：按主题索引全部对抗性测试设计；另有[异步重试测试用例](docs/testing/异步重试测试用例.md)（oneWithRetryAsync 的 55 条验收清单）与[网关](docs/testing/网关异步对抗性测试设计.md)、[AgentLoop](docs/testing/AgentLoop异步对抗性测试设计.md)、[SessionLoop](docs/testing/SessionLoop异步对抗性测试设计.md)三篇对抗性测试设计。
 
 **基准**

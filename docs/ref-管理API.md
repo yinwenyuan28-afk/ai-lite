@@ -11,7 +11,7 @@
 | 方法与路径 | 作用 |
 | --- | --- |
 | GET `/ai-lite/admin/api/providers` | 配置文件里的供应商、生效地址、脱敏密钥、本地模型；`overlay=true` 表示正在用库内覆盖；`apiOverridden=true` 表示协议被覆盖，`configApi` 是配置文件原值 |
-| POST `/ai-lite/admin/api/providers/{name}/overlay` | 写覆盖。空字段表示不改。`api` 传空串表示撤销协议覆盖、回到配置文件；传未知协议返回 400。不改配置文件 |
+| POST `/ai-lite/admin/api/providers/{name}/overlay` | 写覆盖。空字段表示不改。`api` 传空串表示撤销协议覆盖、回到配置文件；传未知协议返回 400。可选 `providerHeaders`（对象）与 `providerExtraBody`（对象）：键不出现表示不改，传 `{}` 表示明确清空，传非空对象则整份替换配置文件里的对应项。`providerHeaders` 里不能出现 `Authorization` / `Content-Type`（忽略大小写），出现返回 400。不改配置文件 |
 | POST `/ai-lite/admin/api/providers/{name}/overlay/clear` | 删掉该供应商的覆盖 |
 | GET `/ai-lite/admin/api/apis` | 可选的供应商协议，以及各自在 `base-url` 之后追加的路径（`/chat/completions`、`/responses`、`/v1/messages`） |
 | POST `/ai-lite/admin/api/providers/{name}/connectivity` | 探测 `GET {baseUrl}/models`，不写库 |
@@ -19,9 +19,10 @@
 | POST `/ai-lite/admin/api/providers/{name}/models/adopt` | 正文 `{ "modelIds": ["..."] }`。只把勾选的新 id 插入为未就绪 |
 | POST `/ai-lite/admin/api/providers/{name}/models` | 手工添加一个未就绪模型，正文 `{ "modelId": "..." }` |
 | PUT `/ai-lite/admin/api/providers/{name}/models/{modelId}` | 保存能力参数，**不改就绪状态**。需要推理开关、上下文窗口、输出上限、思考格式；可选 `inputModes`（`["text","image"]` 这类数组，决定模型能否接收图片）和 `displayName`（只用于展示，空串表示回落到模型 id）。不传 `inputModes` 按 `["text"]` 写，不传 `displayName` 保留原值 |
+| （同上）请求参数 | 另有五个可选键，都是「键不出现 = 不改，传 `{}` = 明确清空，传非空 = 写入」：`thinkingLevelMap`（`{"low":"low","off":null}`，值为 `null` 表示该档不支持）、`samplerParams`、`samplerParamsByLevel`（`{"high":{"top_p":0.95}}`）、`modelHeaders`、`extraBody`。校验：根必须是对象；`thinkingLevelMap` / `samplerParamsByLevel` 的键必须是 `off`/`low`/`medium`/`high`/`xhigh`/`max`；`modelHeaders` 键值必须是字符串且不能是 `Authorization` / `Content-Type`；单列序列化后不超过 16384 字符。任何一项不合法返回 400 并指明字段 |
 | PUT `/ai-lite/admin/api/providers/{name}/models/{modelId}/ready` | 启用或停用模型，正文 `{ "ready": true \| false }`。就绪只由这个接口改变 |
 | DELETE `/ai-lite/admin/api/providers/{name}/models/{modelId}` | 用户删除。仍被业务绑定时拒绝 |
-| POST `/ai-lite/admin/api/providers/{name}/models/{modelId}/try` | 实测调用。正文可含 `thinkingLevel`（默认 `off`）。`max_tokens` 用模型配置的输出上限；响应含脱敏后的完整 HTTP 请求与原始响应。Anthropic / Responses 协议尚未接入 |
+| POST `/ai-lite/admin/api/providers/{name}/models/{modelId}/try` | 实测调用。正文可含 `thinkingLevel`（默认 `off`）。**走真实的协议适配器**，与业务调用同一套请求构造，三种协议都支持；`request` 字段里的请求头是真实生效值（含两级合并结果），密钥脱敏为 `***`。不写调用日志、不过出口保护。取不到解析器或适配器时退回手写的 OpenAI 兼容实现 |
 | GET `/ai-lite/admin/api/thinking-formats` | 思考格式的 id、中文名和说明 |
 | GET `/ai-lite/admin/api/biz` | 白名单业务、当前绑定、是否已有生效提示词 |
 | PUT `/ai-lite/admin/api/biz/{bizId}` | 保存绑定。模型必须已就绪（`ready=true`） |
@@ -40,7 +41,13 @@
 
 `none` 不记模型输入输出。`failure` 只记失败调用。`all` 每次都记。正文落在正文表（默认 `AI_LITE_LLM_CALL_BODY`；把 `ai-lite.store.jdbc.table-name` 改成 `MY_CALL` 后自动跟随为 `MY_CALL_BODY`，也可用 `ai-lite.store.jdbc.body-table-name` 显式指定），不含密钥和图片原文。档位存在 `AI_LITE_ADMIN_SETTING`。
 
-**连通探测与测试调用走配置启用的 HTTP 传输**（`ai-lite.http.transport`），与真实模型调用同一连接池、同一 TLS 配置、同一超时。因此管理台说"通"就意味着业务侧也能通——这是刻意为之：早期版本用独立的 `HttpURLConnection`，曾出现"管理台调用成功、业务调用全挂"的错位（网关走 Jetty 但没配 TLS 时尤其典型）。只有单独引入 `ai-lite-admin-api`、容器中没有 `HttpExecutor` 时才会退化为 `HttpURLConnection`，并在启动日志里打 WARN。连通探测固定 `GET {baseUrl}/models`；测试调用固定 `POST {baseUrl}/chat/completions`。
+**连通探测与测试调用走配置启用的 HTTP 传输**（`ai-lite.http.transport`），与真实模型调用同一连接池、同一 TLS 配置、同一超时。这是刻意为之：早期版本用独立的 `HttpURLConnection`，曾出现"管理台调用成功、业务调用全挂"的错位（网关走 Jetty 但没配 TLS 时尤其典型）。只有单独引入 `ai-lite-admin-api`、容器中没有 `HttpExecutor` 时才会退化为 `HttpURLConnection`，并在启动日志里打 WARN。连通探测固定 `GET {baseUrl}/models`。
+
+**测试调用还走真实的协议适配器**（0.1.15 起），因此请求体由 `LlmTransport` 拼装，与业务调用完全同一套代码——三种协议都支持。请求回显里的请求头是真实生效值，能看到供应商级与模型级合并后的自定义头，密钥替换为 `***`。
+
+它与业务调用仍有四处不同，都是刻意的：**不写调用日志**（不污染业务记录）、**不过出口保护**（不占业务并发许可、不会因熔断被拒）、**没有重试**、**不检查业务绑定与就绪状态**（目的就是在绑定之前验证模型能不能用）。
+
+所以正确的读法是：测试通过说明**请求内容与地址是对的**；业务调用还要额外满足就绪、绑定、出口保护等条件。
 
 思考格式不是自由文本，只能用 `GET /thinking-formats` 返回的 id。它决定请求体里怎么写思考开关。测试调用的 `thinkingLevel` 决定是否打开思考以及 `reasoning_effort` 等字段的值（`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`）。
 

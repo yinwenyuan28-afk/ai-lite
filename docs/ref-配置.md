@@ -109,6 +109,17 @@ models:
 | `sampler-params-by-thinking-level` | 按生效档覆盖 |
 | `headers` / `extra-body` | 覆盖供应商级配置 |
 
+> **`headers` 里不能写 `Authorization` 与 `Content-Type`**（0.1.15 起，忽略大小写）。
+> 这两个头由库管理：密钥走 `api-key`，编码固定为 UTF-8 JSON。
+> 允许覆盖会造成两种难查的故障——写 `authorization`（小写）会静默顶掉真实密钥
+> （`containsHeader` 大小写无关，认出已有 Authorization 就不再补 `Bearer`），
+> 写 `content-type` 会发出两个同名头。现在改为启动期直接报错。
+>
+> **两级同名头按「忽略大小写」合并**（0.1.15 起）。供应商级在前、模型级在后，
+> 同名时模型级覆盖；不会因为大小写不同而变成两个头。
+> 两级 `extra-body` 之间仍是按键覆盖（嵌套对象整块替换），与单次调用的 `extraBody`
+> 之间才是递归深合并——这个差异是既有行为，0.1.15 未改动。
+
 ### 2.3 预置组合
 
 ```yaml
@@ -190,6 +201,11 @@ CREATE TABLE MY_ADMIN_SETTING (
 - 同步模型只返回远端 id。用户勾选后才插入新 id，已有行不改，消失的 id 不删。删除只能由用户发起。协议是 `anthropic-messages` 时不能列模型，要手工添加。
 - 调用记录默认不保存模型输入输出。`none` / `failure` / `all` 三档可在管理接口里改，正文写入正文表（默认 `AI_LITE_LLM_CALL_BODY`，跟随 `ai-lite.store.jdbc.table-name` 改名）。
 - 模型要补齐推理开关、上下文窗口、输出上限和思考格式之后才能被业务选中。思考格式的可选值和说明见 `GET /ai-lite/admin/api/thinking-formats`。
+- **模型级请求参数也进数据库**（0.1.15 起）：`AI_LITE_MODEL` 的 `THINKING_LEVEL_MAP`、`SAMPLER_PARAMS`、`SAMPLER_PARAMS_BY_LEVEL`、`MODEL_HEADERS`、`EXTRA_BODY` 五列，管理页可编辑。列为 `NULL` 时从配置文件里的同名模型继承，空对象 `{}` 表示明确清空。这与 2.2 节里模型的 `thinking-level-map`、`sampler-params` 等字段是同一批配置，只是存放位置不同。
+- **供应商级请求参数也进数据库**（0.1.15 起）：`AI_LITE_PROVIDER_OVERLAY` 的 `PROVIDER_HEADERS`、`PROVIDER_EXTRA_BODY` 两列。同样 `NULL` 沿用配置文件、`{}` 明确清空。覆盖是整份替换，不逐键叠加。
+
+> **两条来源的优先级**：同一层级内，数据库有值就用数据库，`NULL` 才回落配置文件；两级之间，供应商级在前、模型级覆盖同名键。
+> 不做「数据库与配置文件深合并」——那样排查某个值是谁写的时候要同时看两处。
 
 **业务侧注入目录 Bean**：装配出来的类型是 `RuntimeCatalog`（实现类是 `JdbcRuntimeCatalog`）。构造器、字段、`@Autowired` 请按接口注入；需要写目录（`saveOverlay`、`insertModelIfAbsent` 等）时再转型。不要按 `JdbcRuntimeCatalog` 注入——旧版 Bean 方法返回类型是接口，Spring 会对不上并报 `NoSuchBeanDefinitionException`。自带管理端也是先注入接口再转型。
 
