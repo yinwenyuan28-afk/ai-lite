@@ -1,600 +1,1584 @@
+/*
+ * AI Lite 管理页。
+ *
+ * 约定：
+ * - 所有可写操作都是「改 → 显式点按钮 → 才写库」，切换开关（就绪）除外，
+ *   它是明确的单次动作，点了立刻写并显示结果。
+ * - 页面不使用原生 select / checkbox / confirm / alert：浏览器默认控件
+ *   在深色和不同系统上观感差异太大，统一由下面的组件渲染。
+ * - 任何服务端文本都通过 textContent 写入，不拼 HTML。
+ */
 (function () {
-  var root = "/ai-lite/admin/api";
+  "use strict";
 
-  function api(path, options) {
-    return fetch(root + path, options || {}).then(function (response) {
+  var API_ROOT = "/ai-lite/admin/api";
+  var THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  var INPUT_MODES = [
+    { id: "text", label: "文本" },
+    { id: "image", label: "图片" },
+    { id: "audio", label: "音频" },
+    { id: "video", label: "视频" },
+    { id: "file", label: "文件" }
+  ];
+
+  /* ---------------- HTTP ---------------- */
+
+  function request(path, options) {
+    return fetch(API_ROOT + path, options || {}).then(function (response) {
       return response.json().then(function (body) {
         if (!response.ok || body.ok === false) {
-          throw new Error(body.message || "请求失败");
+          throw new Error(body.message || "请求失败（HTTP " + response.status + "）");
         }
         return body.data;
+      }, function () {
+        throw new Error("响应不是合法 JSON（HTTP " + response.status + "）");
       });
     });
   }
 
-  function post(path, body) {
-    return api(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {})
-    });
+  function send(method, path, payload) {
+    var options = { method: method };
+    if (payload !== undefined) {
+      options.headers = { "Content-Type": "application/json" };
+      options.body = JSON.stringify(payload || {});
+    }
+    return request(path, options);
   }
 
-  function put(path, body) {
-    return api(path, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {})
-    });
+  function get(path) {
+    return request(path);
+  }
+
+  function post(path, payload) {
+    return send("POST", path, payload === undefined ? {} : payload);
+  }
+
+  function put(path, payload) {
+    return send("PUT", path, payload === undefined ? {} : payload);
   }
 
   function del(path) {
-    return fetch(root + path, { method: "DELETE" }).then(function (response) {
-      return response.json().then(function (body) {
-        if (!response.ok || body.ok === false) {
-          throw new Error(body.message || "请求失败");
-        }
-        return body.data;
-      });
-    });
+    return send("DELETE", path);
   }
 
-  function el(tag, text) {
+  function enc(value) {
+    return encodeURIComponent(value == null ? "" : String(value));
+  }
+
+  /* ---------------- DOM 工具 ---------------- */
+
+  function el(tag, className, text) {
     var node = document.createElement(tag);
+    if (className) {
+      node.className = className;
+    }
     if (text != null) {
       node.textContent = text;
     }
     return node;
   }
 
-  function field(label, input) {
-    var wrap = el("label");
-    wrap.appendChild(el("span", label));
-    wrap.appendChild(input);
+  function clear(node) {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+    return node;
+  }
+
+  var ICONS = {
+    check: '<path d="m5 12 4.5 4.5L19 7"/>',
+    chevron: '<path d="m6 9 6 6 6-6"/>',
+    close: '<path d="M18 6 6 18M6 6l12 12"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>',
+    checkCircle: '<circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/>',
+    alert: '<circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 16h.01"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>',
+    edit: '<path d="M4 20h4l10-10-4-4L4 16v4Z"/><path d="m14 6 4 4"/>',
+    play: '<path d="M7 5v14l12-7Z"/>'
+  };
+
+  function icon(name, className) {
+    var wrap = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    wrap.setAttribute("viewBox", "0 0 24 24");
+    wrap.setAttribute("fill", "none");
+    wrap.setAttribute("stroke", "currentColor");
+    wrap.setAttribute("stroke-width", "1.8");
+    wrap.setAttribute("stroke-linecap", "round");
+    wrap.setAttribute("stroke-linejoin", "round");
+    wrap.setAttribute("aria-hidden", "true");
+    if (className) {
+      wrap.setAttribute("class", className);
+    }
+    wrap.innerHTML = ICONS[name] || "";
     return wrap;
   }
 
-  function status(parent) {
-    var node = el("p", "");
-    node.className = "status";
-    parent.appendChild(node);
-    return function (text, ok) {
-      node.textContent = text || "";
-      node.className = "status" + (text ? (ok ? " ok" : " error") : "");
+  function button(text, options) {
+    var opts = options || {};
+    var node = el("button", "btn" + (opts.tone ? " btn-" + opts.tone : "")
+      + (opts.size === "sm" ? " btn-sm" : ""));
+    node.type = "button";
+    if (opts.icon) {
+      node.appendChild(icon(opts.icon));
+    }
+    if (text) {
+      node.appendChild(el("span", null, text));
+    }
+    if (opts.title) {
+      node.title = opts.title;
+      node.setAttribute("aria-label", opts.title);
+    }
+    if (opts.onClick) {
+      node.addEventListener("click", opts.onClick);
+    }
+    node.setDisabled = function (value) {
+      node.disabled = !!value;
     };
+    return node;
   }
 
-  document.querySelectorAll("nav button").forEach(function (button) {
-    button.addEventListener("click", function () {
-      document.querySelectorAll("nav button").forEach(function (item) {
-        item.setAttribute("aria-selected", item === button ? "true" : "false");
+  function field(label, control, hint) {
+    var wrap = el("div", "field");
+    if (label) {
+      wrap.appendChild(el("span", "field-label", label));
+    }
+    var controlWrap = el("div", "field-control");
+    controlWrap.appendChild(control);
+    wrap.appendChild(controlWrap);
+    if (hint) {
+      var hintNode = el("p", "field-hint", hint);
+      wrap.appendChild(hintNode);
+      wrap.hintNode = hintNode;
+    }
+    return wrap;
+  }
+
+  function textInput(value, options) {
+    var opts = options || {};
+    var node = el("input", "input" + (opts.mono ? " mono" : ""));
+    node.type = opts.type || "text";
+    node.value = value == null ? "" : String(value);
+    if (opts.placeholder) {
+      node.placeholder = opts.placeholder;
+    }
+    if (opts.readOnly) {
+      node.readOnly = true;
+    }
+    if (opts.min != null) {
+      node.min = String(opts.min);
+    }
+    return node;
+  }
+
+  function textArea(value, options) {
+    var opts = options || {};
+    var node = el("textarea", "textarea" + (opts.mono ? " mono" : "") + (opts.tall ? " tall" : ""));
+    node.value = value == null ? "" : String(value);
+    if (opts.placeholder) {
+      node.placeholder = opts.placeholder;
+    }
+    if (opts.rows) {
+      node.rows = opts.rows;
+    }
+    return node;
+  }
+
+  function switchControl(checked, options) {
+    var opts = options || {};
+    var node = el("button", "switch");
+    node.type = "button";
+    node.setAttribute("role", "switch");
+    node.setAttribute("aria-checked", checked ? "true" : "false");
+    node.appendChild(el("span", "switch-thumb"));
+    var state = !!checked;
+    if (opts.title) {
+      node.title = opts.title;
+      node.setAttribute("aria-label", opts.title);
+    }
+    node.addEventListener("click", function () {
+      state = !state;
+      node.setAttribute("aria-checked", state ? "true" : "false");
+      if (opts.onChange) {
+        opts.onChange(state);
+      }
+    });
+    node.getValue = function () { return state; };
+    node.setValue = function (value) {
+      state = !!value;
+      node.setAttribute("aria-checked", state ? "true" : "false");
+    };
+    node.setBusy = function (busy) {
+      node.classList.toggle("busy", !!busy);
+      node.disabled = !!busy;
+    };
+    return node;
+  }
+
+  function fieldRow(title, desc, control) {
+    var row = el("div", "field-row");
+    var text = el("div", "field-row-text");
+    text.appendChild(el("span", "field-row-title", title));
+    if (desc) {
+      text.appendChild(el("span", "field-row-desc", desc));
+    }
+    row.appendChild(text);
+    row.appendChild(control);
+    return row;
+  }
+
+  function checkboxList(options, selectedIds, onChange) {
+    var wrap = el("div", "checkbox-list");
+    var selected = {};
+    (selectedIds || []).forEach(function (id) { selected[id] = true; });
+    options.forEach(function (item) {
+      var node = el("button", "checkbox");
+      node.type = "button";
+      node.setAttribute("role", "checkbox");
+      node.setAttribute("aria-checked", selected[item.id] ? "true" : "false");
+      var box = el("span", "checkbox-box");
+      box.appendChild(icon("check"));
+      node.appendChild(box);
+      node.appendChild(el("span", null, item.label));
+      node.title = item.id;
+      node.addEventListener("click", function () {
+        var next = !selected[item.id];
+        selected[item.id] = next;
+        node.setAttribute("aria-checked", next ? "true" : "false");
+        if (onChange) {
+          onChange(node.getValue());
+        }
       });
-      document.querySelectorAll(".panel").forEach(function (panel) {
-        panel.classList.toggle("active", panel.id === button.getAttribute("data-tab"));
+      wrap.appendChild(node);
+    });
+    wrap.getValue = function () {
+      return options.filter(function (item) { return selected[item.id]; })
+        .map(function (item) { return item.id; });
+    };
+    return wrap;
+  }
+
+  /* ---------------- 自定义下拉 ---------------- */
+
+  /**
+   * 自定义下拉。菜单用 fixed 定位挂在页面根部，
+   * 避免被弹窗的滚动容器裁掉。
+   */
+  function select(options, value, onChange) {
+    var items = options || [];
+    var current = null;
+    var wrap = el("div", "select");
+    var trigger = el("button", "select-trigger");
+    trigger.type = "button";
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    var valueNode = el("span", "select-value");
+    trigger.appendChild(valueNode);
+    trigger.appendChild(icon("chevron", "select-caret"));
+    wrap.appendChild(trigger);
+
+    var menu = el("div", "select-menu");
+    menu.setAttribute("role", "listbox");
+    menu.hidden = true;
+    var activeIndex = -1;
+
+    function labelOf(item) {
+      return item ? item.label : "";
+    }
+
+    function renderValue() {
+      valueNode.textContent = current ? labelOf(current) : "";
+      valueNode.classList.toggle("placeholder", !current);
+    }
+
+    function closeMenu() {
+      menu.hidden = true;
+      wrap.setAttribute("data-open", "false");
+      trigger.setAttribute("aria-expanded", "false");
+      if (menu.parentNode) {
+        menu.parentNode.removeChild(menu);
+      }
+      document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("keydown", onKeydown, true);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    }
+
+    function positionMenu() {
+      var rect = trigger.getBoundingClientRect();
+      var width = Math.max(rect.width, 160);
+      var left = Math.min(rect.left, window.innerWidth - width - 8);
+      menu.style.width = width + "px";
+      menu.style.left = Math.max(8, left) + "px";
+      menu.style.top = "auto";
+      menu.style.bottom = "auto";
+      var spaceBelow = window.innerHeight - rect.bottom;
+      if (spaceBelow < 240 && rect.top > spaceBelow) {
+        menu.style.bottom = (window.innerHeight - rect.top + 5) + "px";
+      } else {
+        menu.style.top = (rect.bottom + 5) + "px";
+      }
+    }
+
+    function onOutside(event) {
+      if (!wrap.contains(event.target) && !menu.contains(event.target)) {
+        closeMenu();
+      }
+    }
+
+    function openMenu() {
+      if (!menu.hidden) {
+        return;
+      }
+      document.body.appendChild(menu);
+      menu.hidden = false;
+      wrap.setAttribute("data-open", "true");
+      trigger.setAttribute("aria-expanded", "true");
+      positionMenu();
+      activeIndex = items.indexOf(current);
+      markActive();
+      document.addEventListener("mousedown", onOutside, true);
+      document.addEventListener("keydown", onKeydown, true);
+      window.addEventListener("resize", closeMenu);
+      window.addEventListener("scroll", closeMenu, true);
+    }
+
+    function markActive() {
+      var buttons = menu.children;
+      for (var i = 0; i < buttons.length; i++) {
+        buttons[i].setAttribute("data-active", i === activeIndex ? "true" : "false");
+      }
+    }
+
+    function onKeydown(event) {
+      if (event.key === "Escape") {
+        closeMenu();
+        trigger.focus();
+        return;
+      }
+      if (menu.hidden) {
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        activeIndex += event.key === "ArrowDown" ? 1 : -1;
+        activeIndex = Math.max(0, Math.min(items.length - 1, activeIndex));
+        markActive();
+      }
+      if (event.key === "Enter" && activeIndex >= 0) {
+        event.preventDefault();
+        choose(items[activeIndex]);
+      }
+    }
+
+    function choose(item) {
+      current = item;
+      renderValue();
+      closeMenu();
+      if (onChange) {
+        onChange(item ? item.id : null, item);
+      }
+      wrap.changeListeners.forEach(function (listener) {
+        listener(item ? item.id : null, item);
       });
+    }
+
+    items.forEach(function (item) {
+      var option = el("button", "select-option");
+      option.type = "button";
+      option.setAttribute("role", "option");
+      var textWrap = el("span");
+      textWrap.appendChild(el("span", null, item.label));
+      if (item.desc) {
+        textWrap.appendChild(el("span", "select-option-desc", item.desc));
+      }
+      option.appendChild(textWrap);
+      if (item.id === value) {
+        option.setAttribute("aria-selected", "true");
+      }
+      option.addEventListener("click", function () {
+        choose(item);
+        trigger.focus();
+      });
+      menu.appendChild(option);
+    });
+
+    current = items.filter(function (item) { return item.id === value; })[0] || null;
+    renderValue();
+    if (!current) {
+      valueNode.textContent = items.length ? "" : "没有可选项";
+      valueNode.classList.add("placeholder");
+    }
+    trigger.addEventListener("click", function (event) {
+      event.preventDefault();
+      if (menu.hidden) {
+        openMenu();
+      } else {
+        closeMenu();
+      }
+    });
+    trigger.addEventListener("keydown", function (event) {
+      if (event.key === "ArrowDown" && menu.hidden) {
+        event.preventDefault();
+        openMenu();
+      }
+    });
+    wrap.getValue = function () { return current ? current.id : null; };
+    wrap.setValue = function (next) {
+      current = items.filter(function (item) { return item.id === next; })[0] || null;
+      renderValue();
+    };
+    /**
+     * 替换整个选项列表。异步拿到选项后用它重建菜单，
+     * 并把当前值设到 fallback 上（选项里没有 fallback 时置空）。
+     */
+    wrap.setOptions = function (nextItems, fallback) {
+      items = nextItems || [];
+      clear(menu);
+      items.forEach(function (item) {
+        var option = el("button", "select-option");
+        option.type = "button";
+        option.setAttribute("role", "option");
+        var textWrap = el("span");
+        textWrap.appendChild(el("span", null, item.label));
+        if (item.desc) {
+          textWrap.appendChild(el("span", "select-option-desc", item.desc));
+        }
+        option.appendChild(textWrap);
+        option.addEventListener("click", function () {
+          choose(item);
+          trigger.focus();
+        });
+        menu.appendChild(option);
+      });
+      current = items.filter(function (item) { return item.id === fallback; })[0] || null;
+      renderValue();
+      if (!current) {
+        valueNode.textContent = items.length ? "" : "没有可选项";
+        valueNode.classList.add("placeholder");
+      }
+    };
+    /** 值变化后的监听。构造时的 onChange 之外，外部还可以订阅 change。 */
+    wrap.changeListeners = [];
+    wrap.addEventListener = function (type, listener) {
+      if (type === "change") {
+        wrap.changeListeners.push(listener);
+      }
+    };
+    wrap.node = trigger;
+    return wrap;
+  }
+
+  /* ---------------- 提示条 ---------------- */
+
+  function toast(message, tone) {
+    var stack = document.getElementById("toastStack");
+    var node = el("div", "toast " + (tone || "info"));
+    node.appendChild(icon(tone === "ok" ? "checkCircle" : tone === "error" ? "alert" : "info",
+      "toast-icon"));
+    node.appendChild(el("span", null, message));
+    stack.appendChild(node);
+    window.setTimeout(function () {
+      node.style.opacity = "0";
+      node.style.transition = "opacity .2s ease";
+      window.setTimeout(function () {
+        if (node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+      }, 220);
+    }, tone === "error" ? 6000 : 3200);
+  }
+
+  /* ---------------- 弹窗 ---------------- */
+
+  function openModal(config) {
+    var root = document.getElementById("modalRoot");
+    var backdrop = el("div", "modal-backdrop");
+    var panel = el("div", "modal-panel" + (config.wide ? " wide" : ""));
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+
+    var header = el("div", "modal-header");
+    header.appendChild(el("h2", "modal-title", config.title || ""));
+    if (config.desc) {
+      header.appendChild(el("p", "modal-desc", config.desc));
+    }
+    panel.appendChild(header);
+
+    var body = el("div", "modal-body");
+    if (config.body) {
+      body.appendChild(config.body);
+    }
+    panel.appendChild(body);
+
+    var footer = el("div", "modal-footer");
+    panel.appendChild(footer);
+    backdrop.appendChild(panel);
+    root.appendChild(backdrop);
+
+    function close() {
+      if (backdrop.parentNode) {
+        backdrop.parentNode.removeChild(backdrop);
+      }
+      document.removeEventListener("keydown", onKey, true);
+    }
+
+    function onKey(event) {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        close();
+      }
+    }
+
+    backdrop.addEventListener("mousedown", function (event) {
+      if (event.target === backdrop) {
+        close();
+      }
+    });
+    document.addEventListener("keydown", onKey, true);
+
+    var api = {
+      el: panel,
+      body: body,
+      footer: footer,
+      close: close,
+      addAction: function (node) {
+        footer.appendChild(node);
+        return node;
+      }
+    };
+    if (config.onMount) {
+      config.onMount(api);
+    }
+    var focusTarget = panel.querySelector("input, textarea, button");
+    if (focusTarget) {
+      window.setTimeout(function () { focusTarget.focus(); }, 30);
+    }
+    return api;
+  }
+
+  /**
+   * 自定义确认框。返回 Promise<boolean>，不用 window.confirm。
+   */
+  function confirmDialog(options) {
+    return new Promise(function (resolve) {
+      var decided = false;
+      var body = el("p", "card-desc", options.message);
+      var modal = openModal({
+        title: options.title || "确认操作",
+        body: body,
+        onMount: function (dialog) {
+          dialog.addAction(button("取消", {
+            onClick: function () {
+              decided = true;
+              dialog.close();
+              resolve(false);
+            }
+          }));
+          dialog.addAction(button(options.confirmText || "确认", {
+            tone: options.danger ? "danger" : "primary",
+            onClick: function () {
+              decided = true;
+              dialog.close();
+              resolve(true);
+            }
+          }));
+        }
+      });
+      var originalClose = modal.close;
+      modal.close = function () {
+        originalClose();
+        if (!decided) {
+          decided = true;
+          resolve(false);
+        }
+      };
+    });
+  }
+
+  /* ---------------- 页签 ---------------- */
+
+  var PAGE_META = {
+    providers: {
+      title: "供应商与模型",
+      sub: "管理连接信息、模型能力与就绪开关。"
+    },
+    biz: {
+      title: "业务与提示词",
+      sub: "为业务绑定模型，编辑并发布提示词模板。"
+    },
+    calls: {
+      title: "调用日志",
+      sub: "查看调用摘要，按需记录模型输入输出。"
+    }
+  };
+
+  var loaders = {
+    providers: loadProviders,
+    biz: loadBiz,
+    calls: loadCalls
+  };
+
+  var activeTab = "providers";
+
+  function switchTab(tabId) {
+    activeTab = tabId;
+    document.querySelectorAll(".nav-item").forEach(function (item) {
+      item.setAttribute("aria-selected", item.getAttribute("data-tab") === tabId ? "true" : "false");
+    });
+    document.querySelectorAll(".panel").forEach(function (panel) {
+      panel.hidden = panel.id !== tabId;
+    });
+    var meta = PAGE_META[tabId];
+    document.getElementById("pageTitle").textContent = meta.title;
+    document.getElementById("pageSub").textContent = meta.sub;
+    loaders[tabId]();
+  }
+
+  document.querySelectorAll(".nav-item").forEach(function (item) {
+    item.addEventListener("click", function () {
+      switchTab(item.getAttribute("data-tab"));
     });
   });
 
+  document.getElementById("refreshBtn").addEventListener("click", function () {
+    loaders[activeTab]();
+  });
+
+  /* ---------------- 通用状态行 ---------------- */
+
+  function statusLine(parent) {
+    var node = el("p", "status-line");
+    parent.appendChild(node);
+    return function (text, tone) {
+      node.textContent = text || "";
+      node.className = "status-line" + (text ? " " + (tone || "info") : "");
+    };
+  }
+
+  function emptyState(title, desc, action) {
+    var wrap = el("div", "empty-state");
+    wrap.appendChild(el("p", "empty-title", title));
+    if (desc) {
+      wrap.appendChild(el("p", "empty-desc", desc));
+    }
+    if (action) {
+      var actions = el("div", "actions");
+      actions.appendChild(action);
+      wrap.appendChild(actions);
+    }
+    return wrap;
+  }
+
+  function badge(text, tone) {
+    var node = el("span", "badge" + (tone ? " badge-" + tone : ""));
+    node.appendChild(el("span", "badge-dot"));
+    node.appendChild(el("span", null, text));
+    return node;
+  }
+
+  /* ---------------- 供应商与模型 ---------------- */
+
+  var expandedProviders = {};
+
   function loadProviders() {
     var panel = document.getElementById("providers");
-    panel.textContent = "";
-    api("/providers").then(function (providers) {
+    clear(panel);
+    var loading = el("p", "status-line", "正在读取供应商…");
+    panel.appendChild(loading);
+    get("/providers").then(function (providers) {
+      clear(panel);
       if (!providers.length) {
-        var empty = el("p", "配置文件里还没有供应商。");
-        empty.className = "empty";
-        panel.appendChild(empty);
+        panel.appendChild(emptyState("配置文件里还没有供应商",
+          "只有 application.yml 中 ai-lite.llm.providers 声明过的供应商才会出现在这里。"));
         return;
       }
       providers.forEach(function (provider) {
         panel.appendChild(providerCard(provider));
       });
     }).catch(function (error) {
-      panel.appendChild(el("p", error.message));
+      clear(panel);
+      panel.appendChild(emptyState("读取供应商失败", error.message,
+        button("重试", { tone: "primary", onClick: loadProviders })));
     });
   }
 
   function providerCard(provider) {
-    var card = el("details");
-    card.className = "card";
-    card.appendChild(el("summary", provider.name));
+    var name = provider.name;
+    var open = !!expandedProviders[name];
+    var card = el("section", "card");
 
-    var content = el("div");
-    content.className = "details-content";
-
-    var note = "协议 " + (provider.api || "") + "。密钥" +
-      (provider.apiKeyConfigured ? "已配置（" + provider.apiKeyMasked + "）" : "未配置") +
-      "。留空表示不改这一项。";
-    if (provider.keyPool) {
-      note += " 已配置密钥池，这里填写的密钥不会替换密钥池。";
+    var disclosure = el("button", "disclosure");
+    disclosure.type = "button";
+    disclosure.setAttribute("aria-expanded", open ? "true" : "false");
+    var main = el("div", "disclosure-main");
+    main.appendChild(el("span", "disclosure-name", name));
+    var meta = el("div", "disclosure-meta");
+    meta.appendChild(el("span", null, "协议 " + (provider.api || "未声明")
+      + (provider.apiOverridden ? "（库内覆盖）" : "")));
+    meta.appendChild(el("span", null, "·"));
+    meta.appendChild(el("span", null, provider.baseUrl || "未填地址"));
+    var models = provider.models || [];
+    var readyCount = models.filter(function (model) { return model.ready; }).length;
+    var counts = el("div", "disclosure-meta");
+    counts.appendChild(badge("可用 " + readyCount + " / " + models.length,
+      readyCount ? "ready" : "off"));
+    if (provider.apiKeyConfigured) {
+      counts.appendChild(badge("密钥 " + provider.apiKeyMasked, "info"));
+    } else {
+      counts.appendChild(badge("密钥未配置", "warn"));
     }
     if (provider.overlay) {
-      note += " 正在使用库内覆盖。";
+      counts.appendChild(badge("库内覆盖生效", "warn"));
     }
-    var noteNode = el("p", note);
-    noteNode.className = "note";
-    content.appendChild(noteNode);
+    if (provider.keyPool) {
+      counts.appendChild(badge("密钥池", "info"));
+    }
+    main.appendChild(meta);
+    main.appendChild(counts);
+    disclosure.appendChild(main);
+    disclosure.appendChild(icon("chevron", "chevron"));
+    card.appendChild(disclosure);
 
-    var grid = el("div");
-    grid.className = "grid";
-    var baseUrl = input("url", provider.baseUrl || "");
-    var apiKey = input("password", "");
-    apiKey.placeholder = "留空表示不改";
-    var connect = input("number", provider.connectTimeoutMs);
-    var read = input("number", provider.readTimeoutMs);
-    grid.appendChild(field("地址", baseUrl));
-    grid.appendChild(field("密钥", apiKey));
+    var body = el("div", "disclosure-body");
+    body.hidden = !open;
+    disclosure.addEventListener("click", function () {
+      open = !open;
+      expandedProviders[name] = open;
+      disclosure.setAttribute("aria-expanded", open ? "true" : "false");
+      body.hidden = !open;
+    });
+
+    body.appendChild(connectionSection(provider));
+    body.appendChild(modelsSection(provider));
+    card.appendChild(body);
+    return card;
+  }
+
+  function connectionSection(provider) {
+    var section = el("div", "section");
+    section.appendChild(el("h3", "section-title", "连接信息"));
+
+    var note = el("p", "card-desc");
+    note.textContent = "留空的字段表示沿用配置文件。"
+      + (provider.keyPool ? "该供应商配置了密钥池，这里填写的密钥不会替换密钥池。" : "");
+    section.appendChild(note);
+
+    var grid = el("div", "form-grid");
+    var baseUrl = textInput(provider.baseUrl, { placeholder: "https://example.com/v1" });
+    var apiKey = textInput("", { type: "password", placeholder: "留空表示不改" });
+    var connect = textInput(provider.connectTimeoutMs, { type: "number", min: 1 });
+    var read = textInput(provider.readTimeoutMs, { type: "number", min: 1 });
+
+    // 协议决定 base-url 之后追加什么路径，所以和地址放在一起。
+    var apiOptions = [{ id: "", label: "正在读取…" }];
+    var apiSelect = select(apiOptions, provider.api, function () {});
+    var apiHint = el("p", "field-hint", "");
+    var apiField = el("div", "field");
+    apiField.appendChild(el("span", "field-label", "协议"));
+    apiField.appendChild(apiSelect);
+    apiField.appendChild(apiHint);
+    grid.appendChild(apiField);
+    grid.appendChild(field("地址", baseUrl, "只写到端点根地址，本库会自己接协议路径"));
+    grid.appendChild(field("密钥", apiKey, provider.apiKeyConfigured
+      ? "当前密钥 " + provider.apiKeyMasked + "，留空则不修改" : "尚未配置密钥"));
     grid.appendChild(field("连接超时（毫秒）", connect));
     grid.appendChild(field("读取超时（毫秒）", read));
-    content.appendChild(grid);
+    section.appendChild(grid);
 
-    var actions = el("div");
-    actions.className = "actions";
-    var save = button("保存覆盖", true);
-    var clear = button("清除覆盖", false);
-    var probe = button("测试连通", false);
-    var sync = button("同步模型", false);
+    get("/apis").then(function (apis) {
+      apiOptions = apis.map(function (item) {
+        return { id: item.id, label: item.label, path: item.path, detail: item.detail };
+      });
+      apiSelect.setOptions(apiOptions, provider.api);
+      showApiHint();
+    }).catch(function (error) {
+      apiHint.textContent = error.message;
+      apiHint.classList.add("error");
+    });
+
+    function showApiHint() {
+      var id = apiSelect.getValue();
+      var found = apiOptions.filter(function (item) { return item.id === id; })[0];
+      if (!found) {
+        apiHint.textContent = "";
+        return;
+      }
+      apiHint.textContent = found.detail + " 实际请求 " + (provider.baseUrl || "{地址}")
+        .replace(/\/+$/, "") + found.path;
+    }
+    apiSelect.addEventListener("change", showApiHint);
+
+    var actions = el("div", "actions");
+    var save = button("保存覆盖", { tone: "primary" });
+    var clearOverlay = button("清除覆盖", {
+      onClick: function () {
+        confirmDialog({
+          title: "清除覆盖",
+          message: "清除后，该供应商的连接信息回到配置文件里的值。已保存的地址、密钥和超时会从数据库删除。",
+          confirmText: "清除"
+        }).then(function (ok) {
+          if (!ok) {
+            return;
+          }
+          post("/providers/" + enc(provider.name) + "/overlay/clear", {})
+            .then(function () {
+              toast("已清除覆盖，连接信息回到配置文件。", "ok");
+              loadProviders();
+            }).catch(function (error) {
+              toast(error.message, "error");
+            });
+        });
+      }
+    });
+    var probe = button("测试连通", {});
+    var sync = button("同步模型", {});
     actions.appendChild(save);
-    actions.appendChild(clear);
+    actions.appendChild(clearOverlay);
     actions.appendChild(probe);
     actions.appendChild(sync);
-    content.appendChild(actions);
-    var report = status(content);
+    section.appendChild(actions);
+
+    var report = statusLine(section);
 
     save.addEventListener("click", function () {
-      post("/providers/" + encodeURIComponent(provider.name) + "/overlay", {
+      save.disabled = true;
+      report("正在保存…", "info");
+      post("/providers/" + enc(provider.name) + "/overlay", {
+        api: apiSelect.getValue(),
         baseUrl: baseUrl.value,
         apiKey: apiKey.value,
         connectTimeoutMs: connect.value,
         readTimeoutMs: read.value
       }).then(function () {
-        report("覆盖已写入数据库。", true);
+        toast("覆盖已写入数据库。", "ok");
         loadProviders();
       }).catch(function (error) {
-        report(error.message, false);
+        save.disabled = false;
+        report(error.message, "error");
       });
     });
-    clear.addEventListener("click", function () {
-      post("/providers/" + encodeURIComponent(provider.name) + "/overlay/clear", {})
-        .then(function () {
-          report("已清除覆盖，连接信息回到配置文件。", true);
-          loadProviders();
-        }).catch(function (error) {
-          report(error.message, false);
-        });
-    });
+
     probe.addEventListener("click", function () {
-      report("正在测试连通…", true);
-      post("/providers/" + encodeURIComponent(provider.name) + "/connectivity", {})
+      probe.disabled = true;
+      report("正在请求 /models 探测连通…", "info");
+      post("/providers/" + enc(provider.name) + "/connectivity", {})
         .then(function (data) {
-          report((data.ok ? "连通成功" : "连通失败") + "，HTTP " + data.httpStatus +
-            "，" + data.latencyMs + " 毫秒。" + (data.message || ""), data.ok);
+          probe.disabled = false;
+          report((data.ok ? "连通成功" : "连通失败")
+            + "，HTTP " + data.httpStatus + "，耗时 " + data.latencyMs + " 毫秒。"
+            + (data.message || ""), data.ok ? "ok" : "error");
         }).catch(function (error) {
-          report(error.message, false);
+          probe.disabled = false;
+          report(error.message, "error");
         });
     });
+
     sync.addEventListener("click", function () {
-      report("正在读取远端模型，还不会写入…", true);
-      post("/providers/" + encodeURIComponent(provider.name) + "/models/sync", {})
+      sync.disabled = true;
+      report("正在读取远端模型列表…", "info");
+      post("/providers/" + enc(provider.name) + "/models/sync", {})
         .then(function (data) {
-          report("", true);
+          sync.disabled = false;
+          report("", "info");
           openSyncDialog(provider, data.models || []);
         }).catch(function (error) {
-          report(error.message, false);
+          sync.disabled = false;
+          report(error.message, "error");
         });
     });
 
-    content.appendChild(modelTable(provider));
-    card.appendChild(content);
-    return card;
+    return section;
   }
 
-  function modelTable(provider) {
-    var block = el("div");
-    block.className = "table-section";
-    var head = el("div");
-    head.className = "section-head";
-    head.appendChild(el("h2", "模型"));
-    var headActions = el("div");
-    headActions.className = "actions";
-    var add = button("新增模型", true);
-    headActions.appendChild(add);
-    head.appendChild(headActions);
-    block.appendChild(head);
-    var tryStatus = status(block);
-    var tryDump = el("div");
-    tryDump.className = "try-dump";
-    block.appendChild(tryDump);
+  function modelsSection(provider) {
+    var section = el("div", "section");
+    var head = el("div", "section-head");
+    head.appendChild(el("h3", "section-title", "模型"));
+    var add = button("新增模型", { tone: "primary", size: "sm", icon: "plus" });
     add.addEventListener("click", function () {
       openModelDialog(provider, null);
     });
+    head.appendChild(add);
+    section.appendChild(head);
 
-    var table = el("table");
-    table.appendChild(row("th", ["模型", "状态", "推理", "上下文", "输出上限", "思考格式", ""]));
-    (provider.models || []).forEach(function (model) {
-      var state = model.ready ? "可用" : "未就绪";
-      if (model.duplicate) {
-        state += "，重复";
-      }
-      var line = el("tr");
-      [model.displayName || model.modelId, state, model.reasoning ? "是" : "否",
-        model.contextWindow == null ? "" : String(model.contextWindow),
-        model.maxTokens == null ? "" : String(model.maxTokens),
-        model.thinkingFormat || ""].forEach(function (value) {
-        line.appendChild(el("td", value));
-      });
-      var actionsCell = el("td");
-      actionsCell.className = "cell-actions";
-      var rowActions = el("div");
-      rowActions.className = "row-actions";
-      var edit = button(model.ready ? "修改" : "补齐", false);
-      var test = button("测试调用", false);
-      var remove = button("删除", false);
-      remove.classList.add("danger");
-      rowActions.appendChild(edit);
-      rowActions.appendChild(test);
-      rowActions.appendChild(remove);
-      actionsCell.appendChild(rowActions);
-      line.appendChild(actionsCell);
-      edit.addEventListener("click", function () {
-        openModelDialog(provider, model);
-      });
-      test.addEventListener("click", function () {
-        openTryModelDialog(provider, model, tryStatus, tryDump);
-      });
-      remove.addEventListener("click", function () {
-        if (!window.confirm("删除模型 " + model.modelId + "？已有模型不会因为同步而消失，只有这里能删。")) {
-          return;
-        }
-        fetch(root + "/providers/" + encodeURIComponent(provider.name) + "/models/"
-          + encodeURIComponent(model.modelId), { method: "DELETE" })
-          .then(function (response) { return response.json(); })
-          .then(function (body) {
-            if (!body.ok) {
-              throw new Error(body.message || "删除失败");
-            }
-            loadProviders();
-          }).catch(function (error) {
-            window.alert(error.message);
-          });
-      });
-      table.appendChild(line);
-    });
-    var wrap = el("div");
-    wrap.className = "table-wrap";
-    wrap.appendChild(table);
-    block.appendChild(wrap);
-    return block;
-  }
-
-  function showTryDump(dump, data) {
-    dump.textContent = "";
-    dump.appendChild(el("p", "发给模型的请求"));
-    var request = el("pre", data.request || "");
-    request.className = "log-text";
-    dump.appendChild(request);
-    dump.appendChild(el("p", "模型原始响应"));
-    var response = el("pre", data.response || "");
-    response.className = "log-text";
-    dump.appendChild(response);
-  }
-
-  function openTryModelDialog(provider, model, tryStatus, tryDump) {
-    var body = el("div");
-    var thinking = el("select");
-    ["off", "minimal", "low", "medium", "high", "xhigh", "max"].forEach(function (value) {
-      thinking.appendChild(option(value, value));
-    });
-    thinking.value = "off";
-    body.appendChild(field("思考档", thinking));
-    openDialog("测试调用 " + model.modelId, body, "调用", function (dialog) {
-      dialog.close();
-      tryStatus("正在调用 " + model.modelId + "…", true);
-      post("/providers/" + encodeURIComponent(provider.name) + "/models/"
-        + encodeURIComponent(model.modelId) + "/try", { thinkingLevel: thinking.value })
-        .then(function (data) {
-          var reply = data.content ? "回复：" + data.content : (data.message || "");
-          tryStatus((data.ok ? "调用成功" : "调用失败") + "，" + data.latencyMs + " 毫秒。" + reply, !!data.ok);
-          showTryDump(tryDump, data);
-        }).catch(function (error) {
-          tryStatus(error.message, false);
-        });
-    });
-  }
-
-  function openSyncDialog(provider, models) {
-    var body = el("div");
-    var intro = el("p", "勾选要加入本地列表的模型。已经在列表里的保持原样，未出现在这次结果里的也不会被删除。");
-    intro.className = "note";
-    body.appendChild(intro);
+    var tableSection = statusLine(section);
+    var dumpHost = el("div");
+    var models = provider.models || [];
     if (!models.length) {
-      body.appendChild(el("p", "远端没有返回模型。"));
+      section.appendChild(emptyState("还没有模型",
+        "点「同步模型」从供应商读取，或手动添加一个。新加入的模型默认未就绪，补齐能力参数并打开就绪后才能被业务绑定。"));
+      section.appendChild(dumpHost);
+      return section;
     }
-    var boxes = [];
+
+    var wrap = el("div", "table-wrap");
+    var table = el("table", "table");
+    var thead = el("thead");
+    thead.appendChild(headerRow(["模型", "就绪", "推理", "输入", "上下文", "输出上限",
+      "思考格式", "操作"]));
+    table.appendChild(thead);
+    var tbody = el("tbody");
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    section.appendChild(wrap);
+
     models.forEach(function (model) {
-      var label = el("label");
-      label.className = "checkbox-row";
-      var box = el("input");
-      box.type = "checkbox";
-      box.checked = !model.stored;
-      box.disabled = !!model.stored;
-      label.appendChild(box);
-      label.appendChild(el("span", model.modelId + (model.stored ? "（已在列表中）" : "")));
-      body.appendChild(label);
-      boxes.push({ box: box, model: model });
+      tbody.appendChild(modelRow(provider, model, tableSection, dumpHost));
     });
-    openDialog("选择要加入的模型", body, "加入列表", function (dialog) {
-      var ids = [];
-      boxes.forEach(function (item) {
-        if (item.box.checked && !item.model.stored) {
-          ids.push(item.model.modelId);
-        }
-      });
-      if (!ids.length) {
-        dialog.close();
-        return;
-      }
-      post("/providers/" + encodeURIComponent(provider.name) + "/models/adopt", { modelIds: ids })
-        .then(function () {
-          dialog.close();
-          loadProviders();
-        }).catch(function (error) {
-          window.alert(error.message);
-        });
-    });
+
+    section.appendChild(dumpHost);
+    return section;
   }
+
+  function headerRow(values) {
+    var row = el("tr");
+    values.forEach(function (value) {
+      row.appendChild(el("th", null, value));
+    });
+    return row;
+  }
+
+  function modelRow(provider, model, tableStatus, dumpHost) {
+    var row = el("tr");
+
+    var nameCell = el("td", "cell-name");
+    var primary = el("div", "name-primary", model.displayName || model.modelId);
+    primary.title = model.displayName || model.modelId;
+    nameCell.appendChild(primary);
+    if (model.displayName && model.displayName !== model.modelId) {
+      var secondary = el("div", "mono-text name-secondary", model.modelId);
+      secondary.title = model.modelId;
+      nameCell.appendChild(secondary);
+    }
+    if (model.duplicate) {
+      nameCell.appendChild(badge("重复 id", "warn"));
+    }
+    row.appendChild(nameCell);
+
+    // 就绪：表格里的快捷开关，点一下立刻写库并回读。
+    var readyCell = el("td", "cell-tight");
+    var readySwitch = switchControl(model.ready, {
+      title: model.ready ? "点击停用" : "点击启用",
+      onChange: function (next) {
+        readySwitch.setBusy(true);
+        put("/providers/" + enc(provider.name) + "/models/" + enc(model.modelId) + "/ready",
+          { ready: next })
+          .then(function (updated) {
+            readySwitch.setBusy(false);
+            readySwitch.setValue(updated.ready);
+            tableStatus(next
+              ? "已启用 " + model.modelId + "，现在可以被业务绑定。"
+              : "已停用 " + model.modelId + "。已有绑定保留，但下一次调用会失败。",
+              next ? "ok" : "info");
+            toast(next ? "已启用 " + model.modelId : "已停用 " + model.modelId,
+              next ? "ok" : "info");
+            // 只更新本行显示，避免整页刷新把滚动位置打乱
+            readyBadge.textContent = "";
+            readyBadge.appendChild(badge(next ? "可用" : "未就绪", next ? "ready" : "off"));
+            provider.models.forEach(function (item) {
+              if (item.modelId === model.modelId) {
+                item.ready = updated.ready;
+              }
+            });
+          }).catch(function (error) {
+            readySwitch.setBusy(false);
+            readySwitch.setValue(model.ready);
+            tableStatus(error.message, "error");
+            toast(error.message, "error");
+          });
+      }
+    });
+    readyCell.appendChild(readySwitch);
+    row.appendChild(readyCell);
+
+    var readyBadge = el("span", "sr-only");
+    readyCell.appendChild(readyBadge);
+
+    row.appendChild(el("td", null, model.reasoning ? "是" : "否"));
+    var modes = (model.inputModes && model.inputModes.length) ? model.inputModes : ["text"];
+    row.appendChild(el("td", "mono-text", modes.join(" / ")));
+    row.appendChild(el("td", null, model.contextWindow == null ? "—" : String(model.contextWindow)));
+    row.appendChild(el("td", null, model.maxTokens == null ? "—" : String(model.maxTokens)));
+    row.appendChild(el("td", "mono-text", model.thinkingFormat || "—"));
+
+    var actionsCell = el("td", "cell-actions");
+    var rowActions = el("div", "row-actions");
+    var edit = button("编辑", {
+      size: "sm", title: "修改能力参数与就绪状态",
+      onClick: function () { openModelDialog(provider, model); }
+    });
+    var tryBtn = button("测试", {
+      size: "sm", title: "用当前配置发一次测试请求",
+      onClick: function () { openTryDialog(provider, model, tableStatus, dumpHost); }
+    });
+    var remove = button("删除", {
+      size: "sm", tone: "danger", title: "从本地列表删除这个模型",
+      onClick: function () {
+        confirmDialog({
+          title: "删除模型",
+          message: "删除 " + model.modelId + "？同步不会自动删模型，只有这里能删。仍被业务绑定时会被拒绝。",
+          confirmText: "删除",
+          danger: true
+        }).then(function (ok) {
+          if (!ok) {
+            return;
+          }
+          del("/providers/" + enc(provider.name) + "/models/" + enc(model.modelId))
+            .then(function () {
+              toast("已删除 " + model.modelId, "ok");
+              loadProviders();
+            }).catch(function (error) {
+              toast(error.message, "error");
+            });
+        });
+      }
+    });
+    rowActions.appendChild(edit);
+    rowActions.appendChild(tryBtn);
+    rowActions.appendChild(remove);
+    actionsCell.appendChild(rowActions);
+    row.appendChild(actionsCell);
+    return row;
+  }
+
+  /* ---------------- 模型编辑弹窗 ---------------- */
 
   function openModelDialog(provider, model) {
-    var body = el("div");
-    body.className = "grid";
-    var modelId = input("text", model ? model.modelId : "");
-    if (model) {
-      modelId.readOnly = true;
+    var isEdit = !!model;
+    var body = el("div", "section");
+    var states = { ready: model ? !!model.ready : false };
+
+    var idField = textInput(model ? model.modelId : "", {
+      placeholder: "供应商那边的模型 id",
+      readOnly: isEdit
+    });
+    body.appendChild(field("模型 id", idField, isEdit
+      ? "id 是绑定与请求的依据，创建后不能改。要改名请删掉重建。"
+      : "必须与供应商返回的 id 完全一致。"));
+
+    var displayName = textInput(model && model.displayName ? model.displayName : "", {
+      placeholder: "留空则显示模型 id"
+    });
+    body.appendChild(field("显示名", displayName, "只影响页面展示，不参与模型请求。"));
+
+    if (isEdit) {
+      body.appendChild(fieldRow("就绪",
+        "打开后业务才能绑定这个模型。停用不会解除已有绑定，但下一次调用会失败。",
+        switchControl(states.ready, {
+          title: "就绪开关",
+          onChange: function (next) { states.ready = next; }
+        })));
+    } else {
+      body.appendChild(fieldRow("就绪",
+        "新模型默认未就绪。保存后在列表里打开开关即可启用。",
+        switchControl(false, { title: "就绪开关", onChange: function () {} })));
     }
-    var reasoning = el("select");
-    reasoning.appendChild(option("true", "支持推理"));
-    reasoning.appendChild(option("false", "不支持推理"));
-    reasoning.value = model && model.reasoning ? "true" : "false";
-    var contextWindow = input("number", model && model.contextWindow != null ? model.contextWindow : "32768");
-    var maxTokens = input("number", model && model.maxTokens != null ? model.maxTokens : "4096");
-    var format = el("select");
-    var help = el("p", "思考格式决定请求体里怎么写思考开关。选一项后看下面的说明。");
-    help.className = "note";
-    body.appendChild(field("模型 id", modelId));
-    body.appendChild(field("推理", reasoning));
-    body.appendChild(field("上下文窗口，0 表示未知", contextWindow));
-    body.appendChild(field("输出上限", maxTokens));
-    body.appendChild(field("思考格式", format));
-    body.appendChild(help);
-    api("/thinking-formats").then(function (formats) {
-      formats.forEach(function (item) {
-        var node = option(item.id, item.label);
-        node.setAttribute("data-detail", item.detail || "");
-        format.appendChild(node);
+
+    var reasoningSwitch = switchControl(model ? !!model.reasoning : true, {
+      title: "推理开关"
+    });
+    body.appendChild(fieldRow("支持推理", "模型是否会输出思考过程或接受思考档参数。",
+      reasoningSwitch));
+
+    var modes = checkboxList(INPUT_MODES,
+      (model && model.inputModes && model.inputModes.length) ? model.inputModes : ["text"],
+      function () {});
+    body.appendChild(field("输入类型", modes,
+      "勾选「图片」后，调用方才能给这个模型发图片消息。"));
+
+    var grid = el("div", "form-grid");
+    var contextWindow = textInput(model && model.contextWindow != null ? model.contextWindow : 32768,
+      { type: "number", min: 0 });
+    var maxTokens = textInput(model && model.maxTokens != null ? model.maxTokens : 4096,
+      { type: "number", min: 1 });
+    grid.appendChild(field("上下文窗口", contextWindow, "0 表示未知"));
+    grid.appendChild(field("输出上限", maxTokens, "单次回复最多多少 token"));
+    body.appendChild(grid);
+
+    var formatOptions = [{ id: "", label: "正在读取…" }];
+    var formatSelect = select(formatOptions, model ? model.thinkingFormat : null, function () {
+      showFormatHelp();
+    });
+    var formatHint = el("p", "field-hint", "思考格式决定请求体里怎么写思考开关。");
+    var formatField = el("div", "field");
+    formatField.appendChild(el("span", "field-label", "思考格式"));
+    formatField.appendChild(formatSelect);
+    formatField.appendChild(formatHint);
+    body.appendChild(formatField);
+
+    function showFormatHelp() {
+      var id = formatSelect.getValue();
+      var found = formatOptions.filter(function (item) { return item.id === id; })[0];
+      formatHint.textContent = found && found.desc
+        ? found.desc : "思考格式决定请求体里怎么写思考开关。";
+    }
+
+    get("/thinking-formats").then(function (formats) {
+      formatOptions = formats.map(function (item) {
+        return { id: item.id, label: item.label, desc: item.detail };
       });
-      if (model && model.thinkingFormat) {
-        format.value = model.thinkingFormat;
-      }
+      formatSelect.setValue(model ? model.thinkingFormat : (formatOptions[0] || {}).id);
       showFormatHelp();
     }).catch(function (error) {
-      help.textContent = error.message;
+      formatHint.textContent = error.message;
+      formatHint.classList.add("error");
     });
-    format.addEventListener("change", showFormatHelp);
-    function showFormatHelp() {
-      var selected = format.options[format.selectedIndex];
-      help.textContent = selected && selected.getAttribute("data-detail")
-        ? selected.getAttribute("data-detail")
-        : "思考格式决定请求体里怎么写思考开关。";
-    }
-    openDialog(model ? "修改模型" : "新增模型", body, "保存", function (dialog) {
+
+    var modal = openModal({
+      title: isEdit ? "修改模型" : "新增模型",
+      desc: isEdit ? model.modelId : "先创建一条未就绪记录，再补齐能力参数。",
+      body: body,
+      onMount: function (dialog) {
+        dialog.addAction(button("取消", { onClick: dialog.close }));
+        dialog.addAction(button(isEdit ? "保存" : "创建", {
+          tone: "primary",
+          onClick: function () { save(); }
+        }));
+      }
+    });
+    var saveBtn = modal.footer.lastChild;
+    var report = statusLine(body);
+    report("", "info");
+
+    function save() {
+      var modelId = (model ? model.modelId : idField.value).trim();
+      if (!modelId) {
+        report("请填写模型 id。", "error");
+        idField.focus();
+        return;
+      }
+      var contextValue = Number(contextWindow.value);
+      var maxValue = Number(maxTokens.value);
+      if (!isFinite(contextValue) || contextValue < 0) {
+        report("上下文窗口必须是不小于 0 的整数。", "error");
+        return;
+      }
+      if (!isFinite(maxValue) || maxValue <= 0) {
+        report("输出上限必须是大于 0 的整数。", "error");
+        return;
+      }
+      var format = formatSelect.getValue();
+      if (!format) {
+        report("请选择思考格式。", "error");
+        return;
+      }
       var payload = {
-        reasoning: reasoning.value === "true",
-        contextWindow: Number(contextWindow.value),
-        maxTokens: Number(maxTokens.value),
-        thinkingFormat: format.value
+        reasoning: reasoningSwitch.getValue(),
+        inputModes: modes.getValue(),
+        contextWindow: contextValue,
+        maxTokens: maxValue,
+        thinkingFormat: format,
+        displayName: displayName.value
       };
-      var path = "/providers/" + encodeURIComponent(provider.name) + "/models";
-      var ready = model
-        ? Promise.resolve()
-        : post(path, { modelId: modelId.value });
-      ready.then(function () {
-        return put(path + "/" + encodeURIComponent(modelId.value), payload);
+      saveBtn.disabled = true;
+      report("正在保存…", "info");
+      var base = "/providers/" + enc(provider.name) + "/models";
+      var create = isEdit ? Promise.resolve() : post(base, { modelId: modelId });
+      create.then(function () {
+        return put(base + "/" + enc(modelId), payload);
       }).then(function () {
-        dialog.close();
+        if (isEdit && states.ready !== !!model.ready) {
+          return put(base + "/" + enc(modelId) + "/ready", { ready: states.ready });
+        }
+      }).then(function () {
+        modal.close();
+        toast(isEdit ? "模型已更新。" : "模型已创建。", "ok");
         loadProviders();
       }).catch(function (error) {
-        window.alert(error.message);
+        saveBtn.disabled = false;
+        report(error.message, "error");
       });
-    });
+    }
   }
 
-  function openDialog(title, body, confirmLabel, onConfirm) {
-    var dialog = document.getElementById("dialog");
-    dialog.textContent = "";
-    var header = el("div");
-    header.className = "dialog-header";
-    header.appendChild(el("h2", title));
-    dialog.appendChild(header);
-    var bodyWrap = el("div");
-    bodyWrap.className = "dialog-body";
-    bodyWrap.appendChild(body);
-    dialog.appendChild(bodyWrap);
-    var footer = el("div");
-    footer.className = "dialog-footer";
-    var cancel = button("取消", false);
-    var ok = button(confirmLabel, true);
-    footer.appendChild(cancel);
-    footer.appendChild(ok);
-    dialog.appendChild(footer);
-    cancel.addEventListener("click", function () { dialog.close(); });
-    ok.addEventListener("click", function () { onConfirm(dialog); });
-    dialog.showModal();
-  }
+  /* ---------------- 同步与测试调用 ---------------- */
 
-  function openCallDetail(callId) {
-    api("/calls/" + encodeURIComponent(callId)).then(function (item) {
-      var body = el("div");
-      var summary = el("pre", "");
-      summary.className = "log-text";
-      summary.textContent = [
-        "CALL_ID: " + (item.CALL_ID || callId),
-        "业务: " + (item.BIZ_ID || ""),
-        "供应商: " + (item.PROVIDER || ""),
-        "模型: " + (item.MODEL_ID || ""),
-        "思考档: " + (item.THINKING_LEVEL || ""),
-        "token: " + (item.TOTAL_TOKENS == null ? "" : String(item.TOTAL_TOKENS)),
-        "结果: " + (item.SUCCESS === 1 || item.SUCCESS === true ? "成功" : "失败"),
-        "耗时: " + (item.LATENCY_MS == null ? "" : String(item.LATENCY_MS) + " ms"),
-        "摘要: " + (item.ERROR_BRIEF || item.STOP_REASON || "")
-      ].join("\n");
-      body.appendChild(summary);
-      if (item.INPUT_TEXT || item.OUTPUT_TEXT) {
-        body.appendChild(el("p", "输入输出"));
-        var io = el("pre", "");
-        io.className = "log-text";
-        io.textContent = "输入\n" + (item.INPUT_TEXT || "") + "\n\n输出\n" + (item.OUTPUT_TEXT || "");
-        body.appendChild(io);
+  function openSyncDialog(provider, models) {
+    var body = el("div", "section");
+    body.appendChild(el("p", "card-desc",
+      "勾选要加入本地列表的模型。已在列表里的保持原样，本次没返回的也不会被删除。"));
+
+    if (!models.length) {
+      body.appendChild(emptyState("远端没有返回模型",
+        "检查供应商的 /models 接口是否可用，或手动添加模型 id。"));
+    }
+    var selected = {};
+    var list = el("div", "checkbox-list");
+    models.forEach(function (model) {
+      var node = el("button", "checkbox");
+      node.type = "button";
+      node.setAttribute("role", "checkbox");
+      var stored = !!model.stored;
+      selected[model.modelId] = !stored;
+      node.setAttribute("aria-checked", (!stored) ? "true" : "false");
+      if (stored) {
+        node.disabled = true;
       }
-      openDialog("调用详情", body, "关闭", function (dialog) {
-        dialog.close();
+      var box = el("span", "checkbox-box");
+      box.appendChild(icon("check"));
+      node.appendChild(box);
+      node.appendChild(el("span", null, model.modelId + (stored ? "（已在列表中）" : "")));
+      node.addEventListener("click", function () {
+        if (stored) {
+          return;
+        }
+        var next = !selected[model.modelId];
+        selected[model.modelId] = next;
+        node.setAttribute("aria-checked", next ? "true" : "false");
       });
-    }).catch(function (error) {
-      window.alert(error.message);
+      list.appendChild(node);
+    });
+    body.appendChild(list);
+
+    openModal({
+      title: "选择要加入的模型",
+      desc: "远端返回 " + models.length + " 个模型。",
+      body: body,
+      onMount: function (dialog) {
+        dialog.addAction(button("取消", { onClick: dialog.close }));
+        dialog.addAction(button("加入列表", {
+          tone: "primary",
+          onClick: function () {
+            var ids = Object.keys(selected).filter(function (id) {
+              return selected[id];
+            });
+            if (!ids.length) {
+              toast("没有勾选新的模型。", "info");
+              dialog.close();
+              return;
+            }
+            post("/providers/" + enc(provider.name) + "/models/adopt", { modelIds: ids })
+              .then(function (data) {
+                dialog.close();
+                toast("已加入 " + data.added + " 个模型，默认未就绪。", "ok");
+                loadProviders();
+              }).catch(function (error) {
+                toast(error.message, "error");
+              });
+          }
+        }));
+      }
     });
   }
+
+  function openTryDialog(provider, model, tableStatus, dumpHost) {
+    var body = el("div", "section");
+    var levelSelect = select(THINKING_LEVELS.map(function (level) {
+      return { id: level, label: level };
+    }), "off", function () {});
+    body.appendChild(field("思考档", levelSelect,
+      "测试调用会带上这个思考档；off 表示关闭思考。"));
+    var resultHost = el("div");
+    body.appendChild(resultHost);
+
+    var modal = openModal({
+      title: "测试调用 " + model.modelId,
+      desc: "用当前生效的地址和密钥发一次短请求，不写调用日志。",
+      wide: true,
+      body: body,
+      onMount: function (dialog) {
+        dialog.addAction(button("关闭", { onClick: dialog.close }));
+        dialog.addAction(button("发起调用", {
+          tone: "primary",
+          onClick: function () {
+            clear(resultHost);
+            resultHost.appendChild(el("p", "status-line info", "正在调用…"));
+            post("/providers/" + enc(provider.name) + "/models/" + enc(model.modelId) + "/try",
+              { thinkingLevel: levelSelect.getValue() })
+              .then(function (data) {
+                renderTryResult(resultHost, data);
+                tableStatus((data.ok ? "调用成功" : "调用失败") + "，"
+                  + data.latencyMs + " 毫秒。", data.ok ? "ok" : "error");
+                showTryDump(dumpHost, data);
+              }).catch(function (error) {
+                clear(resultHost);
+                resultHost.appendChild(el("p", "status-line error", error.message));
+              });
+          }
+        }));
+      }
+    });
+    return modal;
+  }
+
+  function renderTryResult(host, data) {
+    clear(host);
+    var kv = el("div", "kv-grid");
+    addKv(kv, "结果", data.ok ? "成功" : "失败");
+    addKv(kv, "HTTP", String(data.httpStatus));
+    addKv(kv, "耗时", data.latencyMs + " 毫秒");
+    if (data.message) {
+      addKv(kv, "说明", data.message);
+    }
+    host.appendChild(kv);
+    if (data.content) {
+      host.appendChild(el("p", "field-label", "回复"));
+      var reply = el("pre", "code-block");
+      reply.textContent = data.content;
+      host.appendChild(reply);
+    }
+  }
+
+  function addKv(grid, key, value) {
+    grid.appendChild(el("span", "kv-key", key));
+    grid.appendChild(el("span", "kv-value", value));
+  }
+
+  function showTryDump(host, data) {
+    clear(host);
+    var details = el("div", "section");
+    details.appendChild(el("h3", "section-title", "最近一次测试调用的报文"));
+    details.appendChild(el("p", "field-label", "发给模型的请求"));
+    var req = el("pre", "code-block");
+    req.textContent = data.request || "（空）";
+    details.appendChild(req);
+    details.appendChild(el("p", "field-label", "模型原始响应"));
+    var res = el("pre", "code-block");
+    res.textContent = data.response || "（空）";
+    details.appendChild(res);
+    host.appendChild(details);
+  }
+
+  /* ---------------- 业务与提示词 ---------------- */
 
   function loadBiz() {
     var panel = document.getElementById("biz");
-    panel.textContent = "";
-    Promise.all([api("/biz"), api("/providers")]).then(function (result) {
+    clear(panel);
+    panel.appendChild(el("p", "status-line", "正在读取业务…"));
+    Promise.all([get("/biz"), get("/providers")]).then(function (result) {
       var bizList = result[0];
       var providers = result[1];
+      clear(panel);
+      if (!bizList.length) {
+        panel.appendChild(emptyState("配置文件里还没有业务 id",
+          "在 application.yml 的 ai-lite.llm.biz-ids 里加一行，重启后就会出现在这里。"));
+        return;
+      }
       var ready = [];
       providers.forEach(function (provider) {
         (provider.models || []).forEach(function (model) {
           if (model.ready) {
-            ready.push({ providerId: provider.name, modelId: model.modelId });
+            ready.push({
+              providerId: provider.name,
+              modelId: model.modelId,
+              displayName: model.displayName || model.modelId
+            });
           }
         });
       });
-      if (!bizList.length) {
-        panel.appendChild(el("p", "配置文件里还没有业务 id。"));
-        return;
-      }
       bizList.forEach(function (biz) {
         panel.appendChild(bizCard(biz, ready));
       });
     }).catch(function (error) {
-      panel.appendChild(el("p", error.message));
+      clear(panel);
+      panel.appendChild(emptyState("读取业务失败", error.message,
+        button("重试", { tone: "primary", onClick: loadBiz })));
     });
   }
 
-  function bizCard(biz, ready) {
-    var card = el("section");
-    card.className = "card";
-    var cardBody = el("div");
-    cardBody.className = "card-body";
-    cardBody.appendChild(el("h2", biz.bizId));
-    var bizNote = el("p", biz.promptActive ? "已有生效提示词。" : "还没有生效提示词。");
-    bizNote.className = "note";
-    cardBody.appendChild(bizNote);
+  /** 业务卡片的展开状态。保存绑定后会整页重载，靠它把卡片保持在展开。 */
+  var expandedBiz = {};
 
-    var bindingBlock = el("div");
-    bindingBlock.className = "form-block";
-    var model = el("select");
-    if (!ready.length) {
-      model.appendChild(option("", "还没有可用模型"));
+  function bizCard(biz, ready) {
+    var card = el("section", "card");
+    var header = el("button", "disclosure");
+    header.type = "button";
+    var headMain = el("div", "disclosure-main");
+    headMain.appendChild(el("span", "disclosure-name", biz.bizId));
+    var desc = el("p", "card-desc");
+    desc.textContent = biz.promptActive ? "已有生效提示词。" : "还没有生效提示词。";
+    headMain.appendChild(desc);
+    var headBadges = el("div", "disclosure-meta");
+    headBadges.appendChild(badge(biz.binding
+      ? (biz.binding.providerId + " / " + biz.binding.modelId) : "未绑定模型",
+      biz.binding ? "info" : "off"));
+    if (biz.promptActive) {
+      headBadges.appendChild(badge("提示词已生效", "ready"));
     }
-    ready.forEach(function (item) {
-      var value = item.providerId + "\n" + item.modelId;
-      var optionNode = option(value, item.providerId + " / " + item.modelId);
-      if (biz.binding && biz.binding.providerId === item.providerId && biz.binding.modelId === item.modelId) {
-        optionNode.selected = true;
-      }
-      model.appendChild(optionNode);
+    headMain.appendChild(headBadges);
+    header.appendChild(headMain);
+    header.appendChild(icon("chevron", "chevron"));
+    card.appendChild(header);
+
+    var body = el("div", "disclosure-body");
+    var open = !!expandedBiz[biz.bizId];
+    body.hidden = !open;
+    header.setAttribute("aria-expanded", open ? "true" : "false");
+    header.addEventListener("click", function () {
+      var next = body.hidden;
+      body.hidden = !next;
+      expandedBiz[biz.bizId] = next;
+      header.setAttribute("aria-expanded", next ? "true" : "false");
     });
-    var level = el("select");
-    ["off", "minimal", "low", "medium", "high", "xhigh", "max"].forEach(function (value) {
-      var optionNode = option(value, value);
-      if (biz.binding && biz.binding.thinkingLevel === value) {
-        optionNode.selected = true;
-      }
-      level.appendChild(optionNode);
+    card.appendChild(body);
+
+    var content = el("div");
+    content.style.display = "flex";
+    content.style.flexDirection = "column";
+    content.style.gap = "18px";
+    content.appendChild(bindingSection(biz, ready, desc));
+    content.appendChild(promptSection(biz));
+    body.appendChild(content);
+    return card;
+  }
+
+  function bindingSection(biz, ready, bizNote) {
+    var section = el("div", "section");
+    section.appendChild(el("h3", "section-title", "模型绑定"));
+
+    var options = ready.map(function (item) {
+      return {
+        id: item.providerId + "\n" + item.modelId,
+        label: item.displayName,
+        desc: item.providerId + " · " + item.modelId
+      };
     });
-    var grid = el("div");
-    grid.className = "grid";
-    grid.appendChild(field("模型", model));
-    grid.appendChild(field("思考档", level));
-    bindingBlock.appendChild(grid);
-    var bindActions = el("div");
-    bindActions.className = "actions";
-    var saveBinding = button("保存模型", true);
-    var clearBinding = button("清除绑定", false);
-    bindActions.appendChild(saveBinding);
-    bindActions.appendChild(clearBinding);
-    bindingBlock.appendChild(bindActions);
-    cardBody.appendChild(bindingBlock);
-    var bindStatus = status(bindingBlock);
-    saveBinding.addEventListener("click", function () {
-      var parts = model.value.split("\n");
-      put("/biz/" + encodeURIComponent(biz.bizId), {
-        providerId: parts[0],
-        modelId: parts[1],
-        thinkingLevel: level.value
-      }).then(function () {
-        bindStatus("模型绑定已保存。", true);
-      }).catch(function (error) {
-        bindStatus(error.message, false);
-      });
-    });
-    clearBinding.addEventListener("click", function () {
-      if (!window.confirm("清除 " + biz.bizId + " 的模型绑定？")) {
+    var currentKey = biz.binding
+      ? biz.binding.providerId + "\n" + biz.binding.modelId : null;
+    var modelSelect = select(options, currentKey, function () {});
+    var levelSelect = select(THINKING_LEVELS.map(function (level) {
+      return { id: level, label: level };
+    }), biz.binding ? biz.binding.thinkingLevel : "off", function () {});
+
+    var grid = el("div", "form-grid");
+    grid.appendChild(field("模型", modelSelect, ready.length
+      ? "只列出已就绪的模型。" : "还没有已就绪的模型，先去供应商页启用一个。"));
+    grid.appendChild(field("思考档", levelSelect));
+    section.appendChild(grid);
+
+    var actions = el("div", "actions");
+    var save = button("保存绑定", { tone: "primary" });
+    var clearBind = button("清除绑定", {});
+    actions.appendChild(save);
+    actions.appendChild(clearBind);
+    section.appendChild(actions);
+    var report = statusLine(section);
+
+    save.addEventListener("click", function () {
+      var key = modelSelect.getValue();
+      if (!key) {
+        report("请选择一个已就绪的模型。", "error");
         return;
       }
-      del("/biz/" + encodeURIComponent(biz.bizId) + "/binding")
-        .then(function () {
-          loadBiz();
-        }).catch(function (error) {
-          bindStatus(error.message, false);
-        });
+      var parts = key.split("\n");
+      save.disabled = true;
+      report("正在保存…", "info");
+      put("/biz/" + enc(biz.bizId), {
+        providerId: parts[0],
+        modelId: parts[1],
+        thinkingLevel: levelSelect.getValue()
+      }).then(function () {
+        save.disabled = false;
+        report("模型绑定已保存，下一次调用就会使用它。", "ok");
+        toast("绑定已保存。", "ok");
+        bizNote.textContent = biz.promptActive ? "已有生效提示词。" : "还没有生效提示词。";
+        loadBiz();
+      }).catch(function (error) {
+        save.disabled = false;
+        report(error.message, "error");
+      });
     });
 
-    var promptBlock = el("div");
-    promptBlock.className = "form-block";
-    var system = el("textarea");
-    var user = el("textarea");
-    var outputSchema = el("textarea");
-    outputSchema.placeholder = "可选，结构化输出 JSON Schema";
-    var previewVars = el("textarea");
-    previewVars.value = "{}";
-    previewVars.className = "vars-json";
-    promptBlock.appendChild(field("系统模板", system));
-    promptBlock.appendChild(field("用户模板", user));
-    promptBlock.appendChild(field("outputSchema", outputSchema));
-    promptBlock.appendChild(field("预览变量（JSON）", previewVars));
-    var promptActions = el("div");
-    promptActions.className = "actions";
-    var saveDraft = button("保存草稿", false);
-    var saveNewDraft = button("另存新草稿", false);
-    var previewBtn = button("预览", false);
-    var publish = button("发布", true);
-    promptActions.appendChild(saveDraft);
-    promptActions.appendChild(saveNewDraft);
-    promptActions.appendChild(previewBtn);
-    promptActions.appendChild(publish);
-    promptBlock.appendChild(promptActions);
-    var previewResult = el("pre", "");
-    previewResult.className = "log-text preview-result";
-    previewResult.hidden = true;
-    promptBlock.appendChild(previewResult);
-    cardBody.appendChild(promptBlock);
-    var promptStatus = status(promptBlock);
-    var draftId = "";
+    clearBind.addEventListener("click", function () {
+      confirmDialog({
+        title: "清除绑定",
+        message: "清除 " + biz.bizId + " 的模型绑定？业务 id 仍留在白名单，但这个业务将无法解析到模型。",
+        confirmText: "清除",
+        danger: true
+      }).then(function (ok) {
+        if (!ok) {
+          return;
+        }
+        del("/biz/" + enc(biz.bizId) + "/binding").then(function () {
+          toast("绑定已清除。", "ok");
+          loadBiz();
+        }).catch(function (error) {
+          report(error.message, "error");
+        });
+      });
+    });
 
-    function parsePreviewVars(text) {
-      var raw = (text || "").trim();
-      if (!raw) {
-        return {};
-      }
+    return section;
+  }
+
+  function promptSection(biz) {
+    var section = el("div", "section");
+    section.appendChild(el("h3", "section-title", "提示词"));
+
+    var system = textArea("", { tall: true, placeholder: "系统模板，支持 {{变量}} 占位符" });
+    var user = textArea("", { placeholder: "用户模板，支持 {{变量}} 占位符" });
+    var outputSchema = textArea("", {
+      mono: true, placeholder: "可选。结构化输出的 JSON Schema"
+    });
+    section.appendChild(field("系统模板", system));
+    section.appendChild(field("用户模板", user));
+    section.appendChild(field("outputSchema", outputSchema));
+
+    var vars = textArea("{}", { mono: true, placeholder: "预览变量，JSON 对象" });
+    vars.rows = 3;
+    section.appendChild(field("预览变量（JSON）", vars, "只用于本地预览，不会保存。"));
+
+    var actions = el("div", "actions");
+    var saveDraft = button("保存草稿", {});
+    var saveAsNew = button("另存为新草稿", {});
+    var preview = button("预览", {});
+    var publish = button("发布", { tone: "primary" });
+    actions.appendChild(saveDraft);
+    actions.appendChild(saveAsNew);
+    actions.appendChild(preview);
+    actions.appendChild(publish);
+    section.appendChild(actions);
+
+    var report = statusLine(section);
+    var previewHost = el("div");
+    section.appendChild(previewHost);
+
+    var draftId = "";
+    var historyTable = el("table", "table");
+    var historyWrap = el("div", "table-wrap");
+    historyWrap.appendChild(historyTable);
+    var historyHost = el("div", "section");
+    historyHost.appendChild(el("h3", "section-title", "版本记录"));
+    historyHost.appendChild(el("p", "card-desc",
+      "可把历史内容载入编辑区。草稿可以直接发布，已退役的版本可以回滚为生效。"));
+    historyHost.appendChild(historyWrap);
+    section.appendChild(historyHost);
+
+    var auditTable = el("table", "table");
+    var auditWrap = el("div", "table-wrap");
+    auditWrap.appendChild(auditTable);
+    var auditHost = el("div", "section");
+    auditHost.appendChild(el("h3", "section-title", "审计"));
+    auditHost.appendChild(auditWrap);
+    section.appendChild(auditHost);
+
+    function statusLabel(value) {
+      if (value === "published") { return "生效"; }
+      if (value === "retired") { return "已退役"; }
+      if (value === "draft") { return "草稿"; }
+      return value || "";
+    }
+
+    function statusTone(value) {
+      if (value === "published") { return "ready"; }
+      if (value === "draft") { return "warn"; }
+      return "off";
+    }
+
+    function formatTime(ms) {
+      if (ms == null) { return ""; }
+      var date = new Date(Number(ms));
+      if (isNaN(date.getTime())) { return ""; }
+      function pad(n) { return n < 10 ? "0" + n : String(n); }
+      return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
+        + " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
+    }
+
+    function parseVars() {
+      var raw = (vars.value || "").trim();
+      if (!raw) { return {}; }
       var parsed = JSON.parse(raw);
       if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("预览变量须为 JSON 对象");
@@ -603,159 +1587,129 @@
     }
 
     function draftBody(withVersionId) {
-      var body = {
+      var payload = {
         systemTemplate: system.value,
         userTemplate: user.value,
         outputSchema: outputSchema.value
       };
       if (withVersionId && draftId) {
-        body.versionId = draftId;
+        payload.versionId = draftId;
       }
-      return body;
-    }
-
-    var historyBlock = el("div");
-    historyBlock.className = "form-block";
-    historyBlock.appendChild(el("h3", "版本记录"));
-    var historyNote = el("p", "可载入历史内容到上方编辑，或把已退役版本回滚为生效。");
-    historyNote.className = "note";
-    historyBlock.appendChild(historyNote);
-    var historyTable = el("table");
-    var historyWrap = el("div");
-    historyWrap.className = "table-wrap";
-    historyWrap.appendChild(historyTable);
-    historyBlock.appendChild(historyWrap);
-    cardBody.appendChild(historyBlock);
-    var historyStatus = status(historyBlock);
-
-    var auditBlock = el("div");
-    auditBlock.className = "form-block";
-    auditBlock.appendChild(el("h3", "审计"));
-    var auditTable = el("table");
-    var auditWrap = el("div");
-    auditWrap.className = "table-wrap";
-    auditWrap.appendChild(auditTable);
-    auditBlock.appendChild(auditWrap);
-    cardBody.appendChild(auditBlock);
-    var auditStatus = status(auditBlock);
-
-    function statusLabel(value) {
-      if (value === "published") {
-        return "生效";
-      }
-      if (value === "retired") {
-        return "已退役";
-      }
-      if (value === "draft") {
-        return "草稿";
-      }
-      return value || "";
-    }
-
-    function formatTime(ms) {
-      if (ms == null) {
-        return "";
-      }
-      var date = new Date(Number(ms));
-      if (isNaN(date.getTime())) {
-        return "";
-      }
-      function pad(n) {
-        return n < 10 ? "0" + n : String(n);
-      }
-      return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
-        + " " + pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+      return payload;
     }
 
     function renderVersions(versions) {
-      historyTable.textContent = "";
-      historyTable.appendChild(row("th", ["版本", "状态", "创建时间", "操作人", ""]));
+      clear(historyTable);
+      var thead = el("thead");
+      thead.appendChild(headerRow(["版本", "状态", "创建时间", "操作人", "操作"]));
+      historyTable.appendChild(thead);
+      var tbody = el("tbody");
+      historyTable.appendChild(tbody);
       if (!versions || !versions.length) {
-        historyStatus("还没有版本记录。", true);
+        var row = el("tr");
+        var cell = el("td", null, "还没有版本记录。");
+        cell.colSpan = 5;
+        cell.className = "muted cell-empty";
+        row.appendChild(cell);
+        tbody.appendChild(row);
         return;
       }
-      historyStatus("", true);
       versions.forEach(function (item) {
-        var line = el("tr");
-        ["v" + item.versionNo, statusLabel(item.status), formatTime(item.createTime),
-          item.createdBy || ""].forEach(function (value) {
-          line.appendChild(el("td", value));
-        });
-        var actionsCell = el("td");
-        actionsCell.className = "cell-actions";
-        var rowActions = el("div");
-        rowActions.className = "row-actions";
-        var load = button("载入", false);
-        rowActions.appendChild(load);
-        load.addEventListener("click", function () {
-          system.value = item.systemTemplate || "";
-          user.value = item.userTemplate || "";
-          outputSchema.value = item.outputSchema || "";
-          if (item.status === "draft") {
-            draftId = item.versionId;
-            promptStatus("已载入草稿 v" + item.versionNo + "，可继续编辑或发布。", true);
-          } else {
-            draftId = "";
-            promptStatus("已载入 v" + item.versionNo + " 的内容到编辑区。要改的话请先保存为新草稿。", true);
-          }
-        });
-        if (item.status === "draft") {
-          var publishOne = button("发布", true);
-          rowActions.appendChild(publishOne);
-          publishOne.addEventListener("click", function () {
-            post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/publish",
-              { versionId: item.versionId })
-              .then(function () {
-                draftId = "";
-                promptStatus("已发布 v" + item.versionNo + "。", true);
-                return reloadPrompt();
-              }).catch(function (error) {
-                promptStatus(error.message, false);
-              });
-          });
-        } else if (item.status === "retired") {
-          var rollback = button("回滚生效", false);
-          rowActions.appendChild(rollback);
-          rollback.addEventListener("click", function () {
-            if (!window.confirm("把 v" + item.versionNo + " 重新设为生效？")) {
-              return;
+        var row = el("tr");
+        row.appendChild(el("td", "mono-text", "v" + item.versionNo));
+        var statusCell = el("td");
+        statusCell.appendChild(badge(statusLabel(item.status), statusTone(item.status)));
+        row.appendChild(statusCell);
+        row.appendChild(el("td", null, formatTime(item.createTime)));
+        row.appendChild(el("td", null, item.createdBy || "—"));
+        var actionsCell = el("td", "cell-actions");
+        var rowActions = el("div", "row-actions");
+        rowActions.appendChild(button("载入", {
+          size: "sm",
+          onClick: function () {
+            system.value = item.systemTemplate || "";
+            user.value = item.userTemplate || "";
+            outputSchema.value = item.outputSchema || "";
+            if (item.status === "draft") {
+              draftId = item.versionId;
+              report("已载入草稿 v" + item.versionNo + "，可继续编辑或发布。", "info");
+            } else {
+              draftId = "";
+              report("已载入 v" + item.versionNo + " 的内容。要修改请先保存为新草稿。", "info");
             }
-            post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/rollback",
-              { versionId: item.versionId })
-              .then(function () {
-                promptStatus("已回滚到 v" + item.versionNo + "。", true);
-                return reloadPrompt();
-              }).catch(function (error) {
-                promptStatus(error.message, false);
+          }
+        }));
+        if (item.status === "draft") {
+          rowActions.appendChild(button("发布", {
+            size: "sm", tone: "primary",
+            onClick: function () {
+              post("/biz/" + enc(biz.bizId) + "/prompt/publish", { versionId: item.versionId })
+                .then(function () {
+                  draftId = "";
+                  report("已发布 v" + item.versionNo + "。", "ok");
+                  toast("提示词已发布。", "ok");
+                  return reload();
+                }).catch(function (error) {
+                  report(error.message, "error");
+                });
+            }
+          }));
+        } else if (item.status === "retired") {
+          rowActions.appendChild(button("回滚生效", {
+            size: "sm",
+            onClick: function () {
+              confirmDialog({
+                title: "回滚提示词",
+                message: "把 v" + item.versionNo + " 重新设为生效？当前生效的版本会退役。",
+                confirmText: "回滚"
+              }).then(function (ok) {
+                if (!ok) { return; }
+                post("/biz/" + enc(biz.bizId) + "/prompt/rollback", { versionId: item.versionId })
+                  .then(function () {
+                    report("已回滚到 v" + item.versionNo + "。", "ok");
+                    toast("已回滚。", "ok");
+                    return reload();
+                  }).catch(function (error) {
+                    report(error.message, "error");
+                  });
               });
-          });
+            }
+          }));
         }
         actionsCell.appendChild(rowActions);
-        line.appendChild(actionsCell);
-        historyTable.appendChild(line);
+        row.appendChild(actionsCell);
+        tbody.appendChild(row);
       });
     }
 
     function renderAudits(audits) {
-      auditTable.textContent = "";
-      auditTable.appendChild(row("th", ["操作", "详情", "操作人", "时间"]));
+      clear(auditTable);
+      var thead = el("thead");
+      thead.appendChild(headerRow(["操作", "详情", "操作人", "时间"]));
+      auditTable.appendChild(thead);
+      var tbody = el("tbody");
+      auditTable.appendChild(tbody);
       if (!audits || !audits.length) {
-        auditStatus("还没有审计记录。", true);
+        var row = el("tr");
+        var cell = el("td", null, "还没有审计记录。");
+        cell.colSpan = 4;
+        cell.className = "muted cell-empty";
+        row.appendChild(cell);
+        tbody.appendChild(row);
         return;
       }
-      auditStatus("", true);
       audits.forEach(function (item) {
-        var line = el("tr");
-        [item.action || "", item.detail || "", item.actor || "",
-          formatTime(item.createTime)].forEach(function (value) {
-          line.appendChild(el("td", value));
-        });
-        auditTable.appendChild(line);
+        var row = el("tr");
+        row.appendChild(el("td", null, item.action || ""));
+        row.appendChild(el("td", null, item.detail || ""));
+        row.appendChild(el("td", null, item.actor || ""));
+        row.appendChild(el("td", null, formatTime(item.createTime)));
+        tbody.appendChild(row);
       });
     }
 
-    function reloadPrompt() {
-      return api("/biz/" + encodeURIComponent(biz.bizId) + "/prompt").then(function (prompt) {
+    function reload() {
+      return get("/biz/" + enc(biz.bizId) + "/prompt").then(function (prompt) {
         var source = prompt.draft || prompt.active;
         if (source) {
           system.value = source.systemTemplate || "";
@@ -765,296 +1719,333 @@
         draftId = prompt.draft ? prompt.draft.versionId : "";
         renderVersions(prompt.versions || []);
         renderAudits(prompt.audits || []);
-        bizNote.textContent = prompt.active ? "已有生效提示词。" : "还没有生效提示词。";
         return prompt;
       });
     }
 
-    reloadPrompt().catch(function (error) {
-      promptStatus(error.message, false);
+    reload().catch(function (error) {
+      report(error.message, "error");
     });
 
     saveDraft.addEventListener("click", function () {
-      post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/draft", draftBody(true))
+      saveDraft.disabled = true;
+      post("/biz/" + enc(biz.bizId) + "/prompt/draft", draftBody(true))
         .then(function (draft) {
+          saveDraft.disabled = false;
           draftId = draft.versionId;
-          promptStatus("草稿已保存，尚未生效。", true);
-          return reloadPrompt();
+          report("草稿已保存，尚未生效。", "ok");
+          toast("草稿已保存。", "ok");
+          return reload();
         }).catch(function (error) {
-          promptStatus(error.message, false);
-        });
-    });
-    saveNewDraft.addEventListener("click", function () {
-      post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/draft", draftBody(false))
-        .then(function (draft) {
-          draftId = draft.versionId;
-          promptStatus("已另存为新草稿。", true);
-          return reloadPrompt();
-        }).catch(function (error) {
-          promptStatus(error.message, false);
-        });
-    });
-    previewBtn.addEventListener("click", function () {
-      var vars;
-      try {
-        vars = parsePreviewVars(previewVars.value);
-      } catch (error) {
-        var msg = error instanceof SyntaxError ? "预览变量 JSON 格式无效" : error.message;
-        promptStatus(msg, false);
-        return;
-      }
-      post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/preview", {
-        systemTemplate: system.value,
-        userTemplate: user.value,
-        vars: vars
-      }).then(function (data) {
-        previewResult.hidden = false;
-        previewResult.textContent = "系统\n" + (data.system || "") + "\n\n用户\n" + (data.user || "");
-        promptStatus("预览已生成（见下方）。", true);
-      }).catch(function (error) {
-        promptStatus(error.message, false);
-      });
-    });
-    publish.addEventListener("click", function () {
-      if (!draftId) {
-        promptStatus("先保存草稿，再发布。", false);
-        return;
-      }
-      post("/biz/" + encodeURIComponent(biz.bizId) + "/prompt/publish", { versionId: draftId })
-        .then(function () {
-          draftId = "";
-          promptStatus("已发布，业务渲染会读到这份模板。", true);
-          return reloadPrompt();
-        }).catch(function (error) {
-          promptStatus(error.message, false);
+          saveDraft.disabled = false;
+          report(error.message, "error");
         });
     });
 
-    card.appendChild(cardBody);
-    return card;
+    saveAsNew.addEventListener("click", function () {
+      saveAsNew.disabled = true;
+      post("/biz/" + enc(biz.bizId) + "/prompt/draft", draftBody(false))
+        .then(function (draft) {
+          saveAsNew.disabled = false;
+          draftId = draft.versionId;
+          report("已另存为新草稿。", "ok");
+          toast("新草稿已创建。", "ok");
+          return reload();
+        }).catch(function (error) {
+          saveAsNew.disabled = false;
+          report(error.message, "error");
+        });
+    });
+
+    preview.addEventListener("click", function () {
+      var varsValue;
+      try {
+        varsValue = parseVars();
+      } catch (error) {
+        report(error instanceof SyntaxError ? "预览变量 JSON 格式无效" : error.message, "error");
+        return;
+      }
+      post("/biz/" + enc(biz.bizId) + "/prompt/preview", {
+        systemTemplate: system.value,
+        userTemplate: user.value,
+        vars: varsValue
+      }).then(function (data) {
+        clear(previewHost);
+        var wrap = el("div", "section");
+        wrap.appendChild(el("p", "field-label", "系统消息"));
+        var systemPre = el("pre", "code-block", data.system || "（空）");
+        wrap.appendChild(systemPre);
+        wrap.appendChild(el("p", "field-label", "用户消息"));
+        var userPre = el("pre", "code-block", data.user || "（空）");
+        wrap.appendChild(userPre);
+        previewHost.appendChild(wrap);
+        report("预览已生成，见下方。", "ok");
+      }).catch(function (error) {
+        report(error.message, "error");
+      });
+    });
+
+    publish.addEventListener("click", function () {
+      if (!draftId) {
+        report("先保存草稿，再发布。", "error");
+        return;
+      }
+      publish.disabled = true;
+      post("/biz/" + enc(biz.bizId) + "/prompt/publish", { versionId: draftId })
+        .then(function () {
+          publish.disabled = false;
+          draftId = "";
+          report("已发布，业务渲染会读到这份模板。", "ok");
+          toast("提示词已发布。", "ok");
+          return reload();
+        }).catch(function (error) {
+          publish.disabled = false;
+          report(error.message, "error");
+        });
+    });
+
+    return section;
   }
+
+  /* ---------------- 调用日志 ---------------- */
 
   function loadCalls() {
     var panel = document.getElementById("calls");
-    panel.textContent = "";
-    var card = el("section");
-    card.className = "card";
-    var cardBody = el("div");
-    cardBody.className = "card-body";
-    cardBody.appendChild(el("h2", "调用日志"));
-    var callsNote = el("p", "只显示摘要。输入输出是否保存，由下面的记录方式决定。");
-    callsNote.className = "note";
-    cardBody.appendChild(callsNote);
-    var levelRow = el("div");
-    levelRow.className = "filters";
-    var level = el("select");
-    var saveLevel = button("保存记录方式", false);
-    levelRow.appendChild(level);
-    levelRow.appendChild(saveLevel);
-    cardBody.appendChild(levelRow);
-    var levelStatus = status(cardBody);
-    api("/calls/body-level").then(function (data) {
-      (data.options || []).forEach(function (item) {
-        level.appendChild(option(item.id, item.label));
-      });
-      level.value = data.level;
+    clear(panel);
+
+    /*
+     * 记录方式只是一行设置，不值得占一张卡片。压成一条工具栏：
+     * 标签 + 下拉 + 保存 + 状态，全部同一行。档位解释放在下拉选项的副标题里。
+     */
+    var levelBar = el("div", "level-bar");
+    levelBar.appendChild(el("span", "level-label", "记录方式"));
+    var levelSelect = select([
+      { id: "none", label: "不记输入输出", desc: "只保留调用摘要" },
+      { id: "failure", label: "只记失败调用", desc: "成功调用只记摘要，失败调用另存输入输出" },
+      { id: "all", label: "所有调用都记录", desc: "每次调用都保存消息和回复，不含密钥和图片原文" }
+    ], "none", null);
+    levelBar.appendChild(levelSelect);
+    var saveLevel = button("保存", {});
+    levelBar.appendChild(saveLevel);
+    var levelStatus = el("span", "level-status");
+    levelBar.appendChild(levelStatus);
+    panel.appendChild(levelBar);
+
+    get("/calls/body-level").then(function (data) {
+      levelSelect.setValue(data.level);
     }).catch(function (error) {
-      levelStatus(error.message, false);
+      levelStatus.textContent = error.message;
+      levelStatus.className = "level-status error";
     });
+
     saveLevel.addEventListener("click", function () {
-      put("/calls/body-level", { level: level.value }).then(function () {
-        levelStatus("记录方式已保存，之后的调用按这个档位写。", true);
-      }).catch(function (error) {
-        levelStatus(error.message, false);
-      });
+      saveLevel.disabled = true;
+      put("/calls/body-level", { level: levelSelect.getValue() })
+        .then(function () {
+          saveLevel.disabled = false;
+          levelStatus.textContent = "已保存";
+          levelStatus.className = "level-status ok";
+          toast("记录方式已保存。", "ok");
+        }).catch(function (error) {
+          saveLevel.disabled = false;
+          levelStatus.textContent = error.message;
+          levelStatus.className = "level-status error";
+        });
     });
-    var filters = el("div");
-    filters.className = "filters";
-    var bizId = input("text", "");
-    bizId.placeholder = "业务 id";
-    var provider = input("text", "");
-    provider.placeholder = "供应商";
-    var modelIdFilter = input("text", "");
-    modelIdFilter.placeholder = "模型 id";
-    var successFilter = el("select");
-    successFilter.appendChild(option("", "全部"));
-    successFilter.appendChild(option("true", "成功"));
-    successFilter.appendChild(option("false", "失败"));
-    var limit = input("number", "50");
-    var query = button("查询", true);
-    filters.appendChild(bizId);
-    filters.appendChild(provider);
-    filters.appendChild(modelIdFilter);
-    filters.appendChild(successFilter);
-    filters.appendChild(limit);
-    filters.appendChild(query);
-    cardBody.appendChild(filters);
-    var pager = el("div");
-    pager.className = "actions pager";
-    var prevPage = button("上一页", false);
-    var nextPage = button("下一页", false);
-    var pageInfo = el("span", "");
-    pageInfo.className = "page-info";
+
+    var listCard = el("section", "card");
+    var listBody = el("div", "card-body");
+    listBody.style.display = "flex";
+    listBody.style.flexDirection = "column";
+    listBody.style.gap = "14px";
+    listBody.appendChild(el("h2", "card-title", "调用记录"));
+    listCard.appendChild(listBody);
+    panel.appendChild(listCard);
+
+    var bizFilter = textInput("", { placeholder: "业务 id" });
+    var providerFilter = textInput("", { placeholder: "供应商" });
+    var modelFilter = textInput("", { placeholder: "模型 id" });
+    var successFilter = select([
+      { id: "", label: "全部结果" },
+      { id: "true", label: "成功" },
+      { id: "false", label: "失败" }
+    ], "", function () {});
+    var limitFilter = textInput("50", { type: "number", min: 1 });
+    var filters = el("div", "filters");
+    filters.appendChild(field("业务 id", bizFilter));
+    filters.appendChild(field("供应商", providerFilter));
+    filters.appendChild(field("模型 id", modelFilter));
+    filters.appendChild(field("结果", successFilter));
+    filters.appendChild(field("每页条数", limitFilter));
+    listBody.appendChild(filters);
+
+    var toolbar = el("div", "pager");
+    var query = button("查询", { tone: "primary" });
+    var pager = el("div", "actions");
+    var prevPage = button("上一页", { size: "sm" });
+    var nextPage = button("下一页", { size: "sm" });
+    var pageInfo = el("span", "page-info", "");
     pager.appendChild(prevPage);
     pager.appendChild(pageInfo);
     pager.appendChild(nextPage);
-    cardBody.appendChild(pager);
-    var report = status(cardBody);
-    var table = el("table");
-    var tableWrap = el("div");
-    tableWrap.className = "table-wrap";
+    toolbar.appendChild(query);
+    toolbar.appendChild(pager);
+    listBody.appendChild(toolbar);
+
+    var report = statusLine(listBody);
+    var tableWrap = el("div", "table-wrap");
+    var table = el("table", "table");
     tableWrap.appendChild(table);
-    cardBody.appendChild(tableWrap);
-    card.appendChild(cardBody);
-    panel.appendChild(card);
+    listBody.appendChild(tableWrap);
 
     var offset = 0;
-    var pageMeta = { total: 0, limit: 50, offset: 0 };
+    var meta = { total: 0, limit: 50, offset: 0 };
+
+    function pageLimit() {
+      var value = Number(limitFilter.value || 50);
+      if (!isFinite(value) || value < 1) {
+        return 50;
+      }
+      return Math.min(200, Math.floor(value));
+    }
 
     function updatePager() {
-      var lim = pageMeta.limit || Number(limit.value || 50);
-      if (pageMeta.total === 0) {
+      var limit = meta.limit || pageLimit();
+      if (!meta.total) {
         pageInfo.textContent = "共 0 条";
       } else {
-        var from = pageMeta.offset + 1;
-        var to = Math.min(pageMeta.offset + lim, pageMeta.total);
-        pageInfo.textContent = "第 " + from + "–" + to + " 条，共 " + pageMeta.total + " 条";
+        pageInfo.textContent = "第 " + (meta.offset + 1) + "–"
+          + Math.min(meta.offset + limit, meta.total) + " 条，共 " + meta.total + " 条";
       }
-      prevPage.disabled = pageMeta.offset <= 0;
-      nextPage.disabled = pageMeta.offset + lim >= pageMeta.total;
+      prevPage.disabled = meta.offset <= 0;
+      nextPage.disabled = meta.offset + limit >= meta.total;
+    }
+
+    function renderTable(rows) {
+      clear(table);
+      var thead = el("thead");
+      thead.appendChild(headerRow(["时间", "业务", "供应商", "模型", "思考档", "token",
+        "结果", "耗时", "操作"]));
+      table.appendChild(thead);
+      var tbody = el("tbody");
+      table.appendChild(tbody);
+      if (!rows.length) {
+        var row = el("tr");
+        var cell = el("td", null, "没有符合条件的记录。");
+        cell.colSpan = 9;
+        cell.className = "muted cell-empty";
+        row.appendChild(cell);
+        tbody.appendChild(row);
+        return;
+      }
+      rows.forEach(function (item) {
+        var row = el("tr");
+        row.appendChild(el("td", null, item.CREATE_TIME || "—"));
+        row.appendChild(el("td", null, item.BIZ_ID || "—"));
+        row.appendChild(el("td", null, item.PROVIDER || "—"));
+        row.appendChild(el("td", "mono-text", item.MODEL_ID || "—"));
+        row.appendChild(el("td", "mono-text", item.THINKING_LEVEL || "—"));
+        row.appendChild(el("td", null,
+          item.TOTAL_TOKENS == null ? "—" : String(item.TOTAL_TOKENS)));
+        var ok = item.SUCCESS === 1 || item.SUCCESS === true;
+        var resultCell = el("td");
+        resultCell.appendChild(badge(ok ? "成功" : "失败", ok ? "ready" : "danger"));
+        row.appendChild(resultCell);
+        row.appendChild(el("td", null,
+          item.LATENCY_MS == null ? "—" : item.LATENCY_MS + " ms"));
+        var actionCell = el("td", "cell-actions");
+        actionCell.appendChild(button("详情", {
+          size: "sm",
+          onClick: function () { openCallDetail(item.CALL_ID); }
+        }));
+        row.appendChild(actionCell);
+        tbody.appendChild(row);
+      });
     }
 
     function run() {
-      var lim = Number(limit.value || 50);
-      if (lim < 1) {
-        lim = 50;
-      }
-      var path = "/calls?limit=" + encodeURIComponent(String(lim))
-        + "&offset=" + encodeURIComponent(String(offset));
-      if (bizId.value) {
-        path += "&bizId=" + encodeURIComponent(bizId.value);
-      }
-      if (provider.value) {
-        path += "&provider=" + encodeURIComponent(provider.value);
-      }
-      if (modelIdFilter.value) {
-        path += "&modelId=" + encodeURIComponent(modelIdFilter.value);
-      }
-      if (successFilter.value) {
-        path += "&success=" + encodeURIComponent(successFilter.value);
-      }
-      api(path).then(function (page) {
-        pageMeta = {
+      query.disabled = true;
+      var limit = pageLimit();
+      var path = "/calls?limit=" + enc(String(limit)) + "&offset=" + enc(String(offset));
+      if (bizFilter.value) { path += "&bizId=" + enc(bizFilter.value); }
+      if (providerFilter.value) { path += "&provider=" + enc(providerFilter.value); }
+      if (modelFilter.value) { path += "&modelId=" + enc(modelFilter.value); }
+      if (successFilter.getValue()) { path += "&success=" + enc(successFilter.getValue()); }
+      get(path).then(function (page) {
+        query.disabled = false;
+        meta = {
           total: page.total == null ? 0 : Number(page.total),
-          limit: page.limit == null ? lim : Number(page.limit),
+          limit: page.limit == null ? limit : Number(page.limit),
           offset: page.offset == null ? offset : Number(page.offset)
         };
-        offset = pageMeta.offset;
+        offset = meta.offset;
         updatePager();
-        var rows = page.items || [];
-        table.textContent = "";
-        table.appendChild(row("th", ["CALL_ID", "时间", "业务", "供应商", "模型", "思考档",
-          "token", "结果", "耗时", "摘要", "输入输出"]));
-        if (!rows.length) {
-          report("没有记录。", true);
-          return;
-        }
-        report("", true);
-        rows.forEach(function (item) {
-          var line = el("tr");
-          var idCell = el("td");
-          var idBtn = button(item.CALL_ID || "", false);
-          idBtn.className = "btn call-id";
-          (function (callId) {
-            idBtn.addEventListener("click", function () {
-              openCallDetail(callId);
-            });
-          })(item.CALL_ID || "");
-          idCell.appendChild(idBtn);
-          line.appendChild(idCell);
-          [item.CREATE_TIME || "", item.BIZ_ID || "", item.PROVIDER || "", item.MODEL_ID || "",
-            item.THINKING_LEVEL || "",
-            item.TOTAL_TOKENS == null ? "" : String(item.TOTAL_TOKENS),
-            item.SUCCESS === 1 || item.SUCCESS === true ? "成功" : "失败",
-            item.LATENCY_MS == null ? "" : String(item.LATENCY_MS),
-            item.ERROR_BRIEF || item.STOP_REASON || ""].forEach(function (value) {
-            line.appendChild(el("td", value));
-          });
-          var bodyCell = el("td");
-          if (item.INPUT_TEXT || item.OUTPUT_TEXT) {
-            var more = el("details");
-            more.className = "log-details";
-            more.appendChild(el("summary", "查看"));
-            var pre = el("pre");
-            pre.className = "log-text";
-            pre.textContent = "输入\n" + (item.INPUT_TEXT || "") + "\n\n输出\n" + (item.OUTPUT_TEXT || "");
-            more.appendChild(pre);
-            bodyCell.appendChild(more);
-          }
-          line.appendChild(bodyCell);
-          table.appendChild(line);
-        });
+        renderTable(page.items || []);
+        report("", "info");
       }).catch(function (error) {
-        report(error.message, false);
+        query.disabled = false;
+        clear(table);
+        report(error.message, "error");
       });
     }
+
     query.addEventListener("click", function () {
       offset = 0;
       run();
     });
     prevPage.addEventListener("click", function () {
-      var lim = Number(limit.value || 50);
-      if (lim < 1) {
-        lim = 50;
-      }
-      offset = Math.max(0, offset - lim);
+      offset = Math.max(0, offset - pageLimit());
       run();
     });
     nextPage.addEventListener("click", function () {
-      var lim = Number(limit.value || 50);
-      if (lim < 1) {
-        lim = 50;
-      }
-      if (offset + lim < pageMeta.total) {
-        offset += lim;
+      if (offset + pageLimit() < meta.total) {
+        offset += pageLimit();
         run();
       }
     });
+
     run();
   }
 
-  function input(type, value) {
-    var node = el("input");
-    node.type = type;
-    node.value = value == null ? "" : String(value);
-    return node;
-  }
-
-  function button(text, primary) {
-    var node = el("button", text);
-    node.type = "button";
-    node.className = "btn";
-    if (primary) {
-      node.classList.add("primary");
-    }
-    return node;
-  }
-
-  function option(value, text) {
-    var node = el("option", text);
-    node.value = value;
-    return node;
-  }
-
-  function row(cell, values) {
-    var node = el("tr");
-    values.forEach(function (value) {
-      node.appendChild(el(cell, value));
+  function openCallDetail(callId) {
+    var body = el("div", "section");
+    get("/calls/" + enc(callId)).then(function (item) {
+      var kv = el("div", "kv-grid");
+      addKv(kv, "CALL_ID", item.CALL_ID || callId);
+      addKv(kv, "业务", item.BIZ_ID || "—");
+      addKv(kv, "供应商", item.PROVIDER || "—");
+      addKv(kv, "模型", item.MODEL_ID || "—");
+      addKv(kv, "思考档", item.THINKING_LEVEL || "—");
+      addKv(kv, "token", item.TOTAL_TOKENS == null ? "—" : String(item.TOTAL_TOKENS));
+      addKv(kv, "结果", (item.SUCCESS === 1 || item.SUCCESS === true) ? "成功" : "失败");
+      addKv(kv, "耗时", item.LATENCY_MS == null ? "—" : item.LATENCY_MS + " ms");
+      addKv(kv, "摘要", item.ERROR_BRIEF || item.STOP_REASON || "—");
+      body.appendChild(kv);
+      if (item.INPUT_TEXT || item.OUTPUT_TEXT) {
+        body.appendChild(el("p", "field-label", "输入"));
+        var input = el("pre", "code-block tall");
+        input.textContent = item.INPUT_TEXT || "（空）";
+        body.appendChild(input);
+        body.appendChild(el("p", "field-label", "输出"));
+        var output = el("pre", "code-block tall");
+        output.textContent = item.OUTPUT_TEXT || "（空）";
+        body.appendChild(output);
+      }
+      openModal({
+        title: "调用详情",
+        desc: callId,
+        wide: true,
+        body: body,
+        onMount: function (dialog) {
+          dialog.addAction(button("关闭", { tone: "primary", onClick: dialog.close }));
+        }
+      });
+    }).catch(function (error) {
+      toast(error.message, "error");
     });
-    return node;
   }
 
-  loadProviders();
-  document.querySelector('[data-tab="biz"]').addEventListener("click", loadBiz);
-  document.querySelector('[data-tab="calls"]').addEventListener("click", loadCalls);
+  /* ---------------- 启动 ---------------- */
+
+  switchTab("providers");
 })();

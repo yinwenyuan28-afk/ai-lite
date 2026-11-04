@@ -1,0 +1,13 @@
+{
+  "name": "ai-lite-admin-ui-frontend",
+  "private": true,
+  "description": "管理页样式构建。产物是 src/main/resources/ai-lite-admin/admin.css，随 jar 发布，运行时不依赖 Node。",
+  "scripts": {
+    "build": "tailwindcss -i ./admin.src.css -o ../src/main/resources/ai-lite-admin/admin.css --minify",
+    "watch": "tailwindcss -i ./admin.src.css -o ../src/main/resources/ai-lite-admin/admin.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
+    "tailwindcss": "^4.1.0"
+  }
+}

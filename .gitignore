@@ -31,5 +31,9 @@ ai-lite-demo/data/*.db-*
 *.log
 logs/
 
+# 管理页样式构建依赖。产物 admin.css 已提交，构建工具本身不入库。
+node_modules/
+package-lock.json
+
 # 内部计划文档，不进入公开仓库
 PLAN.md

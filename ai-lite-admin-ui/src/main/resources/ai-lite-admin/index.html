@@ -6,24 +6,74 @@
   <title>AI Lite 管理</title>
   <link rel="stylesheet" href="/ai-lite/admin/assets/admin.css">
 </head>
-<body class="admin-page">
-<header class="page-header">
-  <h1>AI Lite 管理</h1>
-  <p class="page-desc">这里的修改写入数据库，不改配置文件。</p>
-</header>
-<div class="workspace">
-  <nav class="tabs" role="tablist" aria-label="管理页签">
-    <button type="button" class="tab" data-tab="providers" aria-selected="true">供应商</button>
-    <button type="button" class="tab" data-tab="biz" aria-selected="false">业务与提示词</button>
-    <button type="button" class="tab" data-tab="calls" aria-selected="false">调用日志</button>
-  </nav>
-  <main class="workspace-main">
-    <section id="providers" class="panel active"></section>
-    <section id="biz" class="panel"></section>
-    <section id="calls" class="panel"></section>
-    <dialog id="dialog" class="admin-dialog"></dialog>
-  </main>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">AI</span>
+      <span class="brand-text">
+        <span class="brand-title">AI Lite</span>
+        <span class="brand-sub">管理控制台</span>
+      </span>
+    </div>
+    <div class="nav-group-label">配置</div>
+    <nav role="tablist" aria-label="管理页签" style="display:flex;flex-direction:column;gap:4px;">
+      <button type="button" class="nav-item" role="tab" data-tab="providers" aria-selected="true">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 7h4M4 12h8M4 17h4"/><circle cx="17" cy="7" r="3"/><circle cx="17" cy="17" r="3"/>
+        </svg>
+        供应商与模型
+      </button>
+      <button type="button" class="nav-item" role="tab" data-tab="biz" aria-selected="false">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"/>
+          <path d="M8 9h8M8 13h8M8 17h4"/>
+        </svg>
+        业务与提示词
+      </button>
+      <button type="button" class="nav-item" role="tab" data-tab="calls" aria-selected="false">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 19V5M4 19h16"/><path d="M8 15V11M12 15V7M16 15v-3"/>
+        </svg>
+        调用日志
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      这里的修改写入数据库，不改配置文件。
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div>
+        <h1 class="page-title" id="pageTitle">供应商与模型</h1>
+        <p class="page-sub" id="pageSub">管理连接信息、模型能力与就绪开关。</p>
+      </div>
+      <div class="topbar-actions">
+        <button type="button" class="btn btn-icon" id="refreshBtn" title="重新加载当前页签">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>
+          </svg>
+          <span class="sr-only">重新加载</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="content">
+      <section id="providers" class="panel" role="tabpanel" aria-labelledby="tab-providers"></section>
+      <section id="biz" class="panel" role="tabpanel" aria-labelledby="tab-biz" hidden></section>
+      <section id="calls" class="panel" role="tabpanel" aria-labelledby="tab-calls" hidden></section>
+    </main>
+  </div>
 </div>
+
+<div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
+<div id="modalRoot"></div>
+
 <script src="/ai-lite/admin/assets/admin.js"></script>
 </body>
 </html>
