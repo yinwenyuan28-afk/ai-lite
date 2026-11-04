@@ -22,7 +22,7 @@
 | （同上）请求参数 | 另有五个可选键，都是「键不出现 = 不改，传 `{}` = 明确清空，传非空 = 写入」：`thinkingLevelMap`（`{"low":"low","off":null}`，值为 `null` 表示该档不支持）、`samplerParams`、`samplerParamsByLevel`（`{"high":{"top_p":0.95}}`）、`modelHeaders`、`extraBody`。校验：根必须是对象；`thinkingLevelMap` / `samplerParamsByLevel` 的键必须是 `off`/`low`/`medium`/`high`/`xhigh`/`max`；`modelHeaders` 键值必须是字符串且不能是 `Authorization` / `Content-Type`；单列序列化后不超过 16384 字符。任何一项不合法返回 400 并指明字段 |
 | PUT `/ai-lite/admin/api/providers/{name}/models/{modelId}/ready` | 启用或停用模型，正文 `{ "ready": true \| false }`。就绪只由这个接口改变 |
 | DELETE `/ai-lite/admin/api/providers/{name}/models/{modelId}` | 用户删除。仍被业务绑定时拒绝 |
-| POST `/ai-lite/admin/api/providers/{name}/models/{modelId}/try` | 实测调用。正文可含 `thinkingLevel`（默认 `off`）。**走真实的协议适配器**，与业务调用同一套请求构造，三种协议都支持；`request` 字段里的请求头是真实生效值（含两级合并结果），密钥脱敏为 `***`。不写调用日志、不过出口保护。取不到解析器或适配器时退回手写的 OpenAI 兼容实现 |
+| POST `/ai-lite/admin/api/providers/{name}/models/{modelId}/try` | 实测调用。正文可含 `thinkingLevel`（默认 `off`）与 `prompt`（user 消息，留空则发一句默认问候）。**走真实的协议适配器**，与业务调用同一套请求构造，三种协议都支持；`request` 字段里的请求头是真实生效值（含两级合并结果），密钥脱敏为 `***`。不写调用日志、不过出口保护。取不到解析器或适配器时退回手写的 OpenAI 兼容实现 |
 | GET `/ai-lite/admin/api/thinking-formats` | 思考格式的 id、中文名和说明 |
 | GET `/ai-lite/admin/api/biz` | 白名单业务、当前绑定、是否已有生效提示词 |
 | PUT `/ai-lite/admin/api/biz/{bizId}` | 保存绑定。模型必须已就绪（`ready=true`） |
