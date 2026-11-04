@@ -127,6 +127,66 @@ public class TryCallViaTransportTest {
     }
 
     /**
+     * 自定义消息要真的发出去，不是只显示在回显里。
+     */
+    @Test
+    public void customPromptReachesRequest() {
+        CapturingHttp http = new CapturingHttp();
+        ModelSyncClient.tryChatViaTransport(new OpenAiCompletionsTransport(http),
+                model("openai-completions", "http://example/v1"),
+                "把这句话翻译成英文：你好世界", Integer.valueOf(256), 5000);
+
+        assertThat(http.body).contains("把这句话翻译成英文：你好世界");
+        assertThat(http.body).doesNotContain("你好\"");
+    }
+
+    /**
+     * 消息里带引号、换行、反斜杠时，请求体仍必须是合法 JSON。
+     */
+    @Test
+    public void customPromptIsEscaped() throws Exception {
+        CapturingHttp http = new CapturingHttp();
+        String tricky = "他说\"你好\"\n然后换行\\反斜杠";
+        ModelSyncClient.tryChatViaTransport(new OpenAiCompletionsTransport(http),
+                model("openai-completions", "http://example/v1"),
+                tricky, Integer.valueOf(256), 5000);
+
+        // 能被 Jackson 解析回来，说明引号与换行都正确转义了。
+        com.fasterxml.jackson.databind.JsonNode parsed =
+                io.github.yinwenyuan28.ailite.json.AiLiteJson.readTree(http.body);
+        assertThat(parsed.get("messages").get(0).get("content").asText()).isEqualTo(tricky);
+    }
+
+    /**
+     * 空消息回落成默认问候，不会发出空内容。
+     */
+    @Test
+    public void blankPromptFallsBackToDefault() {
+        CapturingHttp http = new CapturingHttp();
+        ModelSyncClient.tryChatViaTransport(new OpenAiCompletionsTransport(http),
+                model("openai-completions", "http://example/v1"),
+                "   ", Integer.valueOf(256), 5000);
+
+        assertThat(http.body).contains(ModelSyncClient.DEFAULT_PROBE_PROMPT);
+    }
+
+    /**
+     * 回显里的请求体也用自定义消息，且转义正确。
+     */
+    @Test
+    public void requestEchoUsesCustomPrompt() {
+        CapturingHttp http = new CapturingHttp();
+        ModelSyncClient.TryResult result = ModelSyncClient.tryChatViaTransport(
+                new OpenAiCompletionsTransport(http),
+                model("openai-completions", "http://example/v1"),
+                "带\"引号\"的消息", Integer.valueOf(256), 5000);
+
+        assertThat(result.getRequestText()).contains("带");
+        // 回显是 JSON 序列化生成的，引号会变成 \" 而不是破坏结构。
+        assertThat(result.getRequestText()).contains("\\\"引号\\\"");
+    }
+
+    /**
      * Anthropic 协议此前直接「尚未接入」，现在能测，且地址是 /v1/messages。
      */
     @Test

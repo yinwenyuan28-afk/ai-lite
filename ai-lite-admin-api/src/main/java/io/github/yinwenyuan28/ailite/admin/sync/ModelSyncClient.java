@@ -49,6 +49,9 @@ public final class ModelSyncClient {
     private static final Pattern ID_PATTERN = Pattern.compile("\"id\"\\s*:\\s*\"([^\"\\\\]*)\"");
     private static final int MAX_READ_MS = 15000;
 
+    /** 测试调用不填消息时用的默认内容。短、无歧义、不触发长推理。 */
+    public static final String DEFAULT_PROBE_PROMPT = "你好";
+
     private ModelSyncClient() {
     }
 
@@ -298,6 +301,24 @@ public final class ModelSyncClient {
      */
     public static TryResult tryChatViaTransport(LlmTransport transport, ResolvedModel model,
                                                 Integer maxTokens, int timeoutMs) {
+        return tryChatViaTransport(transport, model, DEFAULT_PROBE_PROMPT, maxTokens, timeoutMs);
+    }
+
+    /**
+     * 用真实的协议适配器发一次测试调用，自定义用户消息。
+     *
+     * <p>允许自定义消息是为了能测真实场景：固定发「你好」只够验证连通，测不出
+     * 提示词是否起作用、结构化输出是否按预期返回、长输入会不会超窗口。</p>
+     *
+     * @param transport 协议适配器
+     * @param model     解析好的模型（含两级请求参数）
+     * @param prompt    用户消息；空时用默认的 {@link #DEFAULT_PROBE_PROMPT}
+     * @param maxTokens 输出上限覆盖；null 表示用模型配置
+     * @param timeoutMs 读超时，上限 60 秒
+     * @return 探测结果
+     */
+    public static TryResult tryChatViaTransport(LlmTransport transport, ResolvedModel model,
+                                                String prompt, Integer maxTokens, int timeoutMs) {
         if (transport == null) {
             return TryResult.failed(trimSlash(model == null ? null : model.getBaseUrl()),
                     "没有可用的协议适配器");
@@ -305,9 +326,10 @@ public final class ModelSyncClient {
         if (model == null) {
             return TryResult.failed("", "模型不存在");
         }
+        String text = prompt == null || prompt.trim().isEmpty() ? DEFAULT_PROBE_PROMPT : prompt;
         int read = timeoutMs <= 0 ? 30000 : Math.min(timeoutMs, 60000);
         LlmRequest request = new LlmRequest(model,
-                Collections.<LlmMessage>singletonList(LlmMessage.user("你好")),
+                Collections.<LlmMessage>singletonList(LlmMessage.user(text)),
                 Collections.<LlmTool>emptyList(), false, null, null, null,
                 Integer.valueOf(read), null, maxTokens);
         String url = describeUrl(model);
@@ -318,7 +340,7 @@ public final class ModelSyncClient {
             String content = completion == null || completion.getContent() == null
                     ? "" : completion.getContent();
             String message = content.isEmpty() ? "调用成功，但没有解析到回复" : "调用成功";
-            String requestText = describeRequest(model, url, maxTokens);
+            String requestText = describeRequest(model, url, maxTokens, text);
             String responseText = "HTTP 200\n" + limit(content, 20000);
             return new TryResult(true, 200, latency, message, content, requestText, responseText);
         } catch (LlmCallException ex) {
@@ -326,14 +348,14 @@ public final class ModelSyncClient {
             String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
             return new TryResult(false, statusOf(ex), latency,
                     stripKey(message, model.getApiKey()), "",
-                    describeRequest(model, url, maxTokens),
+                    describeRequest(model, url, maxTokens, text),
                     stripKey("请求失败：" + message, model.getApiKey()));
         } catch (Exception ex) {
             long latency = System.currentTimeMillis() - started;
             String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
             return new TryResult(false, 0, latency,
                     stripKey(message, model.getApiKey()), "",
-                    describeRequest(model, url, maxTokens),
+                    describeRequest(model, url, maxTokens, text),
                     stripKey("请求失败：" + message, model.getApiKey()));
         }
     }
@@ -345,12 +367,17 @@ public final class ModelSyncClient {
      * 模型 id、消息、输出上限、采样参数与附加字段都是真实值，但思考开关的具体字段名
      * 由各协议自己决定，这里不做模拟。请求头是真实生效值（含两级合并结果）。</p>
      *
+     * <p>请求体用 JSON 序列化生成而不是字符串拼接：用户可以在页面上输入任意文本，
+     * 手拼会让引号、换行、emoji 破坏回显的 JSON 结构。</p>
+     *
      * @param model     模型
      * @param url       地址
      * @param maxTokens 输出上限覆盖
+     * @param prompt    用户消息
      * @return 展示文本
      */
-    private static String describeRequest(ResolvedModel model, String url, Integer maxTokens) {
+    private static String describeRequest(ResolvedModel model, String url, Integer maxTokens,
+                                          String prompt) {
         Map<String, String> headers = new LinkedHashMap<String, String>();
         headers.putAll(model.getHeaders());
         if (!containsIgnoreCase(headers, "Authorization")) {
@@ -359,26 +386,22 @@ public final class ModelSyncClient {
         if (!containsIgnoreCase(headers, "Content-Type")) {
             headers.put("Content-Type", "application/json; charset=utf-8");
         }
-        StringBuilder body = new StringBuilder();
         int tokens = maxTokens == null || maxTokens.intValue() <= 0
                 ? model.getMaxTokens() : maxTokens.intValue();
-        body.append("{\"model\":\"").append(model.getModelId()).append("\",");
-        body.append("\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],");
-        body.append("\"max_tokens\":").append(tokens);
+        Map<String, Object> body = new LinkedHashMap<String, Object>();
+        body.put("model", model.getModelId());
+        Map<String, Object> message = new LinkedHashMap<String, Object>();
+        message.put("role", "user");
+        message.put("content", prompt);
+        body.put("messages", Collections.singletonList(message));
+        body.put("max_tokens", Integer.valueOf(tokens));
         if (model.getSamplerParams() != null) {
-            for (Map.Entry<String, Object> entry : model.getSamplerParams().entrySet()) {
-                body.append(",\"").append(entry.getKey()).append("\":")
-                        .append(AiLiteJson.toJson(entry.getValue()));
-            }
+            body.putAll(model.getSamplerParams());
         }
         if (model.getExtraBody() != null) {
-            for (Map.Entry<String, Object> entry : model.getExtraBody().entrySet()) {
-                body.append(",\"").append(entry.getKey()).append("\":")
-                        .append(AiLiteJson.toJson(entry.getValue()));
-            }
+            body.putAll(model.getExtraBody());
         }
-        body.append("}");
-        return requestDump("POST", url, headers, body.toString(), model.getApiKey());
+        return requestDump("POST", url, headers, AiLiteJson.toJson(body), model.getApiKey());
     }
 
     /**
@@ -439,6 +462,34 @@ public final class ModelSyncClient {
                                     String thinkingLevel, int connectMs, int readMs,
                                     Map<String, String> extraHeaders,
                                     Map<String, Object> extraBody) {
+        return tryChat(http, api, baseUrl, apiKey, modelId, thinkingFormat, maxTokens,
+                thinkingLevel, connectMs, readMs, extraHeaders, extraBody, null);
+    }
+
+    /**
+     * 手写实现，支持自定义用户消息。
+     *
+     * @param http           出站执行器，可为 null
+     * @param api            协议
+     * @param baseUrl        供应商根地址
+     * @param apiKey         生效密钥
+     * @param modelId        模型 id
+     * @param thinkingFormat 思考格式，可空
+     * @param maxTokens      输出上限，可空
+     * @param thinkingLevel  思考档
+     * @param connectMs      连接超时
+     * @param readMs         读取超时
+     * @param extraHeaders   供应商级请求头
+     * @param extraBody      两级附加请求体合并结果
+     * @param prompt         用户消息；空时用 {@link #DEFAULT_PROBE_PROMPT}
+     * @return 探测结果
+     */
+    public static TryResult tryChat(HttpExecutor http, String api, String baseUrl, String apiKey,
+                                    String modelId, String thinkingFormat, Integer maxTokens,
+                                    String thinkingLevel, int connectMs, int readMs,
+                                    Map<String, String> extraHeaders,
+                                    Map<String, Object> extraBody,
+                                    String prompt) {
         if ("anthropic-messages".equals(api)) {
             return TryResult.failed(trimSlash(baseUrl), "Anthropic 协议的测试调用尚未接入");
         }
@@ -446,7 +497,8 @@ public final class ModelSyncClient {
             return TryResult.failed(trimSlash(baseUrl), "Responses 协议的测试调用尚未接入");
         }
         String url = trimSlash(baseUrl) + "/chat/completions";
-        String payload = chatPayload(modelId, thinkingFormat, maxTokens, thinkingLevel, extraBody);
+        String payload = chatPayload(modelId, thinkingFormat, maxTokens, thinkingLevel, extraBody,
+                prompt);
         int read = readMs <= 0 ? 30000 : Math.min(readMs, 60000);
         int connect = connectMs <= 0 ? 10000 : connectMs;
         Map<String, String> headers = new LinkedHashMap<String, String>();
@@ -711,14 +763,33 @@ public final class ModelSyncClient {
      */
     static String chatPayload(String modelId, String thinkingFormat, Integer maxTokens,
                               String thinkingLevel, Map<String, Object> extraBody) {
+        return chatPayload(modelId, thinkingFormat, maxTokens, thinkingLevel, extraBody, null);
+    }
+
+    /**
+     * 拼测试调用的请求体。
+     *
+     * @param modelId        模型 id
+     * @param thinkingFormat 思考格式
+     * @param maxTokens      输出上限
+     * @param thinkingLevel  思考档
+     * @param extraBody      附加字段，会深合并进请求体；可为 null
+     * @param prompt         用户消息；空时用 {@link #DEFAULT_PROBE_PROMPT}
+     * @return JSON 文本
+     */
+    static String chatPayload(String modelId, String thinkingFormat, Integer maxTokens,
+                              String thinkingLevel, Map<String, Object> extraBody,
+                              String prompt) {
         int tokens = maxTokens == null || maxTokens.intValue() <= 0 ? 8192 : maxTokens.intValue();
+        String text = prompt == null || prompt.trim().isEmpty() ? DEFAULT_PROBE_PROMPT : prompt;
         String level = normalizeThinkingLevel(thinkingLevel);
         boolean enabled = !"off".equals(level);
         String format = thinkingFormat == null || thinkingFormat.trim().isEmpty()
                 ? "none" : thinkingFormat.trim();
         StringBuilder json = new StringBuilder();
         json.append("{\"model\":\"").append(escapeJson(modelId)).append("\",");
-        json.append("\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],");
+        json.append("\"messages\":[{\"role\":\"user\",\"content\":\"")
+                .append(escapeJson(text)).append("\"}],");
         json.append("\"max_tokens\":").append(tokens);
         if ("chat-template".equals(format)) {
             json.append(",\"chat_template_kwargs\":{\"enable_thinking\":").append(enabled).append("}");

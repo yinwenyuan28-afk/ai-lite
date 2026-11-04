@@ -1689,6 +1689,16 @@
     }), "off", function () {});
     body.appendChild(field("思考档", levelSelect,
       "测试调用会带上这个思考档；off 表示关闭思考。"));
+
+    // 自由输入消息。固定发「你好」只能验证连通，测不出提示词效果、结构化输出、
+    // 长输入是否超窗口。留空时后端用默认的短问候。
+    var promptInput = textArea("", {
+      rows: 4,
+      placeholder: "留空则发一句默认问候。可以填真实场景的问题，验证提示词与输出格式。"
+    });
+    body.appendChild(field("消息内容", promptInput,
+      "作为 user 消息发出。测试调用不写调用日志，内容不会被记录下来。"));
+
     var resultHost = el("div");
     body.appendChild(resultHost);
 
@@ -1705,7 +1715,7 @@
             clear(resultHost);
             resultHost.appendChild(el("p", "status-line info", "正在调用…"));
             post("/providers/" + enc(provider.name) + "/models/" + enc(model.modelId) + "/try",
-              { thinkingLevel: levelSelect.getValue() })
+              { thinkingLevel: levelSelect.getValue(), prompt: promptInput.value })
               .then(function (data) {
                 renderTryResult(resultHost, data);
                 tableStatus((data.ok ? "调用成功" : "调用失败") + "，"

@@ -344,7 +344,9 @@ public class AdminController {
         } else {
             thinkingLevel = LlmThinkingLevel.parse(thinkingLevel).wire();
         }
-        ModelSyncClient.TryResult result = tryViaTransport(name, modelId, thinkingLevel,
+        // prompt 可空：留空时用短的默认问候，避免把空消息发出去。
+        String prompt = body == null ? null : nullableText(body.get("prompt"));
+        ModelSyncClient.TryResult result = tryViaTransport(name, modelId, thinkingLevel, prompt,
                 endpoint, model, maxTokens);
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         data.put("ok", Boolean.valueOf(result.isOk()));
@@ -367,13 +369,15 @@ public class AdminController {
      * @param name          供应商 id
      * @param modelId       模型 id
      * @param thinkingLevel 思考档
+     * @param prompt        用户消息，可空
      * @param endpoint      生效端点（含合并后的请求头）
      * @param model         目录行，可为 null
      * @param maxTokens     输出上限
      * @return 测试结果
      */
     private ModelSyncClient.TryResult tryViaTransport(String name, String modelId,
-                                                      String thinkingLevel, Endpoint endpoint,
+                                                      String thinkingLevel, String prompt,
+                                                      Endpoint endpoint,
                                                       CatalogModel model, Integer maxTokens) {
         if (resolver != null) {
             try {
@@ -381,7 +385,7 @@ public class AdminController {
                 LlmTransport transport = transports.get(resolved.getApi());
                 if (transport != null) {
                     return ModelSyncClient.tryChatViaTransport(
-                            transport, resolved, maxTokens, 60000);
+                            transport, resolved, prompt, maxTokens, 60000);
                 }
             } catch (RuntimeException ex) {
                 // 解析失败（供应商没有模型、目录没有这一行等）：退回手写实现，
@@ -389,7 +393,7 @@ public class AdminController {
                 log.debug("测试调用解析失败，退回手写实现: {}", ex.toString());
             }
         }
-        return fallbackTry(name, modelId, thinkingLevel, endpoint, model);
+        return fallbackTry(name, modelId, thinkingLevel, prompt, endpoint, model);
     }
 
     /**
@@ -398,19 +402,20 @@ public class AdminController {
      * @param name          供应商 id
      * @param modelId       模型 id
      * @param thinkingLevel 思考档
+     * @param prompt        用户消息，可空
      * @param endpoint      生效端点
      * @param model         目录行
      * @return 测试结果
      */
     private ModelSyncClient.TryResult fallbackTry(String name, String modelId,
-                                                  String thinkingLevel, Endpoint endpoint,
-                                                  CatalogModel model) {
+                                                  String thinkingLevel, String prompt,
+                                                  Endpoint endpoint, CatalogModel model) {
         String format = model == null ? null : model.getThinkingFormat();
         Integer maxTokens = model == null ? null : model.getMaxTokens();
         return ModelSyncClient.tryChat(
                 http, endpoint.api, endpoint.baseUrl, endpoint.apiKey, modelId, format, maxTokens,
                 thinkingLevel, endpoint.connectMs, endpoint.readMs, endpoint.headers,
-                effectiveExtraBody(name, requireProvider(name), model, thinkingLevel));
+                effectiveExtraBody(name, requireProvider(name), model, thinkingLevel), prompt);
     }
 
     /**
