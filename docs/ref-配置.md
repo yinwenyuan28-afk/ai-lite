@@ -302,7 +302,7 @@ LLM 调用指标经 Micrometer 暴露（可观测性计划）：micrometer-core 
 | `ailite.llm.calls` | Counter | `biz`,`provider`,`model`,`api`,`stop`,`outcome`（success/error/aborted） |
 | `ailite.llm.duration` | Timer | `biz`,`provider`,`model`,`api` |
 | `ailite.llm.tokens` | Counter | `biz`,`provider`,`model`,`type`（input/output/total） |
-| `ailite.llm.rounds` | Counter | `biz`,`model`（只计 roundNo>1，即工具轮/重试轮） |
+| `ailite.llm.rounds` | Counter | `biz`,`model`（只计 roundNo>1，即 `toolLoop` 第 2 轮起；重试的每次尝试和 `AgentLoop` 的每轮都是 roundNo=1，不计入） |
 
 - 标签基数全部有界（biz 白名单、provider/model 来自配置、api 三协议、stop 七种）；错误摘要永不进标签。
 - 指标故障不影响调用结果与记录写入（装饰器全量兜底）。

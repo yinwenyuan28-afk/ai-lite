@@ -443,12 +443,14 @@ L1 不是协议层能单方面保证的能力，最终取决于 HTTP 客户端�
 | 字段 | 含义 |
 | --- | --- |
 | `stopReason` | 归一化停止原因；取消为 `aborted` |
-| `success` | 正常停止记 1；`error` / `aborted` 记 0 |
-| `inputTokens` / `outputTokens` / `totalTokens` | 各次尝试 usage 之和 |
-| `latencyMs` | 各次尝试耗时之和 |
+| `success` | 正常停止记 1；`error` / `aborted` / `maxRounds` 记 0（`length` 算成功） |
+| `inputTokens` / `outputTokens` / `totalTokens` | 同一次调用内各轮 usage 的累积值（工具循环第 2 行含第 1 行） |
+| `latencyMs` | **本轮**耗时（累积值只进 `LlmResult`，不进记录；同步入口含并发排队等待） |
 | `errorBrief` | 错误摘要，已遮蔽 api key，最多 200 字符 |
 
 记录通过后台线程异步写入，写失败只记日志，不影响主调用。**取消后仍可能写一条 `aborted` 记录**——这是 L3 不保证的原因，属于预期行为。
+
+字段来源、线程模型、正文档位与两张表的完整说明见 [调用日志](desc-调用日志.md)。
 
 starter 环境且 micrometer 在 classpath 时，这些记录同时聚合进 `ailite.llm.*` 指标（调用数、耗时、token），详见 [配置参考](ref-配置.md) §3.2；出口保护事件另有 `ailite.llm.guard.*` 指标（§3.3）。
 
