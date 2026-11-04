@@ -126,6 +126,27 @@ public final class ModelResolver {
      * @return 解析结果
      */
     public ResolvedModel resolveExplicit(String provider, String modelId, String thinkingLevel) {
+        return resolveExplicit(provider, modelId, thinkingLevel, false);
+    }
+
+    /**
+     * 显式解析供应商和模型，可选择是否采纳目录里的模型行。
+     *
+     * <p>{@code useCatalog} 为 true 时，如果目录里有这个模型行，就用它的能力参数与
+     * 请求参数（并套用供应商覆盖），等同于业务调用会拿到的结果；目录里没有则退回配置文件。
+     * 管理页的「测试调用」用它，才能测出与业务调用一致的行为。</p>
+     *
+     * <p>与 {@link #resolveBiz} 的差别：这里不要求业务绑定，也不检查就绪状态——
+     * 测试调用的目的正是「在绑定之前验证这个模型能不能用」。</p>
+     *
+     * @param provider      供应商 id
+     * @param modelId       模型 id
+     * @param thinkingLevel 思考档，可空
+     * @param useCatalog    是否采纳目录里的模型行
+     * @return 解析结果
+     */
+    public ResolvedModel resolveExplicit(String provider, String modelId, String thinkingLevel,
+                                         boolean useCatalog) {
         String providerId = Strings.trimToNull(provider);
         if (providerId == null) {
             throw new LlmCallException("供应商不能为空", null, LlmCallException.Kind.CONFIG);
@@ -133,6 +154,15 @@ public final class ModelResolver {
         AiLiteConfig.Provider p = providers.get(providerId);
         if (p == null) {
             throw new LlmCallException("未知供应商: " + providerId, null, LlmCallException.Kind.CONFIG);
+        }
+        if (useCatalog && catalog.isActive()) {
+            String id = Strings.trimToNull(modelId);
+            CatalogModel row = id == null ? null : catalog.findModel(providerId, id);
+            if (row != null) {
+                AiLiteConfig.Provider effective = applyOverlay(p, catalog.findProvider(providerId));
+                return resolve(providerId, effective, toConfigModel(row, findModel(p, id)),
+                        thinkingLevel);
+            }
         }
         AiLiteConfig.Model m = findModel(p, modelId);
         if (m == null) {
@@ -192,11 +222,16 @@ public final class ModelResolver {
             throw new LlmCallException("模型未就绪: " + binding.getModelId(), null, LlmCallException.Kind.CONFIG);
         }
         AiLiteConfig.Provider effective = applyOverlay(source, catalog.findProvider(providerId));
-        return resolve(providerId, effective, toConfigModel(row), binding.getThinkingLevel());
+        return resolve(providerId, effective, toConfigModel(row, findModel(source, binding.getModelId().trim())),
+                binding.getThinkingLevel());
     }
 
     /**
      * 复制供应商并套上非空覆盖。配置了密钥池时不改单把密钥，调用和探测都走池。
+     *
+     * <p>请求头与附加请求体是「整份替换」：覆盖表里存了就用覆盖表那份，不逐键合并。
+     * 这与地址、密钥的覆盖语义一致——覆盖是换掉，不是叠加。真正的合并发生在
+     * 供应商级与模型级之间，见 {@link #resolve}。</p>
      */
     private static AiLiteConfig.Provider applyOverlay(AiLiteConfig.Provider source, ProviderOverlay overlay) {
         AiLiteConfig.Provider copy = new AiLiteConfig.Provider();
@@ -231,10 +266,28 @@ public final class ModelResolver {
         if (overlay.getReadTimeoutMs() != null) {
             copy.setReadTimeoutMs(overlay.getReadTimeoutMs());
         }
+        // null 表示数据库没配，保留上面从配置文件复制来的那份；空 Map 才是明确清空。
+        if (overlay.getHeaders() != null) {
+            copy.setHeaders(new LinkedHashMap<String, String>(overlay.getHeaders()));
+        }
+        if (overlay.getExtraBody() != null) {
+            copy.setExtraBody(new LinkedHashMap<String, Object>(overlay.getExtraBody()));
+        }
         return copy;
     }
 
-    private static AiLiteConfig.Model toConfigModel(CatalogModel row) {
+    /**
+     * 把目录行转成解析用的模型。
+     *
+     * <p>七项能力参数只来自数据库（它们决定了模型能不能被业务选中）。后五项是请求的
+     * 固有属性，数据库没有对应表达能力时从配置文件里的同名模型补齐：数据库列是 NULL
+     * 表示没配、沿用配置文件；空 Map 表示明确清空。</p>
+     *
+     * @param row  目录行
+     * @param yaml 配置文件里的同名模型；null 表示配置文件里没有这个模型
+     * @return 解析用的模型
+     */
+    private static AiLiteConfig.Model toConfigModel(CatalogModel row, AiLiteConfig.Model yaml) {
         AiLiteConfig.Model model = new AiLiteConfig.Model();
         model.setId(row.getModelId());
         model.setName(row.getDisplayName());
@@ -250,7 +303,56 @@ public final class ModelResolver {
         model.setMaxTokens(row.getMaxTokens() == null ? Integer.valueOf(8192) : row.getMaxTokens());
         model.setThinkingFormat(Strings.isBlank(row.getThinkingFormat())
                 ? "reasoning-effort" : row.getThinkingFormat().trim());
+        model.setThinkingLevelMap(copyOr(row.getThinkingLevelMap(),
+                yaml == null ? null : yaml.getThinkingLevelMap()));
+        model.setSamplerParams(copyOr(row.getSamplerParams(),
+                yaml == null ? null : yaml.getSamplerParams()));
+        model.setSamplerParamsByThinkingLevel(copyByLevel(row.getSamplerParamsByLevel(),
+                yaml == null ? null : yaml.getSamplerParamsByThinkingLevel()));
+        model.setHeaders(copyOr(row.getModelHeaders(),
+                yaml == null ? null : yaml.getHeaders()));
+        model.setExtraBody(copyOr(row.getExtraBody(),
+                yaml == null ? null : yaml.getExtraBody()));
         return model;
+    }
+
+    /**
+     * 取数据库值；数据库没配时回落配置文件；两边都没有则给空 Map。
+     *
+     * <p>返回空 Map 而不是 null，是因为下游 {@code resolve} 直接在上面做
+     * {@code putAll}，null 会抛空指针。</p>
+     *
+     * @param fromDb   数据库值，null 表示没配
+     * @param fromYaml 配置文件值，null 表示没有
+     * @param <V>      值类型
+     * @return 可写的副本
+     */
+    private static <V> Map<String, V> copyOr(Map<String, V> fromDb, Map<String, V> fromYaml) {
+        if (fromDb != null) {
+            return new LinkedHashMap<String, V>(fromDb);
+        }
+        if (fromYaml != null) {
+            return new LinkedHashMap<String, V>(fromYaml);
+        }
+        return new LinkedHashMap<String, V>();
+    }
+
+    /**
+     * 嵌套 Map 版本的回落，规则同 {@link #copyOr}。
+     *
+     * @param fromDb   数据库值，null 表示没配
+     * @param fromYaml 配置文件值，null 表示没有
+     * @return 可写的副本
+     */
+    private static Map<String, Map<String, Object>> copyByLevel(
+            Map<String, Map<String, Object>> fromDb, Map<String, Map<String, Object>> fromYaml) {
+        if (fromDb != null) {
+            return new LinkedHashMap<String, Map<String, Object>>(fromDb);
+        }
+        if (fromYaml != null) {
+            return new LinkedHashMap<String, Map<String, Object>>(fromYaml);
+        }
+        return new LinkedHashMap<String, Map<String, Object>>();
     }
 
     private ResolvedModel resolve(String providerId, AiLiteConfig.Provider p, AiLiteConfig.Model m,
@@ -260,9 +362,14 @@ public final class ModelResolver {
                 : LlmThinkingLevel.parse(requestedLevel);
         LlmThinkingLevel effective = LlmThinking.clamp(requested, m.isReasoning(), m.getThinkingLevelMap());
 
+        // 供应商级在前、模型级在后；同名（忽略大小写）时模型级覆盖。见 putHeaderIgnoreCase。
         Map<String, String> headers = new LinkedHashMap<String, String>();
-        headers.putAll(p.getHeaders());
-        headers.putAll(m.getHeaders());
+        for (Map.Entry<String, String> entry : p.getHeaders().entrySet()) {
+            putHeaderIgnoreCase(headers, entry.getKey(), entry.getValue());
+        }
+        for (Map.Entry<String, String> entry : m.getHeaders().entrySet()) {
+            putHeaderIgnoreCase(headers, entry.getKey(), entry.getValue());
+        }
 
         Map<String, Object> extraBody = new LinkedHashMap<String, Object>();
         extraBody.putAll(p.getExtraBody());
@@ -289,8 +396,66 @@ public final class ModelResolver {
                 sampler, extraBody, connect, read);
     }
 
-    private static AiLiteConfig.Model findModel(AiLiteConfig.Provider provider, String modelId) {
-        String id = Strings.trimToNull(modelId);
+    /**
+     * 头名忽略大小写地放入。已存在同名键时先移除旧的，实现「后来的覆盖先前的」。
+     *
+     * <p>HTTP 头名不区分大小写，但 {@code LinkedHashMap} 区分。直接用 {@code putAll}
+     * 合并两级时，{@code X-Foo} 与 {@code x-foo} 会变成两个头一起发出去：服务器可能
+     * 取第一个（覆盖没生效），也可能因重复头直接报错。</p>
+     *
+     * <p>保留后写入那个的原始大小写，也就是「最后配置的那个」看起来是什么样就发什么样。</p>
+     *
+     * @param target 目标头
+     * @param name   头名
+     * @param value  头值
+     */
+    private static void putHeaderIgnoreCase(Map<String, String> target, String name, String value) {
+        String existing = null;
+        for (String key : target.keySet()) {
+            if (key.equalsIgnoreCase(name)) {
+                existing = key;
+                break;
+            }
+        }
+        if (existing != null) {
+            target.remove(existing);
+        }
+        target.put(name, value);
+    }
+
+    /**
+     * 由库管理的请求头。它们不允许通过 {@code headers} 覆盖。
+     *
+     * <p>刻意拒绝而不是允许：写错一个大小写就会静默顶掉真实密钥（{@code containsHeader}
+     * 是大小写无关的判断，认出自定义了 Authorization 就不再补 {@code Bearer}），
+     * 既不报错也不留痕迹。启动失败比运行时发错凭据好查得多。</p>
+     */
+    private static final String[] RESERVED_HEADERS = {"Authorization", "Content-Type"};
+
+    /**
+     * 检查自定义请求头里没有库管理的保留头。
+     *
+     * @param where  出错位置，用于拼文案（如「供应商 demo 的 headers」）
+     * @param custom 自定义头
+     * @throws LlmCallException 出现保留头时抛出
+     */
+    private static void rejectReservedHeaders(String where, Map<String, String> custom) {
+        if (custom == null || custom.isEmpty()) {
+            return;
+        }
+        for (String reserved : RESERVED_HEADERS) {
+            for (String name : custom.keySet()) {
+                if (name != null && name.equalsIgnoreCase(reserved)) {
+                    String hint = "Authorization".equals(reserved)
+                            ? "请用 api-key / api-keys 配置密钥" : "Content-Type 由请求编码固定";
+                    throw new LlmCallException(where + " 不能配置 " + reserved + "，" + hint,
+                            null, LlmCallException.Kind.CONFIG);
+                }
+            }
+        }
+    }
+
+    private static AiLiteConfig.Model findModel(AiLiteConfig.Provider provider, String modelId) {        String id = Strings.trimToNull(modelId);
         if (id == null || provider.getModels() == null) {
             return null;
         }
@@ -507,11 +672,14 @@ public final class ModelResolver {
             if (!catalog.isActive() && (p.getModels() == null || p.getModels().isEmpty())) {
                 throw new LlmCallException("供应商 " + id + " 没有配置模型", null, LlmCallException.Kind.CONFIG);
             }
+            rejectReservedHeaders("供应商 " + id + " 的 headers", p.getHeaders());
             if (p.getModels() != null) {
                 for (AiLiteConfig.Model m : p.getModels()) {
                     if (m == null || Strings.isBlank(m.getId())) {
                         throw new LlmCallException("供应商 " + id + " 存在缺少 id 的模型", null, LlmCallException.Kind.CONFIG);
                     }
+                    rejectReservedHeaders(
+                            "供应商 " + id + " 模型 " + m.getId() + " 的 headers", m.getHeaders());
                 }
             }
         }

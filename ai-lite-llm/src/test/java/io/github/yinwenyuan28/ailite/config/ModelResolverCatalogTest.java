@@ -9,6 +9,8 @@ import io.github.yinwenyuan28.ailite.llm.ResolvedModel;
 import org.junit.Test;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -122,6 +124,162 @@ public class ModelResolverCatalogTest {
         ModelResolver resolver = new ModelResolver(llm, 60_000L, catalog(true, null, ready("qwen"), null));
 
         assertThat(resolver.resolveProfile("main").getModelId()).isEqualTo("yaml-model");
+    }
+
+    /* ---------------- 模型级请求参数：数据库有值 / NULL 回落 / 两边都空 ---------------- */
+
+    /**
+     * 数据库五列有值时，解析结果要带上它们，且与 YAML 路径一致。
+     *
+     * <p>这是本次改动的核心：修复前这五个字段在目录模式下全丢，
+     * 同一模型在 {@code LlmCall.biz} 与 {@code LlmCall.explicit} 下发出去的请求不同。</p>
+     */
+    @Test
+    public void catalogModelParamsReachResolvedModel() {
+        BizBinding binding = new BizBinding("demo-chat", "demo", "qwen", "off");
+        Map<String, String> levelMap = new LinkedHashMap<String, String>();
+        levelMap.put("low", "low");
+        levelMap.put("high", "high");
+        Map<String, Object> sampler = new LinkedHashMap<String, Object>();
+        sampler.put("temperature", Double.valueOf(0.2));
+        Map<String, Map<String, Object>> byLevel = new LinkedHashMap<String, Map<String, Object>>();
+        byLevel.put("high", Collections.<String, Object>singletonMap("top_p", Double.valueOf(0.95)));
+        Map<String, String> modelHeaders = new LinkedHashMap<String, String>();
+        modelHeaders.put("X-Model", "v2");
+        Map<String, Object> extraBody = new LinkedHashMap<String, Object>();
+        extraBody.put("vendor_field", "x");
+
+        CatalogModel model = new CatalogModel("demo", "qwen", true, true,
+                Collections.singletonList("text"), Integer.valueOf(32768), Integer.valueOf(4096),
+                "deepseek", "qwen", 1L, levelMap, sampler, byLevel, modelHeaders, extraBody);
+        ModelResolver resolver = new ModelResolver(bareLlm(), 60_000L,
+                catalog(true, binding, model, null));
+
+        ResolvedModel resolved = resolver.resolveBiz("demo-chat");
+
+        assertThat(resolved.getThinkingLevelMap()).isEqualTo(levelMap);
+        assertThat(resolved.getSamplerParams()).containsEntry("temperature", Double.valueOf(0.2));
+        assertThat(resolved.getHeaders()).containsEntry("X-Model", "v2");
+        assertThat(resolved.getExtraBody()).containsEntry("vendor_field", "x");
+    }
+
+    /**
+     * 数据库列为 NULL 时，从配置文件里的同名模型继承。
+     *
+     * <p>升级路径：老库补列后全为 NULL，行为必须与升级前完全一致。</p>
+     */
+    @Test
+    public void nullColumnsInheritYamlModelParams() {
+        AiLiteConfig.Llm llm = bareLlm();
+        AiLiteConfig.Model yamlModel = new AiLiteConfig.Model();
+        yamlModel.setId("qwen");
+        Map<String, String> levelMap = new LinkedHashMap<String, String>();
+        levelMap.put("low", "low");
+        yamlModel.setThinkingLevelMap(levelMap);
+        Map<String, Object> sampler = new LinkedHashMap<String, Object>();
+        sampler.put("temperature", Double.valueOf(0.9));
+        yamlModel.setSamplerParams(sampler);
+        Map<String, String> yamlHeaders = new LinkedHashMap<String, String>();
+        yamlHeaders.put("X-From-Yaml", "yes");
+        yamlModel.setHeaders(yamlHeaders);
+        llm.getProviders().get("demo").getModels().add(yamlModel);
+
+        BizBinding binding = new BizBinding("demo-chat", "demo", "qwen", "off");
+        ModelResolver resolver = new ModelResolver(llm, 60_000L,
+                catalog(true, binding, ready("qwen"), null));
+
+        ResolvedModel resolved = resolver.resolveBiz("demo-chat");
+
+        assertThat(resolved.getThinkingLevelMap()).containsEntry("low", "low");
+        assertThat(resolved.getSamplerParams()).containsEntry("temperature", Double.valueOf(0.9));
+        assertThat(resolved.getHeaders()).containsEntry("X-From-Yaml", "yes");
+    }
+
+    /**
+     * 数据库空 Map 表示「明确清空」，不再回落配置文件。
+     */
+    @Test
+    public void emptyMapColumnClearsYamlValue() {
+        AiLiteConfig.Llm llm = bareLlm();
+        AiLiteConfig.Model yamlModel = new AiLiteConfig.Model();
+        yamlModel.setId("qwen");
+        Map<String, Object> sampler = new LinkedHashMap<String, Object>();
+        sampler.put("temperature", Double.valueOf(0.9));
+        yamlModel.setSamplerParams(sampler);
+        llm.getProviders().get("demo").getModels().add(yamlModel);
+
+        BizBinding binding = new BizBinding("demo-chat", "demo", "qwen", "off");
+        CatalogModel model = new CatalogModel("demo", "qwen", true, true,
+                Collections.singletonList("text"), Integer.valueOf(32768), Integer.valueOf(4096),
+                "reasoning-effort", "qwen", 1L,
+                new LinkedHashMap<String, String>(), new LinkedHashMap<String, Object>(),
+                new LinkedHashMap<String, Map<String, Object>>(),
+                new LinkedHashMap<String, String>(), new LinkedHashMap<String, Object>());
+        ModelResolver resolver = new ModelResolver(llm, 60_000L,
+                catalog(true, binding, model, null));
+
+        assertThat(resolver.resolveBiz("demo-chat").getSamplerParams()).isEmpty();
+    }
+
+    /**
+     * 两级都没有这些参数时，结果为空且不抛空指针。
+     */
+    @Test
+    public void bothSidesEmptyYieldsEmptyMaps() {
+        BizBinding binding = new BizBinding("demo-chat", "demo", "qwen", "off");
+        ModelResolver resolver = new ModelResolver(bareLlm(), 60_000L,
+                catalog(true, binding, ready("qwen"), null));
+
+        ResolvedModel resolved = resolver.resolveBiz("demo-chat");
+
+        assertThat(resolved.getThinkingLevelMap()).isEmpty();
+        assertThat(resolved.getSamplerParams()).isEmpty();
+        assertThat(resolved.getHeaders()).isEmpty();
+        assertThat(resolved.getExtraBody()).isEmpty();
+    }
+
+    /* ---------------- 供应商级请求参数 ---------------- */
+
+    @Test
+    public void overlayHeadersAndExtraBodyReplaceYamlWhenPresent() {
+        AiLiteConfig.Llm llm = bareLlm();
+        Map<String, String> yamlHeaders = new LinkedHashMap<String, String>();
+        yamlHeaders.put("X-From-Yaml", "yes");
+        llm.getProviders().get("demo").setHeaders(yamlHeaders);
+        Map<String, Object> yamlExtra = new LinkedHashMap<String, Object>();
+        yamlExtra.put("yaml_field", "yes");
+        llm.getProviders().get("demo").setExtraBody(yamlExtra);
+
+        BizBinding binding = new BizBinding("demo-chat", "demo", "qwen", "off");
+        Map<String, String> overlayHeaders = new LinkedHashMap<String, String>();
+        overlayHeaders.put("X-From-Db", "db");
+        Map<String, Object> overlayExtra = new LinkedHashMap<String, Object>();
+        overlayExtra.put("db_field", "db");
+        ProviderOverlay overlay = new ProviderOverlay("demo", null, null, null, null, null,
+                overlayHeaders, overlayExtra);
+
+        ModelResolver resolver = new ModelResolver(llm, 60_000L,
+                catalog(true, binding, ready("qwen"), overlay));
+        ResolvedModel resolved = resolver.resolveBiz("demo-chat");
+
+        assertThat(resolved.getHeaders()).containsEntry("X-From-Db", "db")
+                .doesNotContainKey("X-From-Yaml");
+        assertThat(resolved.getExtraBody()).containsEntry("db_field", "db")
+                .doesNotContainKey("yaml_field");
+    }
+
+    @Test
+    public void overlayNullHeadersKeepYaml() {
+        AiLiteConfig.Llm llm = bareLlm();
+        Map<String, String> yamlHeaders = new LinkedHashMap<String, String>();
+        yamlHeaders.put("X-From-Yaml", "yes");
+        llm.getProviders().get("demo").setHeaders(yamlHeaders);
+
+        BizBinding binding = new BizBinding("demo-chat", "demo", "qwen", "off");
+        ModelResolver resolver = new ModelResolver(llm, 60_000L,
+                catalog(true, binding, ready("qwen"), new ProviderOverlay("demo", null, null, null, null)));
+
+        assertThat(resolver.resolveBiz("demo-chat").getHeaders()).containsEntry("X-From-Yaml", "yes");
     }
 
     private static AiLiteConfig.Llm bareLlm() {
