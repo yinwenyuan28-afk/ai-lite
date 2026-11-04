@@ -3,7 +3,9 @@ package io.github.yinwenyuan28.ailite.admin.web;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalog;
 import io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
+import io.github.yinwenyuan28.ailite.config.ModelResolver;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
+import io.github.yinwenyuan28.ailite.llm.LlmTransport;
 import io.github.yinwenyuan28.ailite.admin.jdbc.CallBodySettings;
 import io.github.yinwenyuan28.ailite.prompt.PromptManager;
 import org.slf4j.Logger;
@@ -20,6 +22,9 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.servlet.DispatcherServlet;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * 管理 REST。只有开关打开、进程是 Servlet Web 应用、目录已经建好时才注册。
@@ -55,7 +60,9 @@ public class AiLiteAdminAutoConfiguration {
                                                  ObjectProvider<PromptManager> prompts,
                                                  JdbcTemplate jdbc, Environment environment,
                                                  ObjectProvider<HttpExecutor> http,
-                                                 ObjectProvider<CallBodySettings> bodyPolicy) {
+                                                 ObjectProvider<CallBodySettings> bodyPolicy,
+                                                 ObjectProvider<ModelResolver> resolver,
+                                                 ObjectProvider<LlmTransport> transports) {
         if (!(catalog instanceof JdbcRuntimeCatalog)) {
             throw new IllegalStateException("管理 API 需要 JDBC 目录，请配置数据源并执行 ai-lite-catalog.sql");
         }
@@ -73,9 +80,22 @@ public class AiLiteAdminAutoConfiguration {
         if (policy == null) {
             log.warn("管理页未取到 CallBodySettings，调用正文档位不可读写");
         }
+        // 「测试调用」尽量走真实协议适配器：拿不到解析器或适配器时退回手写实现，
+        // 那种情况下只能测 OpenAI 兼容协议，且请求拼装与业务调用可能不一致。
+        ModelResolver modelResolver = resolver.getIfAvailable();
+        Map<String, LlmTransport> byApi = new LinkedHashMap<String, LlmTransport>();
+        for (LlmTransport transport : transports) {
+            if (transport != null && transport.api() != null) {
+                byApi.put(transport.api(), transport);
+            }
+        }
+        if (modelResolver == null || byApi.isEmpty()) {
+            log.warn("管理页未取到 ModelResolver 或协议适配器，「测试调用」退回手写实现："
+                    + "只支持 OpenAI 兼容协议，请求拼装与业务调用可能不一致");
+        }
         return new AdminController(config, (JdbcRuntimeCatalog) catalog, prompts.getIfAvailable(), jdbc,
                 environment.getProperty("ai-lite.store.jdbc.table-name"),
                 environment.getProperty("ai-lite.store.jdbc.body-table-name"),
-                policy, executor);
+                policy, executor, modelResolver, byApi);
     }
 }

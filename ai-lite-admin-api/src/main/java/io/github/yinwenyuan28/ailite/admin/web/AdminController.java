@@ -9,7 +9,11 @@ import io.github.yinwenyuan28.ailite.catalog.BizBinding;
 import io.github.yinwenyuan28.ailite.catalog.CatalogModel;
 import io.github.yinwenyuan28.ailite.catalog.ProviderOverlay;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
+import io.github.yinwenyuan28.ailite.config.ModelResolver;
+import io.github.yinwenyuan28.ailite.llm.LlmTransport;
+import io.github.yinwenyuan28.ailite.llm.ResolvedModel;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
+import io.github.yinwenyuan28.ailite.json.AiLiteJson;
 import io.github.yinwenyuan28.ailite.llm.CallBodyPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmThinkingLevel;
@@ -18,6 +22,8 @@ import io.github.yinwenyuan28.ailite.prompt.PromptManager;
 import io.github.yinwenyuan28.ailite.prompt.PromptStatus;
 import io.github.yinwenyuan28.ailite.prompt.PromptVersion;
 import io.github.yinwenyuan28.ailite.util.Strings;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -49,6 +55,7 @@ import java.util.Set;
 public class AdminController {
 
     static final String UNKNOWN_PROVIDER = "未知供应商，须先在配置文件声明";
+    private static final Logger log = LoggerFactory.getLogger(AdminController.class);
     private static final String ACTOR = "admin";
     private static final Set<String> THINKING_FORMATS = new HashSet<String>(Arrays.asList(
             "none", "chat-template", "deepseek", "qwen",
@@ -68,6 +75,10 @@ public class AdminController {
     private final String callBodyTable;
     private final CallBodySettings bodyPolicy;
     private final HttpExecutor http;
+    /** 模型解析器；为 null 时「测试调用」退回手写实现（只支持 OpenAI 兼容协议）。 */
+    private final ModelResolver resolver;
+    /** 协议适配器，按 api 注册。为空时同上。 */
+    private final Map<String, LlmTransport> transports;
 
     /**
      * 兼容构造器：不传执行器时诊断走 HttpURLConnection 兜底。
@@ -135,6 +146,28 @@ public class AdminController {
     public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
                            JdbcTemplate jdbc, String callTable, String callBodyTable,
                            CallBodySettings bodyPolicy, HttpExecutor http) {
+        this(config, catalog, prompts, jdbc, callTable, callBodyTable, bodyPolicy, http,
+                null, null);
+    }
+
+    /**
+     * 完整构造器：额外接收解析器与协议适配器，「测试调用」才能走与业务一致的链路。
+     *
+     * @param config        配置文件里的供应商与业务 id
+     * @param catalog       运行时目录
+     * @param prompts       提示词管理器，可为 null
+     * @param jdbc          调用记录查询
+     * @param callTable     调用记录表名，未配置时为 null
+     * @param callBodyTable 调用正文表名；null 表示按摘要表名推导
+     * @param bodyPolicy    调用正文档位
+     * @param http          出站执行器，可为 null
+     * @param resolver      模型解析器，可为 null；为 null 时测试调用退回手写实现
+     * @param transports    协议适配器，可为 null；为空时同上
+     */
+    public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
+                           JdbcTemplate jdbc, String callTable, String callBodyTable,
+                           CallBodySettings bodyPolicy, HttpExecutor http,
+                           ModelResolver resolver, Map<String, LlmTransport> transports) {
         this.config = config;
         this.catalog = catalog;
         this.prompts = prompts;
@@ -143,6 +176,9 @@ public class AdminController {
         this.callBodyTable = callBodyTable;
         this.bodyPolicy = bodyPolicy;
         this.http = http;
+        this.resolver = resolver;
+        this.transports = transports == null
+                ? Collections.<String, LlmTransport>emptyMap() : transports;
     }
 
     /**
@@ -195,7 +231,8 @@ public class AdminController {
         AiLiteConfig.Provider provider = requireProvider(name);
         Endpoint endpoint = endpoint(name, provider);
         ModelSyncClient.ProbeResult probe = ModelSyncClient.probe(
-                http, endpoint.baseUrl, endpoint.apiKey, endpoint.connectMs, endpoint.readMs);
+                http, endpoint.baseUrl, endpoint.apiKey, endpoint.connectMs, endpoint.readMs,
+                endpoint.headers);
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         data.put("url", probe.getCheckedUrl());
         data.put("httpStatus", Integer.valueOf(probe.getHttpStatus()));
@@ -216,7 +253,7 @@ public class AdminController {
         AiLiteConfig.Provider provider = requireProvider(name);
         Endpoint endpoint = endpoint(name, provider);
         List<String> remote = ModelSyncClient.listRemote(
-                http, endpoint.api, endpoint.baseUrl, endpoint.apiKey);
+                http, endpoint.api, endpoint.baseUrl, endpoint.apiKey, endpoint.headers);
         Set<String> stored = new HashSet<String>();
         for (CatalogModel model : catalog.listModels(name)) {
             stored.add(model.getModelId());
@@ -279,7 +316,14 @@ public class AdminController {
     }
 
     /**
-     * 用当前生效的地址和密钥向该模型发一次很短的请求。不写调用日志，不改模型表。
+     * 用当前生效的配置向该模型发一次很短的请求。不写调用日志，不改模型表。
+     *
+     * <p>走真实的协议适配器（与业务调用同一套请求构造），因此三种协议都支持、
+     * 请求头与请求体的拼装规则完全一致。只有两处不同：不写调用日志、不过出口保护——
+     * 测试不应污染业务调用记录，也不该占用业务的并发许可。</p>
+     *
+     * <p>容器里没有解析器或适配器时（单独引入 admin-api 的场景），退回手写的
+     * OpenAI 兼容实现，并在响应里注明降级原因。</p>
      *
      * @param name    供应商 id
      * @param modelId 模型 id
@@ -300,9 +344,8 @@ public class AdminController {
         } else {
             thinkingLevel = LlmThinkingLevel.parse(thinkingLevel).wire();
         }
-        ModelSyncClient.TryResult result = ModelSyncClient.tryChat(
-                http, endpoint.api, endpoint.baseUrl, endpoint.apiKey, modelId, format, maxTokens,
-                thinkingLevel, endpoint.connectMs, endpoint.readMs);
+        ModelSyncClient.TryResult result = tryViaTransport(name, modelId, thinkingLevel,
+                endpoint, model, maxTokens);
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         data.put("ok", Boolean.valueOf(result.isOk()));
         data.put("httpStatus", Integer.valueOf(result.getHttpStatus()));
@@ -312,6 +355,117 @@ public class AdminController {
         data.put("request", result.getRequestText());
         data.put("response", result.getResponseText());
         return ok(data);
+    }
+
+    /**
+     * 优先用真实协议适配器发测试请求；条件不满足时退回手写实现。
+     *
+     * <p>退回条件：容器里没有 {@code ModelResolver}、没有对应协议的适配器，
+     * 或解析失败（例如供应商在配置文件里没有模型、目录里也没有这一行）。
+     * 退回时请求内容可能和业务调用有差异，这一点会写在响应里，不静默降级。</p>
+     *
+     * @param name          供应商 id
+     * @param modelId       模型 id
+     * @param thinkingLevel 思考档
+     * @param endpoint      生效端点（含合并后的请求头）
+     * @param model         目录行，可为 null
+     * @param maxTokens     输出上限
+     * @return 测试结果
+     */
+    private ModelSyncClient.TryResult tryViaTransport(String name, String modelId,
+                                                      String thinkingLevel, Endpoint endpoint,
+                                                      CatalogModel model, Integer maxTokens) {
+        if (resolver != null) {
+            try {
+                ResolvedModel resolved = resolver.resolveExplicit(name, modelId, thinkingLevel, true);
+                LlmTransport transport = transports.get(resolved.getApi());
+                if (transport != null) {
+                    return ModelSyncClient.tryChatViaTransport(
+                            transport, resolved, maxTokens, 60000);
+                }
+            } catch (RuntimeException ex) {
+                // 解析失败（供应商没有模型、目录没有这一行等）：退回手写实现，
+                // 保证「测试」这个动作至少还能用。
+                log.debug("测试调用解析失败，退回手写实现: {}", ex.toString());
+            }
+        }
+        return fallbackTry(name, modelId, thinkingLevel, endpoint, model);
+    }
+
+    /**
+     * 老路径：手写 OpenAI 兼容请求。只在没有解析器或适配器时使用。
+     *
+     * @param name          供应商 id
+     * @param modelId       模型 id
+     * @param thinkingLevel 思考档
+     * @param endpoint      生效端点
+     * @param model         目录行
+     * @return 测试结果
+     */
+    private ModelSyncClient.TryResult fallbackTry(String name, String modelId,
+                                                  String thinkingLevel, Endpoint endpoint,
+                                                  CatalogModel model) {
+        String format = model == null ? null : model.getThinkingFormat();
+        Integer maxTokens = model == null ? null : model.getMaxTokens();
+        return ModelSyncClient.tryChat(
+                http, endpoint.api, endpoint.baseUrl, endpoint.apiKey, modelId, format, maxTokens,
+                thinkingLevel, endpoint.connectMs, endpoint.readMs, endpoint.headers,
+                effectiveExtraBody(name, requireProvider(name), model, thinkingLevel));
+    }
+
+    /**
+     * 合并两级附加请求体，供「测试调用」使用。
+     *
+     * <p>合并顺序与网关一致：供应商级在前、模型级覆盖同名键，且嵌套对象递归合并。
+     * 层级缺失时用配置文件里的那份，与真实调用相同的回落规则。</p>
+     *
+     * @param name     供应商 id，用于查覆盖表
+     * @param provider 配置文件里的供应商
+     * @param model    目录行；null 表示模型还没建
+     * @return 合并结果，可能为空 Map
+     */
+    private Map<String, Object> effectiveExtraBody(String name, AiLiteConfig.Provider provider,
+                                                   CatalogModel model, String thinkingLevel) {
+        ProviderOverlay overlay = catalog.findProvider(name);
+        Map<String, Object> providerLevel = overlay != null && overlay.getExtraBody() != null
+                ? overlay.getExtraBody() : provider.getExtraBody();
+        Map<String, Object> merged = new LinkedHashMap<String, Object>();
+        deepMerge(merged, providerLevel);
+        if (model != null) {
+            // 采样参数与附加字段在真实调用里都进请求体，测试调用带同样的键，
+            // 否则页面上显示已配置、测试时却一个都没发出去。
+            deepMerge(merged, model.getSamplerParams());
+            if (model.getSamplerParamsByLevel() != null) {
+                deepMerge(merged, model.getSamplerParamsByLevel().get(thinkingLevel));
+            }
+            deepMerge(merged, model.getExtraBody());
+        }
+        return merged;
+    }
+
+    /**
+     * 深合并到一个可写的 Map 上：嵌套 Map 递归，其他值覆盖。
+     *
+     * @param target 目标
+     * @param source 来源，可为 null
+     */
+    @SuppressWarnings("unchecked")
+    private static void deepMerge(Map<String, Object> target, Map<String, Object> source) {
+        if (source == null) {
+            return;
+        }
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            if (entry.getKey() == null) {
+                continue;
+            }
+            Object incoming = entry.getValue();
+            Object existing = target.get(entry.getKey());
+            if (incoming instanceof Map && existing instanceof Map) {
+                deepMerge((Map<String, Object>) existing, (Map<String, Object>) incoming);
+            } else {
+                target.put(entry.getKey(), incoming);
+            }
+        }
     }
 
     /**
@@ -411,8 +565,14 @@ public class AdminController {
         List<String> inputModes = inputModes(body.get("inputModes"));
         String displayName = body.containsKey("displayName")
                 ? text(body.get("displayName")) : null;
+        // 五个请求参数：键不出现表示不改（内部用 null 传递），出现空对象表示明确清空。
         catalog.saveCapabilities(name, modelId, reasoning, inputModes, contextWindow, maxTokens,
-                format, displayName);
+                format, displayName,
+                stringMapOrNull(body.get("thinkingLevelMap"), "thinkingLevelMap", true),
+                objectMapOrNull(body.get("samplerParams"), "samplerParams"),
+                nestedMapOrNull(body.get("samplerParamsByLevel"), "samplerParamsByLevel"),
+                stringMapOrNull(body.get("modelHeaders"), "modelHeaders", false),
+                objectMapOrNull(body.get("extraBody"), "extraBody"));
         return ok(modelView(catalog.findModel(name, modelId), false));
     }
 
@@ -738,6 +898,18 @@ public class AdminController {
         row.put("connectTimeoutMs", Integer.valueOf(endpoint.connectMs));
         row.put("readTimeoutMs", Integer.valueOf(endpoint.readMs));
         row.put("overlay", Boolean.valueOf(overlay != null));
+        // 生效值：覆盖表有值用覆盖表，否则用配置文件。页面据此显示当前实际会发出什么。
+        Map<String, String> effectiveHeaders = overlay != null && overlay.getHeaders() != null
+                ? overlay.getHeaders() : provider.getHeaders();
+        Map<String, Object> effectiveExtra = overlay != null && overlay.getExtraBody() != null
+                ? overlay.getExtraBody() : provider.getExtraBody();
+        row.put("providerHeaders", effectiveHeaders);
+        row.put("providerExtraBody", effectiveExtra);
+        // 让页面知道这两个值是不是来自数据库：来自配置文件的不能直接改，要先保存一次覆盖。
+        row.put("providerHeadersOverridden", Boolean.valueOf(
+                overlay != null && overlay.getHeaders() != null));
+        row.put("providerExtraBodyOverridden", Boolean.valueOf(
+                overlay != null && overlay.getExtraBody() != null));
         row.put("models", modelRows(name));
         return row;
     }
@@ -781,6 +953,11 @@ public class AdminController {
         row.put("maxTokens", model.getMaxTokens());
         row.put("thinkingFormat", model.getThinkingFormat());
         row.put("displayName", model.getDisplayName());
+        row.put("thinkingLevelMap", model.getThinkingLevelMap());
+        row.put("samplerParams", model.getSamplerParams());
+        row.put("samplerParamsByLevel", model.getSamplerParamsByLevel());
+        row.put("modelHeaders", model.getModelHeaders());
+        row.put("extraBody", model.getExtraBody());
         row.put("duplicate", Boolean.valueOf(duplicate));
         return row;
     }
@@ -889,6 +1066,164 @@ public class AdminController {
         return vars;
     }
 
+    /* ---------------- 模型/供应商级请求参数的解析与校验 ---------------- */
+
+    /** JSON 文本单列的长度上限。超长多半是把图片 base64 或整段提示词粘了进来。 */
+    private static final int JSON_LIMIT = 16384;
+
+    /** 模型级请求头的保留名：库自己管理授权与内容类型。 */
+    private static final String[] RESERVED_HEADERS = {"Authorization", "Content-Type"};
+
+    /** 合法的思考档名。用于校验 thinkingLevelMap 与 samplerParamsByLevel 的键。 */
+    private static final Set<String> THINKING_LEVELS = new HashSet<String>(Arrays.asList(
+            "off", "low", "medium", "high", "xhigh", "max"));
+
+    /**
+     * 解析字符串 Map 列。键不存在时返回 null（表示不改）。
+     *
+     * @param raw           请求体里的原值
+     * @param field         字段名，用于报错
+     * @param thinkingLevel 为 true 时校验键是合法思考档且值是字符串或 null
+     * @return 解析结果；raw 为 null 时返回 null
+     */
+    private static Map<String, String> stringMapOrNull(Object raw, String field, boolean thinkingLevel) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map)) {
+            throw new IllegalArgumentException(field + " 必须是对象");
+        }
+        Map<String, String> result = new LinkedHashMap<String, String>();
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) raw).entrySet()) {
+            String key = text(entry.getKey());
+            if (key.isEmpty()) {
+                throw new IllegalArgumentException(field + " 存在空键");
+            }
+            Object value = entry.getValue();
+            if (value == null) {
+                if (!thinkingLevel) {
+                    throw new IllegalArgumentException(field + " 的 " + key + " 值不能为空");
+                }
+                // 思考档映射里的 null 有明确含义：这一档不支持。必须保留，不能变成空串。
+                result.put(key, null);
+                continue;
+            }
+            if (!(value instanceof String)) {
+                throw new IllegalArgumentException(field + " 的 " + key + " 值必须是字符串");
+            }
+            String valueText = ((String) value).trim();
+            if (thinkingLevel) {
+                if (!THINKING_LEVELS.contains(key)) {
+                    throw new IllegalArgumentException(field + " 的档位名无效: " + key);
+                }
+                if (valueText.isEmpty()) {
+                    // 空串等同于 null：这一档不支持。
+                    result.put(key, null);
+                    continue;
+                }
+            }
+            result.put(key, valueText);
+        }
+        rejectReservedHeaders(field, result);
+        checkJsonLength(field, result);
+        return result;
+    }
+
+    /**
+     * 解析任意对象 Map 列。键不存在时返回 null（表示不改）。
+     *
+     * @param raw   请求体里的原值
+     * @param field 字段名，用于报错
+     * @return 解析结果；raw 为 null 时返回 null
+     */
+    private static Map<String, Object> objectMapOrNull(Object raw, String field) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map)) {
+            throw new IllegalArgumentException(field + " 必须是对象");
+        }
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) raw).entrySet()) {
+            String key = text(entry.getKey());
+            if (key.isEmpty()) {
+                throw new IllegalArgumentException(field + " 存在空键");
+            }
+            result.put(key, entry.getValue());
+        }
+        checkJsonLength(field, result);
+        return result;
+    }
+
+    /**
+     * 解析「思考档 → 对象」的嵌套列。键不存在时返回 null（表示不改）。
+     *
+     * @param raw   请求体里的原值
+     * @param field 字段名，用于报错
+     * @return 解析结果；raw 为 null 时返回 null
+     */
+    private static Map<String, Map<String, Object>> nestedMapOrNull(Object raw, String field) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map)) {
+            throw new IllegalArgumentException(field + " 必须是对象");
+        }
+        Map<String, Map<String, Object>> result = new LinkedHashMap<String, Map<String, Object>>();
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) raw).entrySet()) {
+            String level = text(entry.getKey());
+            if (!THINKING_LEVELS.contains(level)) {
+                throw new IllegalArgumentException(field + " 的档位名无效: " + level);
+            }
+            Object value = entry.getValue();
+            if (!(value instanceof Map)) {
+                throw new IllegalArgumentException(field + " 的 " + level + " 值必须是对象");
+            }
+            Map<String, Object> inner = new LinkedHashMap<String, Object>();
+            for (Map.Entry<?, ?> innerEntry : ((Map<?, ?>) value).entrySet()) {
+                inner.put(text(innerEntry.getKey()), innerEntry.getValue());
+            }
+            result.put(level, inner);
+        }
+        checkJsonLength(field, result);
+        return result;
+    }
+
+    /**
+     * 拒绝由库管理的请求头。
+     *
+     * <p>在 {@code headers} 里写 {@code authorization} 会顶掉真实密钥且不报错
+     * （{@code containsHeader} 大小写无关），写 {@code content-type} 会发出两个头。
+     * 这里提前拒绝，比运行时发错凭据好查。</p>
+     *
+     * @param field   字段名
+     * @param headers 待检查的头
+     */
+    private static void rejectReservedHeaders(String field, Map<String, String> headers) {
+        for (String reserved : RESERVED_HEADERS) {
+            for (String name : headers.keySet()) {
+                if (name != null && name.equalsIgnoreCase(reserved)) {
+                    String hint = "Authorization".equals(reserved)
+                            ? "请用供应商的密钥字段配置" : "Content-Type 由请求编码固定";
+                    throw new IllegalArgumentException(field + " 不能配置 " + reserved + "，" + hint);
+                }
+            }
+        }
+    }
+
+    /**
+     * 检查序列化后的长度没有超过上限。
+     *
+     * @param field 字段名
+     * @param value 待检查对象
+     */
+    private static void checkJsonLength(String field, Object value) {
+        String json = AiLiteJson.toJson(value);
+        if (json.length() > JSON_LIMIT) {
+            throw new IllegalArgumentException(field + " 太长，超过 " + JSON_LIMIT + " 字符");
+        }
+    }
+
     private static Map<String, Object> latestDraft(PromptManager manager, String bizId) {
         for (PromptVersion version : manager.versions(bizId)) {
             if (version.getStatus() == PromptStatus.DRAFT) {
@@ -929,7 +1264,17 @@ public class AdminController {
                 && !text(body.get("readTimeoutMs")).isEmpty()) {
             read = Integer.valueOf(positive(body.get("readTimeoutMs"), "读取超时"));
         }
-        return new ProviderOverlay(name, baseUrl, apiKey, connect, read, api);
+        // 请求参数两级：键不出现表示不改（null），出现空对象表示明确清空。
+        Map<String, String> providerHeaders = current == null ? null : current.getHeaders();
+        Map<String, Object> providerExtra = current == null ? null : current.getExtraBody();
+        if (body != null && body.containsKey("providerHeaders")) {
+            providerHeaders = stringMapOrNull(body.get("providerHeaders"), "providerHeaders", false);
+        }
+        if (body != null && body.containsKey("providerExtraBody")) {
+            providerExtra = objectMapOrNull(body.get("providerExtraBody"), "providerExtraBody");
+        }
+        return new ProviderOverlay(name, baseUrl, apiKey, connect, read, api,
+                providerHeaders, providerExtra);
     }
 
     private Endpoint endpoint(String name, AiLiteConfig.Provider provider) {
@@ -949,6 +1294,7 @@ public class AdminController {
         String apiKey = effectiveKey(provider);
         int connect = provider.getConnectTimeoutMs() == null ? 10000 : provider.getConnectTimeoutMs().intValue();
         int read = provider.getReadTimeoutMs() == null ? 120000 : provider.getReadTimeoutMs().intValue();
+        Map<String, String> headers = provider.getHeaders();
         if (overlay != null) {
             if (Strings.isNotBlank(overlay.getApi())) {
                 api = overlay.getApi().trim();
@@ -965,11 +1311,14 @@ public class AdminController {
             if (overlay.getReadTimeoutMs() != null) {
                 read = overlay.getReadTimeoutMs().intValue();
             }
+            if (overlay.getHeaders() != null) {
+                headers = overlay.getHeaders();
+            }
         }
         while (baseUrl.endsWith("/")) {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
         }
-        return new Endpoint(api, baseUrl, apiKey, connect, read);
+        return new Endpoint(api, baseUrl, apiKey, connect, read, headers);
     }
 
     private static String effectiveKey(AiLiteConfig.Provider provider) {
@@ -1110,13 +1459,16 @@ public class AdminController {
         private final String apiKey;
         private final int connectMs;
         private final int readMs;
+        private final Map<String, String> headers;
 
-        private Endpoint(String api, String baseUrl, String apiKey, int connectMs, int readMs) {
+        private Endpoint(String api, String baseUrl, String apiKey, int connectMs, int readMs,
+                         Map<String, String> headers) {
             this.api = api;
             this.baseUrl = baseUrl;
             this.apiKey = apiKey;
             this.connectMs = connectMs;
             this.readMs = readMs;
+            this.headers = headers == null ? Collections.<String, String>emptyMap() : headers;
         }
     }
 }

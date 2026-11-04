@@ -6,6 +6,8 @@ import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcCallBodyPolicy;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalog;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalogTest;
 import io.github.yinwenyuan28.ailite.admin.jdbc.SqliteFiles;
+import io.github.yinwenyuan28.ailite.catalog.CatalogModel;
+import io.github.yinwenyuan28.ailite.catalog.ProviderOverlay;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.llm.CallBodyPolicy;
 import io.github.yinwenyuan28.ailite.http.AsyncHttpExecutor;
@@ -423,6 +425,189 @@ public class AdminWebTest {
                                 + "\"contextWindow\":8000,\"maxTokens\":1024,\"thinkingFormat\":\"none\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("未知入参类型")));
+    }
+
+    /* ---------------- 模型级请求参数（0.1.15） ---------------- */
+
+    /**
+     * 五个模型级请求参数能通过接口写入、读回，并出现在模型视图里。
+     */
+    @Test
+    public void capabilitiesSaveRequestParams() throws Exception {
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"modelId\":\"qwen\"}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\","
+                                + "\"thinkingLevelMap\":{\"low\":\"low\",\"off\":null},"
+                                + "\"samplerParams\":{\"temperature\":0.2},"
+                                + "\"samplerParamsByLevel\":{\"high\":{\"top_p\":0.95}},"
+                                + "\"modelHeaders\":{\"X-Model\":\"v2\"},"
+                                + "\"extraBody\":{\"vendor_field\":\"x\"}}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"X-Model\":\"v2\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"temperature\":0.2")));
+
+        CatalogModel saved = catalog.findModel("demo", "qwen");
+        assertThat(saved.getThinkingLevelMap()).containsEntry("low", "low");
+        assertThat(saved.getThinkingLevelMap().get("off")).isNull();
+        assertThat(saved.getSamplerParams()).containsEntry("temperature", Double.valueOf(0.2));
+        assertThat(saved.getModelHeaders()).containsEntry("X-Model", "v2");
+        assertThat(saved.getExtraBody()).containsEntry("vendor_field", "x");
+    }
+
+    /**
+     * 键不出现表示不改；出现空对象表示明确清空。
+     */
+    @Test
+    public void requestParamsOmittedMeansUnchangedEmptyClears() throws Exception {
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"modelId\":\"qwen\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\",\"modelHeaders\":{\"X-Model\":\"v2\"}}"))
+                .andExpect(status().isOk());
+
+        // 不传 modelHeaders：保留旧值。
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\"}"))
+                .andExpect(status().isOk());
+        assertThat(catalog.findModel("demo", "qwen").getModelHeaders()).containsEntry("X-Model", "v2");
+
+        // 传空对象：清空。
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\",\"modelHeaders\":{}}"))
+                .andExpect(status().isOk());
+        assertThat(catalog.findModel("demo", "qwen").getModelHeaders()).isEmpty();
+    }
+
+    /**
+     * 非法输入一律 400，并说明是哪个字段。
+     */
+    @Test
+    public void requestParamsRejectInvalidInput() throws Exception {
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"modelId\":\"qwen\"}"))
+                .andExpect(status().isOk());
+
+        // 不是对象
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\",\"samplerParams\":[1,2]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("samplerParams")));
+
+        // 思考档名非法
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\","
+                                + "\"thinkingLevelMap\":{\"super\":\"high\"}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("档位名无效")));
+
+        // 保留头
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\","
+                                + "\"modelHeaders\":{\"authorization\":\"Token x\"}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("Authorization")));
+
+        // 头值不是字符串
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\","
+                                + "\"modelHeaders\":{\"X-Num\":123}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("必须是字符串")));
+
+        // 分档采样参数的键非法
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"deepseek\","
+                                + "\"samplerParamsByLevel\":{\"nope\":{\"top_p\":0.9}}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("档位名无效")));
+    }
+
+    /**
+     * 供应商级两个请求参数能保存并读回，视图里标出来源。
+     */
+    @Test
+    public void overlaySavesProviderRequestParams() throws Exception {
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/overlay")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"providerHeaders\":{\"X-Request-Source\":\"my-app\"},"
+                                + "\"providerExtraBody\":{\"chat_template_kwargs\":"
+                                + "{\"enable_thinking\":true}}}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("X-Request-Source")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("providerHeadersOverridden\":true")));
+
+        ProviderOverlay overlay = catalog.findProvider("demo");
+        assertThat(overlay.getHeaders()).containsEntry("X-Request-Source", "my-app");
+        assertThat(overlay.getExtraBody()).containsKey("chat_template_kwargs");
+    }
+
+    /**
+     * 供应商级头里写 Authorization 也要拒绝。
+     */
+    @Test
+    public void overlayRejectsReservedHeader() throws Exception {
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/overlay")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"providerHeaders\":{\"Content-Type\":\"application/x-custom\"}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("Content-Type")));
+    }
+
+    /**
+     * 「测试调用」要把两级请求参数带进请求体，否则页面上配了、测试时却没发出去。
+     */
+    @Test
+    public void tryCallIncludesRequestParams() throws Exception {
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"modelId\":\"qwen\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/qwen")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"none\","
+                                + "\"samplerParams\":{\"temperature\":0.31},"
+                                + "\"modelHeaders\":{\"X-Model\":\"v2\"},"
+                                + "\"extraBody\":{\"model_marker\":\"m\"}}"))
+                .andExpect(status().isOk());
+
+        String response = mockMvc.perform(
+                        org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                                .post("/ai-lite/admin/api/providers/demo/models/qwen/try")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"thinkingLevel\":\"off\"}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        // 请求回显里应出现采样参数与附加字段。
+        assertThat(response).contains("temperature");
+        assertThat(response).contains("0.31");
+        assertThat(response).contains("model_marker");
     }
 
     /**

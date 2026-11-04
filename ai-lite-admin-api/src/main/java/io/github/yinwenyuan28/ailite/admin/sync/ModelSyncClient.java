@@ -1,10 +1,19 @@
 package io.github.yinwenyuan28.ailite.admin.sync;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
 import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
+import io.github.yinwenyuan28.ailite.json.AiLiteJson;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
+import io.github.yinwenyuan28.ailite.llm.LlmCompletion;
+import io.github.yinwenyuan28.ailite.llm.LlmMessage;
+import io.github.yinwenyuan28.ailite.llm.LlmRequest;
+import io.github.yinwenyuan28.ailite.llm.LlmTool;
+import io.github.yinwenyuan28.ailite.llm.LlmTransport;
+import io.github.yinwenyuan28.ailite.llm.ResolvedModel;
 import io.github.yinwenyuan28.ailite.admin.jdbc.JdbcRuntimeCatalog;
 
 import java.io.ByteArrayOutputStream;
@@ -44,6 +53,32 @@ public final class ModelSyncClient {
     }
 
     /**
+     * 把供应商级自定义请求头并进探测用的头。
+     *
+     * <p>保留 {@code Authorization} 与 {@code Content-Type} 由本类决定：这两个由密钥与
+     * 请求编码固定，不允许通过配置覆盖（配置阶段已经拦过一次，这里再兜一层，
+     * 避免有人直接调这个类时绕过）。</p>
+     *
+     * @param target 目标头
+     * @param extra  自定义头，可为 null
+     */
+    private static void mergeExtraHeaders(Map<String, String> target, Map<String, String> extra) {
+        if (extra == null || extra.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<String, String> entry : extra.entrySet()) {
+            String name = entry.getKey();
+            if (name == null || name.trim().isEmpty()) {
+                continue;
+            }
+            if ("authorization".equalsIgnoreCase(name) || "content-type".equalsIgnoreCase(name)) {
+                continue;
+            }
+            target.put(name, entry.getValue());
+        }
+    }
+
+    /**
      * 同步远端模型列表到目录。
      *
      * @param http       出站执行器，可为 null（退化为 HttpURLConnection）
@@ -56,10 +91,32 @@ public final class ModelSyncClient {
      */
     public static SyncStats sync(HttpExecutor http, String api, String baseUrl, String apiKey,
                                  JdbcRuntimeCatalog catalog, String providerId) {
+        return sync(http, api, baseUrl, apiKey, catalog, providerId, null);
+    }
+
+    /**
+     * 同步远端模型列表到目录，并带上供应商的自定义请求头。
+     *
+     * <p>{@code extraHeaders} 存在的理由：供应商级请求头会影响路由、灰度或鉴权，
+     * 探测与业务调用必须带同一份。修复前探测只带 Authorization，配了自定义头之后
+     * 会出现「页面上测通了但业务失败」的错位。</p>
+     *
+     * @param http        出站执行器，可为 null（退化为 HttpURLConnection）
+     * @param api         协议
+     * @param baseUrl     供应商根地址
+     * @param apiKey      生效密钥
+     * @param catalog     目录
+     * @param providerId  供应商 id
+     * @param extraHeaders 供应商级请求头，可为 null
+     * @return 新增数与已存在数
+     */
+    public static SyncStats sync(HttpExecutor http, String api, String baseUrl, String apiKey,
+                                 JdbcRuntimeCatalog catalog, String providerId,
+                                 Map<String, String> extraHeaders) {
         if ("anthropic-messages".equals(api)) {
             throw new IllegalStateException("该协议没有 /models，请手工添加模型");
         }
-        ProbeResult probe = probe(http, baseUrl, apiKey, 10000, MAX_READ_MS);
+        ProbeResult probe = probe(http, baseUrl, apiKey, 10000, MAX_READ_MS, extraHeaders);
         if (!probe.isOk()) {
             throw new IllegalStateException(probe.getMessage());
         }
@@ -86,10 +143,25 @@ public final class ModelSyncClient {
      */
     public static List<String> listRemote(HttpExecutor http, String api, String baseUrl,
                                           String apiKey) {
+        return listRemote(http, api, baseUrl, apiKey, null);
+    }
+
+    /**
+     * 读取远端模型列表，带供应商自定义请求头。
+     *
+     * @param http         出站执行器，可为 null
+     * @param api          协议
+     * @param baseUrl      供应商根地址
+     * @param apiKey       生效密钥
+     * @param extraHeaders 供应商级请求头，可为 null
+     * @return 远端模型 id，保持出现顺序
+     */
+    public static List<String> listRemote(HttpExecutor http, String api, String baseUrl,
+                                          String apiKey, Map<String, String> extraHeaders) {
         if ("anthropic-messages".equals(api)) {
             throw new IllegalStateException("该协议没有 /models，请手工添加模型");
         }
-        ProbeResult probe = probe(http, baseUrl, apiKey, 10000, MAX_READ_MS);
+        ProbeResult probe = probe(http, baseUrl, apiKey, 10000, MAX_READ_MS, extraHeaders);
         if (!probe.isOk()) {
             throw new IllegalStateException(probe.getMessage());
         }
@@ -178,6 +250,195 @@ public final class ModelSyncClient {
     public static TryResult tryChat(HttpExecutor http, String api, String baseUrl, String apiKey,
                                     String modelId, String thinkingFormat, Integer maxTokens,
                                     String thinkingLevel, int connectMs, int readMs) {
+        return tryChat(http, api, baseUrl, apiKey, modelId, thinkingFormat, maxTokens,
+                thinkingLevel, connectMs, readMs, null);
+    }
+
+    /**
+     * 向模型发一次最短对话，带上供应商自定义请求头。不写调用日志。
+     *
+     * @param http           出站执行器，可为 null（退化为 HttpURLConnection）
+     * @param api            协议
+     * @param baseUrl        供应商根地址
+     * @param apiKey         生效密钥
+     * @param modelId        模型 id
+     * @param thinkingFormat 思考格式，可空
+     * @param maxTokens      输出上限，可空
+     * @param thinkingLevel  思考档
+     * @param connectMs      连接超时
+     * @param readMs         读取超时，上限 60 秒
+     * @param extraHeaders   供应商级请求头，可为 null
+     * @return 探测结果
+     */
+    public static TryResult tryChat(HttpExecutor http, String api, String baseUrl, String apiKey,
+                                    String modelId, String thinkingFormat, Integer maxTokens,
+                                    String thinkingLevel, int connectMs, int readMs,
+                                    Map<String, String> extraHeaders) {
+        return tryChat(http, api, baseUrl, apiKey, modelId, thinkingFormat, maxTokens,
+                thinkingLevel, connectMs, readMs, extraHeaders, null);
+    }
+
+    /**
+     * 用真实的协议适配器发一次测试调用。
+     *
+     * <p>与 {@link #tryChat} 的区别：这个方法走 {@code LlmTransport}，也就是业务调用
+     * 用的同一套请求构造代码，因此三种协议都支持，请求头与请求体的拼装规则也完全一致。
+     * {@link #tryChat} 是手写 JSON 的旧实现，只支持 OpenAI 兼容协议，且样本消息、
+     * 思考参数写法都是自己的分支——两边迟早会走偏。</p>
+     *
+     * <p>代价：仍不写调用日志、不过出口保护（guard），因为这两件事在
+     * {@code LlmGateway} 里，而这个方法只借用了传输层。测试调用产生真实计费，
+     * 但不应污染业务调用记录，也不该占业务的并发许可。</p>
+     *
+     * @param transport 协议适配器
+     * @param model     解析好的模型（含两级请求参数）
+     * @param maxTokens 输出上限覆盖；null 表示用模型配置
+     * @param timeoutMs 读超时，上限 60 秒
+     * @return 探测结果
+     */
+    public static TryResult tryChatViaTransport(LlmTransport transport, ResolvedModel model,
+                                                Integer maxTokens, int timeoutMs) {
+        if (transport == null) {
+            return TryResult.failed(trimSlash(model == null ? null : model.getBaseUrl()),
+                    "没有可用的协议适配器");
+        }
+        if (model == null) {
+            return TryResult.failed("", "模型不存在");
+        }
+        int read = timeoutMs <= 0 ? 30000 : Math.min(timeoutMs, 60000);
+        LlmRequest request = new LlmRequest(model,
+                Collections.<LlmMessage>singletonList(LlmMessage.user("你好")),
+                Collections.<LlmTool>emptyList(), false, null, null, null,
+                Integer.valueOf(read), null, maxTokens);
+        String url = describeUrl(model);
+        long started = System.currentTimeMillis();
+        try {
+            LlmCompletion completion = transport.complete(request);
+            long latency = System.currentTimeMillis() - started;
+            String content = completion == null || completion.getContent() == null
+                    ? "" : completion.getContent();
+            String message = content.isEmpty() ? "调用成功，但没有解析到回复" : "调用成功";
+            String requestText = describeRequest(model, url, maxTokens);
+            String responseText = "HTTP 200\n" + limit(content, 20000);
+            return new TryResult(true, 200, latency, message, content, requestText, responseText);
+        } catch (LlmCallException ex) {
+            long latency = System.currentTimeMillis() - started;
+            String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
+            return new TryResult(false, statusOf(ex), latency,
+                    stripKey(message, model.getApiKey()), "",
+                    describeRequest(model, url, maxTokens),
+                    stripKey("请求失败：" + message, model.getApiKey()));
+        } catch (Exception ex) {
+            long latency = System.currentTimeMillis() - started;
+            String message = ex.getMessage() == null ? "请求失败" : ex.getMessage();
+            return new TryResult(false, 0, latency,
+                    stripKey(message, model.getApiKey()), "",
+                    describeRequest(model, url, maxTokens),
+                    stripKey("请求失败：" + message, model.getApiKey()));
+        }
+    }
+
+    /**
+     * 拼一个「这次大概会发什么」的展示。
+     *
+     * <p>传输层不接受外部传入的完整报文，所以这里的请求体是按同样规则重建的近似值：
+     * 模型 id、消息、输出上限、采样参数与附加字段都是真实值，但思考开关的具体字段名
+     * 由各协议自己决定，这里不做模拟。请求头是真实生效值（含两级合并结果）。</p>
+     *
+     * @param model     模型
+     * @param url       地址
+     * @param maxTokens 输出上限覆盖
+     * @return 展示文本
+     */
+    private static String describeRequest(ResolvedModel model, String url, Integer maxTokens) {
+        Map<String, String> headers = new LinkedHashMap<String, String>();
+        headers.putAll(model.getHeaders());
+        if (!containsIgnoreCase(headers, "Authorization")) {
+            headers.put("Authorization", "Bearer " + model.getApiKey());
+        }
+        if (!containsIgnoreCase(headers, "Content-Type")) {
+            headers.put("Content-Type", "application/json; charset=utf-8");
+        }
+        StringBuilder body = new StringBuilder();
+        int tokens = maxTokens == null || maxTokens.intValue() <= 0
+                ? model.getMaxTokens() : maxTokens.intValue();
+        body.append("{\"model\":\"").append(model.getModelId()).append("\",");
+        body.append("\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],");
+        body.append("\"max_tokens\":").append(tokens);
+        if (model.getSamplerParams() != null) {
+            for (Map.Entry<String, Object> entry : model.getSamplerParams().entrySet()) {
+                body.append(",\"").append(entry.getKey()).append("\":")
+                        .append(AiLiteJson.toJson(entry.getValue()));
+            }
+        }
+        if (model.getExtraBody() != null) {
+            for (Map.Entry<String, Object> entry : model.getExtraBody().entrySet()) {
+                body.append(",\"").append(entry.getKey()).append("\":")
+                        .append(AiLiteJson.toJson(entry.getValue()));
+            }
+        }
+        body.append("}");
+        return requestDump("POST", url, headers, body.toString(), model.getApiKey());
+    }
+
+    /**
+     * @param headers 头
+     * @param name    头名
+     * @return 是否存在（忽略大小写）
+     */
+    private static boolean containsIgnoreCase(Map<String, String> headers, String name) {
+        for (String key : headers.keySet()) {
+            if (key != null && key.equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 按协议拼出会实际请求的地址，供回显使用。
+     *
+     * @param model 模型
+     * @return 完整地址
+     */
+    private static String describeUrl(ResolvedModel model) {
+        String base = trimSlash(model.getBaseUrl());
+        String api = model.getApi();
+        if ("anthropic-messages".equals(api)) {
+            return base + "/v1/messages";
+        }
+        if ("openai-responses".equals(api)) {
+            return base + "/responses";
+        }
+        return base + "/chat/completions";
+    }
+
+    /**
+     * 向模型发一次最短对话，带上两级请求参数。
+     *
+     * <p>{@code extraBody} 是模型级与供应商级附加字段合并后的结果。带上它，
+     * 「测试调用」才与业务调用发出同样的请求体；否则页面显示采样参数已配好，
+     * 测试时却一个都没发出去，会让人误判配置没生效。</p>
+     *
+     * @param http           出站执行器，可为 null
+     * @param api            协议
+     * @param baseUrl        供应商根地址
+     * @param apiKey         生效密钥
+     * @param modelId        模型 id
+     * @param thinkingFormat 思考格式，可空
+     * @param maxTokens      输出上限，可空
+     * @param thinkingLevel  思考档
+     * @param connectMs      连接超时
+     * @param readMs         读取超时
+     * @param extraHeaders   供应商级请求头，可为 null
+     * @param extraBody      两级附加请求体合并结果，可为 null
+     * @return 探测结果
+     */
+    public static TryResult tryChat(HttpExecutor http, String api, String baseUrl, String apiKey,
+                                    String modelId, String thinkingFormat, Integer maxTokens,
+                                    String thinkingLevel, int connectMs, int readMs,
+                                    Map<String, String> extraHeaders,
+                                    Map<String, Object> extraBody) {
         if ("anthropic-messages".equals(api)) {
             return TryResult.failed(trimSlash(baseUrl), "Anthropic 协议的测试调用尚未接入");
         }
@@ -185,13 +446,15 @@ public final class ModelSyncClient {
             return TryResult.failed(trimSlash(baseUrl), "Responses 协议的测试调用尚未接入");
         }
         String url = trimSlash(baseUrl) + "/chat/completions";
-        String payload = chatPayload(modelId, thinkingFormat, maxTokens, thinkingLevel);
-        String requestText = redact(requestDump("POST", url, payload), apiKey);
+        String payload = chatPayload(modelId, thinkingFormat, maxTokens, thinkingLevel, extraBody);
         int read = readMs <= 0 ? 30000 : Math.min(readMs, 60000);
         int connect = connectMs <= 0 ? 10000 : connectMs;
         Map<String, String> headers = new LinkedHashMap<String, String>();
         headers.put("Authorization", "Bearer " + apiKey);
         headers.put("Content-Type", "application/json; charset=utf-8");
+        mergeExtraHeaders(headers, extraHeaders);
+        // 先拼好真实请求头，再据此生成回显：这样自定义头也能在页面上看到。
+        String requestText = requestDump("POST", url, headers, payload, apiKey);
         HttpRequest request = new HttpRequest(HttpRequest.POST, url, headers, payload,
                 connect, read, null);
         long started = System.currentTimeMillis();
@@ -235,11 +498,28 @@ public final class ModelSyncClient {
      */
     public static ProbeResult probe(HttpExecutor http, String baseUrl, String apiKey,
                                     int connectMs, int readMs) {
+        return probe(http, baseUrl, apiKey, connectMs, readMs, null);
+    }
+
+    /**
+     * 探测连通，带上供应商自定义请求头。
+     *
+     * @param http         出站执行器，可为 null
+     * @param baseUrl      根地址
+     * @param apiKey       生效密钥
+     * @param connectMs    连接超时
+     * @param readMs       读取超时
+     * @param extraHeaders 供应商级请求头，可为 null
+     * @return 探测结果
+     */
+    public static ProbeResult probe(HttpExecutor http, String baseUrl, String apiKey,
+                                    int connectMs, int readMs, Map<String, String> extraHeaders) {
         String url = trimSlash(baseUrl) + "/models";
         int read = readMs <= 0 ? MAX_READ_MS : Math.min(readMs, MAX_READ_MS);
         int connect = connectMs <= 0 ? 10000 : connectMs;
-        Map<String, String> headers = Collections.singletonMap(
-                "Authorization", "Bearer " + apiKey);
+        Map<String, String> headers = new LinkedHashMap<String, String>();
+        headers.put("Authorization", "Bearer " + apiKey);
+        mergeExtraHeaders(headers, extraHeaders);
         HttpRequest request = new HttpRequest(HttpRequest.GET, url, headers, null,
                 connect, read, null);
         long started = System.currentTimeMillis();
@@ -363,11 +643,45 @@ public final class ModelSyncClient {
         return error.getStatusCode() == null ? 0 : error.getStatusCode().intValue();
     }
 
-    static String requestDump(String method, String url, String payload) {
-        return method + " " + url + "\n"
-                + "Content-Type: application/json; charset=utf-8\n"
-                + "Authorization: Bearer ***\n\n"
-                + payload;
+    /**
+     * 拼「这次发了什么」的展示文本。
+     *
+     * <p>必须用真实的请求头，不能写死。早先这里固定输出
+     * {@code Content-Type: ...} 与 {@code Authorization: Bearer ***} 两行，
+     * 于是管理页配的自定义请求头在回显里根本看不到，用户会以为没生效。</p>
+     *
+     * <p>密钥在这里统一脱敏：真实值替换成 {@code ***}，避免把密钥回显到浏览器。</p>
+     *
+     * @param method  方法
+     * @param url     完整地址
+     * @param headers 真实请求头
+     * @param payload 真实请求体
+     * @param apiKey  生效密钥，用于脱敏
+     * @return 可展示的请求文本
+     */
+    static String requestDump(String method, String url, Map<String, String> headers,
+                              String payload, String apiKey) {
+        StringBuilder text = new StringBuilder();
+        text.append(method).append(" ").append(url).append('\n');
+        if (headers != null) {
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                String value = entry.getValue() == null ? "" : entry.getValue();
+                if (isAuthorization(entry.getKey()) && apiKey != null && !apiKey.isEmpty()) {
+                    value = value.replace(apiKey, "***");
+                }
+                text.append(entry.getKey()).append(": ").append(value).append('\n');
+            }
+        }
+        text.append('\n').append(payload == null ? "" : payload);
+        return redact(text.toString(), apiKey);
+    }
+
+    /**
+     * @param name 头名
+     * @return 是否是授权头（忽略大小写）
+     */
+    private static boolean isAuthorization(String name) {
+        return name != null && "authorization".equalsIgnoreCase(name.trim());
     }
 
     private static String limit(String text, int max) {
@@ -382,6 +696,21 @@ public final class ModelSyncClient {
 
     static String chatPayload(String modelId, String thinkingFormat, Integer maxTokens,
                               String thinkingLevel) {
+        return chatPayload(modelId, thinkingFormat, maxTokens, thinkingLevel, null);
+    }
+
+    /**
+     * 拼测试调用的请求体。
+     *
+     * @param modelId        模型 id
+     * @param thinkingFormat 思考格式
+     * @param maxTokens      输出上限
+     * @param thinkingLevel  思考档
+     * @param extraBody      附加字段，会深合并进请求体；可为 null
+     * @return JSON 文本
+     */
+    static String chatPayload(String modelId, String thinkingFormat, Integer maxTokens,
+                              String thinkingLevel, Map<String, Object> extraBody) {
         int tokens = maxTokens == null || maxTokens.intValue() <= 0 ? 8192 : maxTokens.intValue();
         String level = normalizeThinkingLevel(thinkingLevel);
         boolean enabled = !"off".equals(level);
@@ -406,7 +735,35 @@ public final class ModelSyncClient {
             json.append(",\"reasoning_effort\":\"").append(escapeJson(level)).append("\"");
         }
         json.append("}");
-        return json.toString();
+        if (extraBody == null || extraBody.isEmpty()) {
+            return json.toString();
+        }
+        // 与网关的 TransportSupport.merge 同语义：Map 递归合并，其他类型后者覆盖。
+        ObjectNode body = (ObjectNode) AiLiteJson.readTree(json.toString());
+        mergeDeep(body, extraBody);
+        return AiLiteJson.toJson(body);
+    }
+
+    /**
+     * 深合并：嵌套对象递归合并，其余按键覆盖。与网关侧实现保持一致。
+     *
+     * @param target 目标 JSON 对象
+     * @param source 待合并的 Map
+     */
+    @SuppressWarnings("unchecked")
+    private static void mergeDeep(ObjectNode target, Map<String, Object> source) {
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            if (entry.getKey() == null) {
+                continue;
+            }
+            Object value = entry.getValue();
+            JsonNode existing = target.get(entry.getKey());
+            if (value instanceof Map && existing instanceof ObjectNode) {
+                mergeDeep((ObjectNode) existing, (Map<String, Object>) value);
+            } else {
+                target.set(entry.getKey(), AiLiteJson.mapper().valueToTree(value));
+            }
+        }
     }
 
     static String normalizeThinkingLevel(String thinkingLevel) {

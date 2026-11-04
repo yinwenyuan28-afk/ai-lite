@@ -104,10 +104,114 @@ public class ModelSyncClientTest {
                 .hasMessageContaining("请手工添加模型");
     }
 
+    /**
+     * 请求回显必须用真实请求头，不能写死。自定义头要能看到，密钥要脱敏。
+     */
+    @Test
+    public void requestDumpShowsRealHeadersAndMasksKey() {
+        java.util.Map<String, String> headers = new java.util.LinkedHashMap<String, String>();
+        headers.put("Authorization", "Bearer real-secret-key");
+        headers.put("Content-Type", "application/json; charset=utf-8");
+        headers.put("X-Custom-Header", "custom-value");
+
+        String dump = ModelSyncClient.requestDump("POST", "http://example/v1/chat/completions",
+                headers, "{\"model\":\"m\"}", "real-secret-key");
+
+        assertThat(dump).contains("X-Custom-Header: custom-value");
+        assertThat(dump).contains("Content-Type: application/json; charset=utf-8");
+        assertThat(dump).contains("Authorization: Bearer ***");
+        assertThat(dump).doesNotContain("real-secret-key");
+        assertThat(dump).contains("{\"model\":\"m\"}");
+    }
+
+    /**
+     * 失败文本仍要脱敏。
+     */
     @Test
     public void failureTextStripsApiKey() {
         assertThat(ModelSyncClient.stripKey("请求失败：" + apiKey, apiKey)).isEqualTo("请求失败：***");
         assertThat(ModelSyncClient.stripKey("请求失败：" + apiKey, apiKey)).doesNotContain(apiKey);
+    }
+
+    /**
+     * 供应商级自定义请求头会带到探测请求上，且不允许覆盖 Authorization。
+     *
+     * <p>这条锁住「管理页配了自定义头之后，测试连通与业务调用带同一份头」。
+     * 用本地假服务抓请求头，不依赖外部网络。</p>
+     */
+    @Test
+    public void probeCarriesExtraHeaders() throws Exception {
+        final java.util.List<String> received = new java.util.ArrayList<String>();
+        com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", new com.sun.net.httpserver.HttpHandler() {
+            @Override
+            public void handle(com.sun.net.httpserver.HttpExchange exchange)
+                    throws java.io.IOException {
+                received.add(String.valueOf(exchange.getRequestHeaders().getFirst("X-Request-Source")));
+                received.add(String.valueOf(exchange.getRequestHeaders().getFirst("Authorization")));
+                byte[] body = "{\"data\":[{\"id\":\"m1\"}]}".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+            }
+        });
+        server.start();
+        try {
+            String base = "http://127.0.0.1:" + server.getAddress().getPort();
+            java.util.Map<String, String> extra = new java.util.LinkedHashMap<String, String>();
+            extra.put("X-Request-Source", "my-app");
+            // 试图覆盖 Authorization：应被忽略，仍用真实密钥。
+            extra.put("authorization", "Token forged");
+
+            ModelSyncClient.ProbeResult probe = ModelSyncClient.probe(
+                    null, base, "real-key", 5000, 5000, extra);
+
+            assertThat(probe.isOk()).isTrue();
+            assertThat(received).contains("my-app");
+            assertThat(received).contains("Bearer real-key");
+            assertThat(received).doesNotContain("Token forged");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /**
+     * 测试调用同样要带供应商级头。
+     */
+    @Test
+    public void tryChatCarriesExtraHeaders() throws Exception {
+        final java.util.List<String> received = new java.util.ArrayList<String>();
+        com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", new com.sun.net.httpserver.HttpHandler() {
+            @Override
+            public void handle(com.sun.net.httpserver.HttpExchange exchange)
+                    throws java.io.IOException {
+                received.add(String.valueOf(exchange.getRequestHeaders().getFirst("X-Trace-Id")));
+                byte[] body = ("{\"choices\":[{\"message\":{\"role\":\"assistant\","
+                        + "\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}")
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+            }
+        });
+        server.start();
+        try {
+            String base = "http://127.0.0.1:" + server.getAddress().getPort();
+            java.util.Map<String, String> extra = new java.util.LinkedHashMap<String, String>();
+            extra.put("X-Trace-Id", "abc-123");
+
+            ModelSyncClient.TryResult result = ModelSyncClient.tryChat(
+                    null, "openai-completions", base, "k", "m", "none",
+                    Integer.valueOf(64), "off", 5000, 5000, extra);
+
+            assertThat(result.isOk()).isTrue();
+            assertThat(received).contains("abc-123");
+        } finally {
+            server.stop(0);
+        }
     }
 
     private String firstModelId() {
