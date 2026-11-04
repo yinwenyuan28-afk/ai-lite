@@ -552,14 +552,54 @@
       document.removeEventListener("mousedown", onOutside, true);
       document.removeEventListener("keydown", onKeydown, true);
       window.removeEventListener("resize", closeMenu);
-      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("scroll", onWindowScroll, true);
     }
 
+    /**
+     * 滚动时跟着触发器重新定位，而不是直接收起。
+     *
+     * <p>菜单是 position:fixed 挂在 body 上的，页一滚就会和触发器错位，所以要响应滚动。
+     * 但「一滚就关」会误伤两种情况：</p>
+     *
+     * <ul>
+     *   <li>在菜单自己的选项列表里滚轮翻页——scroll 事件同样会被 window 收到；</li>
+     *   <li>弹窗里的菜单：滚轮可能先被弹窗的 .modal-body 吃掉一次（它是可滚动容器），
+     *       菜单还没轮到就已经被关掉了。这正是「选项列表一滚就整个消失」的原因。</li>
+     * </ul>
+     *
+     * <p>改成重新定位后，两种情况都表现为「菜单跟着触发器走」，不会凭空消失。
+     * 只有触发器本身滚出视口时才收起——那时菜单已经不知道该贴哪儿了。</p>
+     */
+    function onWindowScroll(event) {
+      if (menu.contains(event.target)) {
+        return;
+      }
+      var rect = trigger.getBoundingClientRect();
+      if (rect.bottom < 0 || rect.top > window.innerHeight) {
+        closeMenu();
+        return;
+      }
+      positionMenu();
+    }
+
+    /**
+     * 把菜单摆到触发器下方或上方，并定宽。
+     *
+     * <p>宽度先按内容自适应（max-content），再夹到视口内。之前直接沿用触发器的宽度
+     * （工具栏里的下拉只有 168px），带说明文字的选项会被折成两三行，同一个列表里
+     * 各项因此高度不一，看着像坏了。宽度放开后一句说明能排在一行内，高度自然齐平。</p>
+     */
     function positionMenu() {
       var rect = trigger.getBoundingClientRect();
-      var width = Math.max(rect.width, 160);
-      var left = Math.min(rect.left, window.innerWidth - width - 8);
+      var minWidth = Math.max(rect.width, 160);
+      // 先让它按内容撑开，量出真实需要的宽度。
+      menu.style.width = "max-content";
+      menu.style.minWidth = minWidth + "px";
+      var wanted = menu.getBoundingClientRect().width;
+      var maxWidth = Math.min(380, window.innerWidth - 16);
+      var width = Math.min(Math.max(wanted, minWidth), maxWidth);
       menu.style.width = width + "px";
+      var left = Math.min(rect.left, window.innerWidth - width - 8);
       menu.style.left = Math.max(8, left) + "px";
       menu.style.top = "auto";
       menu.style.bottom = "auto";
@@ -616,7 +656,7 @@
       document.addEventListener("mousedown", onOutside, true);
       document.addEventListener("keydown", onKeydown, true);
       window.addEventListener("resize", closeMenu);
-      window.addEventListener("scroll", closeMenu, true);
+      window.addEventListener("scroll", onWindowScroll, true);
     }
 
     function markActive() {
