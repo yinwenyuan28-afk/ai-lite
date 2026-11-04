@@ -1,9 +1,11 @@
 package io.github.yinwenyuan28.ailite.admin.jdbc;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.yinwenyuan28.ailite.catalog.BizBinding;
 import io.github.yinwenyuan28.ailite.catalog.CatalogModel;
 import io.github.yinwenyuan28.ailite.catalog.ProviderOverlay;
 import io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog;
+import io.github.yinwenyuan28.ailite.json.AiLiteJson;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.sql.ResultSet;
@@ -54,7 +56,73 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
         requireTables(jdbc, this.providerTable, this.modelTable, this.bizTable);
         // 放在构造器里而不是自动装配里：直接 new 这个类的调用方也要能读旧库。
         ensureProviderApiColumn(jdbc, this.providerTable);
+        ensureExtraColumns(jdbc, this.providerTable, this.modelTable);
     }
+
+    /**
+     * 0.1.15 起新增的七列。旧库补列后全为 NULL，解析时回落到配置文件，行为与升级前一致。
+     */
+    private static final String[] OVERLAY_JSON_COLUMNS = {"PROVIDER_HEADERS", "PROVIDER_EXTRA_BODY"};
+
+    private static final String[] MODEL_JSON_COLUMNS = {"THINKING_LEVEL_MAP", "SAMPLER_PARAMS",
+            "SAMPLER_PARAMS_BY_LEVEL", "MODEL_HEADERS", "EXTRA_BODY"};
+
+    /**
+     * 补齐 0.1.15 新增的七列。七列都是 JSON 文本。
+     *
+     * <p>用 {@code CLOB} 还是 {@code TEXT} 取决于数据库：SQLite/PostgreSQL/Oracle/达梦接受
+     * {@code CLOB}，MySQL 只接受 {@code TEXT}。这里先试 {@code CLOB} 再试 {@code TEXT}，
+     * 都失败才报错并给出手工 SQL。</p>
+     *
+     * @param jdbc          JDBC
+     * @param providerTable 覆盖表
+     * @param modelTable    模型表
+     */
+    public static void ensureExtraColumns(JdbcTemplate jdbc, String providerTable, String modelTable) {
+        String providers = safeTable(providerTable);
+        String models = safeTable(modelTable);
+        for (String column : OVERLAY_JSON_COLUMNS) {
+            ensureJsonColumn(jdbc, providers, column);
+        }
+        for (String column : MODEL_JSON_COLUMNS) {
+            ensureJsonColumn(jdbc, models, column);
+        }
+    }
+
+    /**
+     * 补一列 JSON 文本。已存在则直接返回。
+     *
+     * @param jdbc   JDBC
+     * @param table  表名
+     * @param column 列名
+     */
+    private static void ensureJsonColumn(JdbcTemplate jdbc, String table, String column) {
+        if (hasColumn(jdbc, table, column)) {
+            return;
+        }
+        try {
+            jdbc.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " CLOB");
+            return;
+        } catch (RuntimeException clobFailed) {
+            // 已被别的实例加上时这里也会抛，先重查再决定要不要换方言。
+            if (hasColumn(jdbc, table, column)) {
+                return;
+            }
+            try {
+                jdbc.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " TEXT");
+                return;
+            } catch (RuntimeException textFailed) {
+                if (!hasColumn(jdbc, table, column)) {
+                    throw new IllegalStateException(
+                            "表 " + table + " 缺少 " + column + " 列，且自动补齐失败。请手工执行其中之一:\n"
+                                    + "  ALTER TABLE " + table + " ADD COLUMN " + column + " CLOB\n"
+                                    + "  ALTER TABLE " + table + " ADD COLUMN " + column + " TEXT",
+                            textFailed);
+                }
+            }
+        }
+    }
+
 
     /**
      * 补齐旧库缺少的列。
@@ -156,11 +224,24 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
         }
         jdbc.update("DELETE FROM " + providerTable + " WHERE PROVIDER_ID = ?", overlay.getProviderId());
         jdbc.update("INSERT INTO " + providerTable
-                        + " (PROVIDER_ID, API, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, UPDATE_TIME)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        + " (PROVIDER_ID, API, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS,"
+                        + " PROVIDER_HEADERS, PROVIDER_EXTRA_BODY, UPDATE_TIME)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 overlay.getProviderId(), overlay.getApi(), overlay.getBaseUrl(), overlay.getApiKey(),
-                overlay.getConnectTimeoutMs(), overlay.getReadTimeoutMs(), now());
+                overlay.getConnectTimeoutMs(), overlay.getReadTimeoutMs(),
+                writeJson(overlay.getHeaders()), writeJson(overlay.getExtraBody()), now());
         invalidate();
+    }
+
+    /**
+     * 序列化 Map 为 JSON 文本。null 保持 null（表示「沿用配置文件」），
+     * 空 Map 序列化为 {@code {}}（表示「明确清空」），两者不能混。
+     *
+     * @param value 待序列化对象
+     * @return JSON 文本；入参为 null 时返回 null
+     */
+    private static String writeJson(Object value) {
+        return value == null ? null : AiLiteJson.toJson(value);
     }
 
     /**
@@ -180,7 +261,9 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
     public List<CatalogModel> listModels(String providerId) {
         final List<CatalogModel> rows = new ArrayList<CatalogModel>();
         jdbc.query("SELECT PROVIDER_ID, MODEL_ID, READY, REASONING, INPUT_MODES, CONTEXT_WINDOW,"
-                        + " MAX_TOKENS, THINKING_FORMAT, DISPLAY_NAME, UPDATE_TIME FROM " + modelTable
+                        + " MAX_TOKENS, THINKING_FORMAT, DISPLAY_NAME, UPDATE_TIME,"
+                        + " THINKING_LEVEL_MAP, SAMPLER_PARAMS, SAMPLER_PARAMS_BY_LEVEL,"
+                        + " MODEL_HEADERS, EXTRA_BODY FROM " + modelTable
                         + " WHERE PROVIDER_ID = ? ORDER BY MODEL_ID, UPDATE_TIME",
                 new org.springframework.jdbc.core.RowCallbackHandler() {
                     @Override
@@ -272,6 +355,39 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
     public void saveCapabilities(String providerId, String modelId, boolean reasoning,
                                  List<String> inputModes, int contextWindow, int maxTokens,
                                  String thinkingFormat, String displayName) {
+        saveCapabilities(providerId, modelId, reasoning, inputModes, contextWindow, maxTokens,
+                thinkingFormat, displayName, null, null, null, null, null);
+    }
+
+    /**
+     * 保存能力参数与模型级请求参数。
+     *
+     * <p>五个请求参数用「null 表示不改」的约定拼动态 SET：请求里没出现的列不进 SQL，
+     * 出现的空 Map 写成 {@code {}}（明确清空），出现的非空 Map 写成 JSON。这样不需要
+     * 先读后写，也就没有读改写之间的竞态。</p>
+     *
+     * @param providerId           供应商 id
+     * @param modelId              模型 id
+     * @param reasoning            是否支持推理
+     * @param inputModes           入参类型
+     * @param contextWindow        上下文窗口
+     * @param maxTokens            输出上限
+     * @param thinkingFormat       思考格式
+     * @param displayName          显示名；null 表示不改
+     * @param thinkingLevelMap     思考档映射；null 表示不改
+     * @param samplerParams        默认采样参数；null 表示不改
+     * @param samplerParamsByLevel 分档采样参数；null 表示不改
+     * @param modelHeaders         模型级请求头；null 表示不改
+     * @param extraBody            模型级附加请求体；null 表示不改
+     */
+    public void saveCapabilities(String providerId, String modelId, boolean reasoning,
+                                 List<String> inputModes, int contextWindow, int maxTokens,
+                                 String thinkingFormat, String displayName,
+                                 Map<String, String> thinkingLevelMap,
+                                 Map<String, Object> samplerParams,
+                                 Map<String, Map<String, Object>> samplerParamsByLevel,
+                                 Map<String, String> modelHeaders,
+                                 Map<String, Object> extraBody) {
         List<String> modes = inputModes == null || inputModes.isEmpty()
                 ? Collections.singletonList("text") : inputModes;
         StringBuilder modesText = new StringBuilder();
@@ -285,29 +401,51 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
             modesText.append(mode.trim());
         }
         String modesValue = modesText.length() == 0 ? "text" : modesText.toString();
-        int updated;
-        if (displayName == null) {
-            updated = jdbc.update("UPDATE " + modelTable
-                            + " SET REASONING = ?, INPUT_MODES = ?, CONTEXT_WINDOW = ?,"
-                            + " MAX_TOKENS = ?, THINKING_FORMAT = ?, UPDATE_TIME = ?"
-                            + " WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
-                    reasoning ? Integer.valueOf(1) : Integer.valueOf(0), modesValue,
-                    Integer.valueOf(contextWindow), Integer.valueOf(maxTokens), thinkingFormat, now(),
-                    providerId, modelId);
-        } else {
-            String name = displayName.trim().isEmpty() ? modelId : displayName.trim();
-            updated = jdbc.update("UPDATE " + modelTable
-                            + " SET REASONING = ?, INPUT_MODES = ?, CONTEXT_WINDOW = ?,"
-                            + " MAX_TOKENS = ?, THINKING_FORMAT = ?, DISPLAY_NAME = ?, UPDATE_TIME = ?"
-                            + " WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
-                    reasoning ? Integer.valueOf(1) : Integer.valueOf(0), modesValue,
-                    Integer.valueOf(contextWindow), Integer.valueOf(maxTokens), thinkingFormat, name, now(),
-                    providerId, modelId);
+
+        StringBuilder sql = new StringBuilder("UPDATE ").append(modelTable)
+                .append(" SET REASONING = ?, INPUT_MODES = ?, CONTEXT_WINDOW = ?,")
+                .append(" MAX_TOKENS = ?, THINKING_FORMAT = ?");
+        List<Object> args = new ArrayList<Object>();
+        args.add(reasoning ? Integer.valueOf(1) : Integer.valueOf(0));
+        args.add(modesValue);
+        args.add(Integer.valueOf(contextWindow));
+        args.add(Integer.valueOf(maxTokens));
+        args.add(thinkingFormat);
+        if (displayName != null) {
+            sql.append(", DISPLAY_NAME = ?");
+            args.add(displayName.trim().isEmpty() ? modelId : displayName.trim());
         }
+        appendJsonSet(sql, args, "THINKING_LEVEL_MAP", thinkingLevelMap);
+        appendJsonSet(sql, args, "SAMPLER_PARAMS", samplerParams);
+        appendJsonSet(sql, args, "SAMPLER_PARAMS_BY_LEVEL", samplerParamsByLevel);
+        appendJsonSet(sql, args, "MODEL_HEADERS", modelHeaders);
+        appendJsonSet(sql, args, "EXTRA_BODY", extraBody);
+        sql.append(", UPDATE_TIME = ? WHERE PROVIDER_ID = ? AND MODEL_ID = ?");
+        args.add(now());
+        args.add(providerId);
+        args.add(modelId);
+
+        int updated = jdbc.update(sql.toString(), args.toArray());
         if (updated == 0) {
             throw new IllegalStateException("模型不存在: " + modelId);
         }
         invalidate();
+    }
+
+    /**
+     * 往 SET 子句追加一个 JSON 列。value 为 null 表示不改这一列。
+     *
+     * @param sql   正在拼的 SQL
+     * @param args  参数列表
+     * @param column 列名
+     * @param value  值；null 表示跳过
+     */
+    private static void appendJsonSet(StringBuilder sql, List<Object> args, String column, Object value) {
+        if (value == null) {
+            return;
+        }
+        sql.append(", ").append(column).append(" = ?");
+        args.add(AiLiteJson.toJson(value));
     }
 
     /**
@@ -387,19 +525,26 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
 
     private Snapshot read() {
         Map<String, ProviderOverlay> providers = new LinkedHashMap<String, ProviderOverlay>();
-        jdbc.query("SELECT PROVIDER_ID, API, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS FROM "
+        jdbc.query("SELECT PROVIDER_ID, API, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS,"
+                + " PROVIDER_HEADERS, PROVIDER_EXTRA_BODY FROM "
                 + providerTable, new org.springframework.jdbc.core.RowCallbackHandler() {
             @Override
             public void processRow(ResultSet rs) throws SQLException {
                 providers.put(rs.getString("PROVIDER_ID"), new ProviderOverlay(
                         rs.getString("PROVIDER_ID"), rs.getString("BASE_URL"), rs.getString("API_KEY"),
                         integer(rs, "CONNECT_TIMEOUT_MS"), integer(rs, "READ_TIMEOUT_MS"),
-                        rs.getString("API")));
+                        rs.getString("API"),
+                        readStringMap(rs, "PROVIDER_HEADERS",
+                                "供应商 " + rs.getString("PROVIDER_ID")),
+                        readObjectMap(rs, "PROVIDER_EXTRA_BODY",
+                                "供应商 " + rs.getString("PROVIDER_ID"))));
             }
         });
         Map<String, CatalogModel> models = new LinkedHashMap<String, CatalogModel>();
         jdbc.query("SELECT PROVIDER_ID, MODEL_ID, READY, REASONING, INPUT_MODES, CONTEXT_WINDOW,"
-                + " MAX_TOKENS, THINKING_FORMAT, DISPLAY_NAME, UPDATE_TIME FROM " + modelTable, new org.springframework.jdbc.core.RowCallbackHandler() {
+                + " MAX_TOKENS, THINKING_FORMAT, DISPLAY_NAME, UPDATE_TIME,"
+                + " THINKING_LEVEL_MAP, SAMPLER_PARAMS, SAMPLER_PARAMS_BY_LEVEL,"
+                + " MODEL_HEADERS, EXTRA_BODY FROM " + modelTable, new org.springframework.jdbc.core.RowCallbackHandler() {
             @Override
             public void processRow(ResultSet rs) throws SQLException {
                 CatalogModel row = toModel(rs);
@@ -435,8 +580,96 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
                 integer(rs, "MAX_TOKENS"),
                 rs.getString("THINKING_FORMAT"),
                 rs.getString("DISPLAY_NAME"),
-                updated == null ? 0L : updated.getTime());
+                updated == null ? 0L : updated.getTime(),
+                readStringMap(rs, "THINKING_LEVEL_MAP", "模型 " + rs.getString("MODEL_ID")),
+                readObjectMap(rs, "SAMPLER_PARAMS", "模型 " + rs.getString("MODEL_ID")),
+                readNestedMap(rs, "SAMPLER_PARAMS_BY_LEVEL", "模型 " + rs.getString("MODEL_ID")),
+                readStringMap(rs, "MODEL_HEADERS", "模型 " + rs.getString("MODEL_ID")),
+                readObjectMap(rs, "EXTRA_BODY", "模型 " + rs.getString("MODEL_ID")));
     }
+
+    /**
+     * 读一个字符串 Map 列。NULL 表示「没配」，必须原样返回 null。
+     *
+     * <p>JSON 损坏时抛异常而不是当空处理：静默当成空会让用户的配置悄悄失效，
+     * 排查时完全看不出原因。消息里带表名与模型 id，便于直接定位那一行。</p>
+     *
+     * @param rs    结果集
+     * @param column 列名
+     * @param where  出错位置描述
+     * @return 解析结果；列为 NULL 时返回 null
+     */
+    private static Map<String, String> readStringMap(ResultSet rs, String column, String where)
+            throws SQLException {
+        String raw = rs.getString(column);
+        if (raw == null) {
+            return null;
+        }
+        if (raw.trim().isEmpty()) {
+            return new LinkedHashMap<String, String>();
+        }
+        try {
+            return new LinkedHashMap<String, String>(
+                    AiLiteJson.mapper().readValue(raw, new TypeReference<LinkedHashMap<String, String>>() {
+                    }));
+        } catch (Exception ex) {
+            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON: " + ex.getMessage(), ex);
+        }
+    }
+
+    /**
+     * 读一个对象 Map 列。NULL 表示「没配」。
+     *
+     * @param rs     结果集
+     * @param column 列名
+     * @param where  出错位置描述
+     * @return 解析结果；列为 NULL 时返回 null
+     */
+    private static Map<String, Object> readObjectMap(ResultSet rs, String column, String where)
+            throws SQLException {
+        String raw = rs.getString(column);
+        if (raw == null) {
+            return null;
+        }
+        if (raw.trim().isEmpty()) {
+            return new LinkedHashMap<String, Object>();
+        }
+        try {
+            return new LinkedHashMap<String, Object>(
+                    AiLiteJson.mapper().readValue(raw, new TypeReference<LinkedHashMap<String, Object>>() {
+                    }));
+        } catch (Exception ex) {
+            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON: " + ex.getMessage(), ex);
+        }
+    }
+
+    /**
+     * 读一个是「档位 → 对象」的嵌套列。NULL 表示「没配」。
+     *
+     * @param rs     结果集
+     * @param column 列名
+     * @param where  出错位置描述
+     * @return 解析结果；列为 NULL 时返回 null
+     */
+    private static Map<String, Map<String, Object>> readNestedMap(ResultSet rs, String column,
+                                                                  String where) throws SQLException {
+        String raw = rs.getString(column);
+        if (raw == null) {
+            return null;
+        }
+        if (raw.trim().isEmpty()) {
+            return new LinkedHashMap<String, Map<String, Object>>();
+        }
+        try {
+            return new LinkedHashMap<String, Map<String, Object>>(
+                    AiLiteJson.mapper().readValue(raw,
+                            new TypeReference<LinkedHashMap<String, Map<String, Object>>>() {
+                            }));
+        } catch (Exception ex) {
+            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON: " + ex.getMessage(), ex);
+        }
+    }
+
 
     private static List<String> splitModes(String raw) {
         if (raw == null || raw.trim().isEmpty()) {

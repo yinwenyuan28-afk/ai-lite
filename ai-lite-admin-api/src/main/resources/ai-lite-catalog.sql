@@ -8,30 +8,43 @@
 --   AI_LITE_BIZ_BINDING      → ai-lite.catalog.biz-table
 --   AI_LITE_ADMIN_SETTING    → ai-lite.catalog.setting-table
 -- 表名只允许字母、数字和下划线；配错会在装配期或首次读写时明确报错。
+--
+-- 大文本列（*_HEADERS / *_EXTRA_BODY / THINKING_LEVEL_MAP 等）存 JSON 文本。
+-- 这里写 CLOB；MySQL 等不支持 CLOB 的库请改成 TEXT。
+-- 0.1.15 之前的旧库缺这些列，JdbcRuntimeCatalog 会在构造时自动补齐（先试 CLOB 再试 TEXT）。
 
 CREATE TABLE AI_LITE_PROVIDER_OVERLAY (
-    PROVIDER_ID        VARCHAR(64)  NOT NULL,
-    API                VARCHAR(64),
-    BASE_URL           VARCHAR(500),
-    API_KEY            VARCHAR(500),
-    CONNECT_TIMEOUT_MS INT,
-    READ_TIMEOUT_MS    INT,
-    UPDATE_TIME        TIMESTAMP,
+    PROVIDER_ID         VARCHAR(64)  NOT NULL,
+    API                 VARCHAR(64),
+    BASE_URL            VARCHAR(500),
+    API_KEY             VARCHAR(500),
+    CONNECT_TIMEOUT_MS  INT,
+    READ_TIMEOUT_MS     INT,
+    -- 供应商级请求参数，JSON 文本。NULL = 沿用配置文件；'{}' = 明确清空
+    PROVIDER_HEADERS    CLOB,
+    PROVIDER_EXTRA_BODY CLOB,
+    UPDATE_TIME         TIMESTAMP,
     PRIMARY KEY (PROVIDER_ID)
 );
 
 CREATE TABLE AI_LITE_MODEL (
-    MODEL_ROW_ID    VARCHAR(64)  NOT NULL,
-    PROVIDER_ID     VARCHAR(64)  NOT NULL,
-    MODEL_ID        VARCHAR(128) NOT NULL,
-    READY           INT          NOT NULL,
-    REASONING       INT,
-    INPUT_MODES     VARCHAR(64),
-    CONTEXT_WINDOW  INT,
-    MAX_TOKENS      INT,
-    THINKING_FORMAT VARCHAR(64),
-    DISPLAY_NAME    VARCHAR(128),
-    UPDATE_TIME     TIMESTAMP,
+    MODEL_ROW_ID            VARCHAR(64)  NOT NULL,
+    PROVIDER_ID             VARCHAR(64)  NOT NULL,
+    MODEL_ID                VARCHAR(128) NOT NULL,
+    READY                   INT          NOT NULL,
+    REASONING               INT,
+    INPUT_MODES             VARCHAR(64),
+    CONTEXT_WINDOW          INT,
+    MAX_TOKENS              INT,
+    THINKING_FORMAT         VARCHAR(64),
+    DISPLAY_NAME            VARCHAR(128),
+    -- 模型级请求参数，JSON 文本。NULL = 沿用配置文件；'{}' = 明确清空
+    THINKING_LEVEL_MAP      CLOB,
+    SAMPLER_PARAMS          CLOB,
+    SAMPLER_PARAMS_BY_LEVEL CLOB,
+    MODEL_HEADERS           CLOB,
+    EXTRA_BODY              CLOB,
+    UPDATE_TIME             TIMESTAMP,
     PRIMARY KEY (MODEL_ROW_ID)
 );
 
