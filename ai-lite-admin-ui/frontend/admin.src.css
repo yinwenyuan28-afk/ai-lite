@@ -1096,6 +1096,14 @@ body {
   color: var(--color-rose-600);
 }
 
+/*
+ * 需要人注意但不算失败的提示，例如「调用成功但输出上限太小、正文被截断」。
+ * 用琥珀色而不是绿色，因为绿色会让人以为一切正常、不必再看。
+ */
+.status-line.warn {
+  color: var(--color-amber-700);
+}
+
 .status-line:empty {
   display: none;
 }

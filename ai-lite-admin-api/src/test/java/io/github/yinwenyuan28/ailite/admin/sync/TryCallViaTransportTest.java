@@ -225,4 +225,69 @@ public class TryCallViaTransportTest {
         assertThat(result.isOk()).isFalse();
         assertThat(result.getMessage()).contains("协议适配器");
     }
+
+    /**
+     * 模型把额度全用在思考上、正文为 null 且被 length 截断时，
+     * 说明必须指向「输出上限太小」，而不是含糊的「没有解析到回复」。
+     *
+     * <p>这条来自真实排查：用户看到「调用成功，但没有解析到回复」会以为解析有 bug，
+     * 实际只要把输出上限调大就好。两者修法完全不同。</p>
+     */
+    @Test
+    public void truncatedThinkingOnlyPointsToMaxTokens() {
+        String thinkingOnly = "{\"id\":\"x\",\"object\":\"chat.completion\",\"model\":\"m\","
+                + "\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                + "\"content\":null,\"reasoning\":\"long thinking...\","
+                + "\"reasoning_content\":\"long thinking...\"},\"finish_reason\":\"length\"}],"
+                + "\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":100,\"total_tokens\":105}}";
+        ModelSyncClient.TryResult result = ModelSyncClient.tryChatViaTransport(
+                new OpenAiCompletionsTransport(fixed(thinkingOnly)),
+                model("openai-completions", "http://example/v1"), "你好", Integer.valueOf(100), 5000);
+
+        assertThat(result.isOk()).isTrue();
+        assertThat(result.getContent()).isEmpty();
+        assertThat(result.getMessage()).contains("输出上限");
+        assertThat(result.getMessage()).contains("思考");
+        // 响应摘要里要能看出判断依据。
+        assertThat(result.getResponseText()).contains("stop_reason: length");
+        assertThat(result.getResponseText()).contains("思考内容");
+    }
+
+    /**
+     * 正常返回时说明就是「调用成功」，不误报。
+     */
+    @Test
+    public void normalReplySaysSuccess() {
+        ModelSyncClient.TryResult result = ModelSyncClient.tryChatViaTransport(
+                new OpenAiCompletionsTransport(fixed(successBody())),
+                model("openai-completions", "http://example/v1"), "你好", Integer.valueOf(256), 5000);
+
+        assertThat(result.isOk()).isTrue();
+        assertThat(result.getContent()).isEqualTo("ok");
+        assertThat(result.getMessage()).isEqualTo("调用成功");
+    }
+
+    /**
+     * 固定响应体的执行器，只用于诊断文案类用例。
+     *
+     * @param body 要返回的 JSON
+     * @return 执行器
+     */
+    private static HttpExecutor fixed(final String body) {
+        return new HttpExecutor() {
+            @Override
+            public HttpResult execute(HttpRequest request) {
+                return new HttpResult(200, body);
+            }
+
+            @Override
+            public void executeStreaming(HttpRequest request, StreamListener listener) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+    }
 }

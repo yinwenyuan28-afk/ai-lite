@@ -339,9 +339,13 @@ public final class ModelSyncClient {
             long latency = System.currentTimeMillis() - started;
             String content = completion == null || completion.getContent() == null
                     ? "" : completion.getContent();
-            String message = content.isEmpty() ? "调用成功，但没有解析到回复" : "调用成功";
+            String thinking = completion == null || completion.getThinkingText() == null
+                    ? "" : completion.getThinkingText();
+            String stop = completion == null || completion.getStop() == null
+                    ? "" : completion.getStop().wire();
+            String message = describeOutcome(content, thinking, stop);
             String requestText = describeRequest(model, url, maxTokens, text);
-            String responseText = "HTTP 200\n" + limit(content, 20000);
+            String responseText = describeResponse(completion, content, thinking, stop);
             return new TryResult(true, 200, latency, message, content, requestText, responseText);
         } catch (LlmCallException ex) {
             long latency = System.currentTimeMillis() - started;
@@ -358,6 +362,69 @@ public final class ModelSyncClient {
                     describeRequest(model, url, maxTokens, text),
                     stripKey("请求失败：" + message, model.getApiKey()));
         }
+    }
+
+    /**
+     * 根据「有没有正文」「有没有思考」「怎么停的」给出能指向原因的说明。
+     *
+     * <p>原来只要 content 为空就报「调用成功，但没有解析到回复」。这句话把人引向解析逻辑，
+     * 而实际情况通常是模型把输出额度全用在思考上、正文还没开始就被截断。两者的修法完全不同：
+     * 前者要改代码，后者只要调大输出上限。</p>
+     *
+     * @param content  正文
+     * @param thinking 思考内容
+     * @param stop     停止原因
+     * @return 说明文案
+     */
+    private static String describeOutcome(String content, String thinking, String stop) {
+        boolean hasContent = content != null && !content.trim().isEmpty();
+        boolean hasThinking = thinking != null && !thinking.trim().isEmpty();
+        boolean truncated = "length".equals(stop);
+        if (hasContent) {
+            // 有正文但被截断，仍然值得提醒：用户可能以为回复到这就完了。
+            return truncated ? "调用成功，但回复被输出上限截断" : "调用成功";
+        }
+        if (truncated && hasThinking) {
+            return "输出上限太小：模型把额度全用在思考上，正文还没开始就被截断（finish_reason=length）。"
+                    + "请调大模型的「输出上限」后重试";
+        }
+        if (truncated) {
+            return "输出上限太小：模型还没写完就被截断（finish_reason=length）。请调大模型的「输出上限」后重试";
+        }
+        if (hasThinking) {
+            return "模型只输出了思考内容，没有写正文。可能是思考档设置与该模型不匹配";
+        }
+        return "调用成功，但响应里既没有正文也没有思考内容，请查看下方原始响应";
+    }
+
+    /**
+     * 拼响应摘要，把判断依据一起给出来。
+     *
+     * <p>只放解析后的正文没用——正文为空时页面上什么都看不到，用户无从判断是网络问题、
+     * 解析问题还是模型没写。这里把 stop 与思考长度列出来，正文为空时还能看出是哪一类。</p>
+     *
+     * @param completion 传输层返回的完成对象
+     * @param content    正文
+     * @param thinking   思考内容
+     * @param stop       停止原因
+     * @return 展示文本
+     */
+    private static String describeResponse(LlmCompletion completion, String content,
+                                           String thinking, String stop) {
+        StringBuilder text = new StringBuilder("HTTP 200\n");
+        text.append("stop_reason: ").append(stop.isEmpty() ? "（未提供）" : stop).append('\n');
+        text.append("正文长度: ").append(content == null ? 0 : content.length()).append('\n');
+        text.append("思考长度: ").append(thinking == null ? 0 : thinking.length()).append('\n');
+        if (completion != null && completion.getUsage() != null) {
+            text.append("用量: ").append(completion.getUsage()).append('\n');
+        }
+        if (content != null && !content.isEmpty()) {
+            text.append("\n--- 正文 ---\n").append(limit(content, 20000));
+        }
+        if (thinking != null && !thinking.isEmpty()) {
+            text.append("\n\n--- 思考内容 ---\n").append(limit(thinking, 4000));
+        }
+        return text.toString();
     }
 
     /**

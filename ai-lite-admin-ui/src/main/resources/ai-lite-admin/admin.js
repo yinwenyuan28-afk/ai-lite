@@ -1750,11 +1750,17 @@
     addKv(kv, "结果", data.ok ? "成功" : "失败");
     addKv(kv, "HTTP", String(data.httpStatus));
     addKv(kv, "耗时", data.latencyMs + " 毫秒");
-    if (data.message) {
-      addKv(kv, "说明", data.message);
-    }
     host.appendChild(kv);
-    if (data.content) {
+
+    // 说明里可能带诊断建议（例如「输出上限太小」），用整行提示而不是挤在值列里。
+    // 正文为空时这条说明是唯一的线索，必须显眼。
+    var hasContent = !!data.content;
+    if (data.message) {
+      var tone = !data.ok ? "error" : (hasContent ? "ok" : "warn");
+      host.appendChild(el("p", "status-line " + tone, data.message));
+    }
+
+    if (hasContent) {
       host.appendChild(el("p", "field-label", "回复"));
       var reply = el("pre", "code-block");
       reply.textContent = data.content;
