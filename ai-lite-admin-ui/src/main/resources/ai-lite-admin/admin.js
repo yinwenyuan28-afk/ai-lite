@@ -1505,46 +1505,21 @@
 
   function promptSection(biz) {
     var section = el("div", "section");
-    section.appendChild(el("h3", "section-title", "提示词"));
+    var head = el("div", "section-head");
+    head.appendChild(el("h3", "section-title", "提示词"));
+    var newDraft = button("新建草稿", { tone: "primary", size: "sm", icon: "plus" });
+    head.appendChild(newDraft);
+    section.appendChild(head);
+    section.appendChild(el("p", "card-desc",
+      "内容不在这里常驻显示。点某一版的「查看」看具体模板，"
+      + "点草稿的「修改」打开编辑弹窗，改完保存即覆盖那一版。"));
 
-    var system = textArea("", { tall: true, placeholder: "系统模板，支持 {{变量}} 占位符" });
-    var user = textArea("", { placeholder: "用户模板，支持 {{变量}} 占位符" });
-    var outputSchema = textArea("", {
-      mono: true, placeholder: "可选。结构化输出的 JSON Schema"
-    });
-    section.appendChild(field("系统模板", system));
-    section.appendChild(field("用户模板", user));
-    section.appendChild(field("outputSchema", outputSchema));
-
-    var vars = textArea("{}", { mono: true, placeholder: "预览变量，JSON 对象" });
-    vars.rows = 3;
-    section.appendChild(field("预览变量（JSON）", vars, "只用于本地预览，不会保存。"));
-
-    var actions = el("div", "actions");
-    var saveDraft = button("保存草稿", {});
-    var saveAsNew = button("另存为新草稿", {});
-    var preview = button("预览", {});
-    var publish = button("发布", { tone: "primary" });
-    actions.appendChild(saveDraft);
-    actions.appendChild(saveAsNew);
-    actions.appendChild(preview);
-    actions.appendChild(publish);
-    section.appendChild(actions);
-
-    var report = statusLine(section);
-    var previewHost = el("div");
-    section.appendChild(previewHost);
-
-    var draftId = "";
     var historyTable = el("table", "table");
     var historyWrap = el("div", "table-wrap");
     historyWrap.appendChild(historyTable);
-    var historyHost = el("div", "section");
-    historyHost.appendChild(el("h3", "section-title", "版本记录"));
-    historyHost.appendChild(el("p", "card-desc",
-      "可把历史内容载入编辑区。草稿可以直接发布，已退役的版本可以回滚为生效。"));
-    historyHost.appendChild(historyWrap);
-    section.appendChild(historyHost);
+    section.appendChild(historyWrap);
+
+    var report = statusLine(section);
 
     var auditTable = el("table", "table");
     var auditWrap = el("div", "table-wrap");
@@ -1576,27 +1551,15 @@
         + " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
     }
 
-    function parseVars() {
-      var raw = (vars.value || "").trim();
-      if (!raw) { return {}; }
-      var parsed = JSON.parse(raw);
-      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("预览变量须为 JSON 对象");
-      }
-      return parsed;
+    function reload() {
+      return get("/biz/" + enc(biz.bizId) + "/prompt").then(function (prompt) {
+        renderVersions(prompt.versions || []);
+        renderAudits(prompt.audits || []);
+        return prompt;
+      });
     }
 
-    function draftBody(withVersionId) {
-      var payload = {
-        systemTemplate: system.value,
-        userTemplate: user.value,
-        outputSchema: outputSchema.value
-      };
-      if (withVersionId && draftId) {
-        payload.versionId = draftId;
-      }
-      return payload;
-    }
+    /* ---------- 版本列表 ---------- */
 
     function renderVersions(versions) {
       clear(historyTable);
@@ -1607,7 +1570,7 @@
       historyTable.appendChild(tbody);
       if (!versions || !versions.length) {
         var row = el("tr");
-        var cell = el("td", null, "还没有版本记录。");
+        var cell = el("td", null, "还没有版本记录。点右上角「新建草稿」开始。");
         cell.colSpan = 5;
         cell.className = "muted cell-empty";
         row.appendChild(cell);
@@ -1622,30 +1585,23 @@
         row.appendChild(statusCell);
         row.appendChild(el("td", null, formatTime(item.createTime)));
         row.appendChild(el("td", null, item.createdBy || "—"));
+
         var actionsCell = el("td", "cell-actions");
         var rowActions = el("div", "row-actions");
-        rowActions.appendChild(button("载入", {
+        rowActions.appendChild(button("查看", {
           size: "sm",
-          onClick: function () {
-            system.value = item.systemTemplate || "";
-            user.value = item.userTemplate || "";
-            outputSchema.value = item.outputSchema || "";
-            if (item.status === "draft") {
-              draftId = item.versionId;
-              report("已载入草稿 v" + item.versionNo + "，可继续编辑或发布。", "info");
-            } else {
-              draftId = "";
-              report("已载入 v" + item.versionNo + " 的内容。要修改请先保存为新草稿。", "info");
-            }
-          }
+          onClick: function () { openViewDialog(item); }
         }));
         if (item.status === "draft") {
+          rowActions.appendChild(button("修改", {
+            size: "sm",
+            onClick: function () { openEditDialog(item); }
+          }));
           rowActions.appendChild(button("发布", {
             size: "sm", tone: "primary",
             onClick: function () {
               post("/biz/" + enc(biz.bizId) + "/prompt/publish", { versionId: item.versionId })
                 .then(function () {
-                  draftId = "";
                   report("已发布 v" + item.versionNo + "。", "ok");
                   toast("提示词已发布。", "ok");
                   return reload();
@@ -1708,100 +1664,215 @@
       });
     }
 
-    function reload() {
-      return get("/biz/" + enc(biz.bizId) + "/prompt").then(function (prompt) {
-        var source = prompt.draft || prompt.active;
-        if (source) {
-          system.value = source.systemTemplate || "";
-          user.value = source.userTemplate || "";
-          outputSchema.value = source.outputSchema || "";
+    /* ---------- 模板编辑区（弹窗共用） ---------- */
+
+    /**
+     * 建三个模板输入框。查看弹窗用它做只读展示，编辑/新建弹窗用它做输入，
+     * 这样三处渲染出来的结构完全一致，不会出现只读态和编辑态长得不一样。
+     */
+    function templateFields(source, readOnly) {
+      var system = textArea(source ? source.systemTemplate : "", {
+        tall: true, placeholder: "系统模板，支持 {{变量}} 占位符"
+      });
+      var user = textArea(source ? source.userTemplate : "", {
+        placeholder: "用户模板，支持 {{变量}} 占位符"
+      });
+      var schema = textArea(source ? source.outputSchema : "", {
+        mono: true, placeholder: "可选。结构化输出的 JSON Schema"
+      });
+      if (readOnly) {
+        [system, user, schema].forEach(function (node) {
+          node.readOnly = true;
+        });
+      }
+      var wrap = el("div", "section");
+      wrap.appendChild(field("系统模板", system));
+      wrap.appendChild(field("用户模板", user));
+      wrap.appendChild(field("outputSchema", schema));
+      wrap.textareas = { system: system, user: user, schema: schema };
+      return wrap;
+    }
+
+    function renderedPreview(data) {
+      var wrap = el("div", "section");
+      wrap.appendChild(el("p", "field-label", "系统消息"));
+      wrap.appendChild(el("pre", "code-block", data.system || "（空）"));
+      wrap.appendChild(el("p", "field-label", "用户消息"));
+      wrap.appendChild(el("pre", "code-block", data.user || "（空）"));
+      return wrap;
+    }
+
+    function readVars(node) {
+      var raw = (node.value || "").trim();
+      if (!raw) { return {}; }
+      var parsed = JSON.parse(raw);
+      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("预览变量须为 JSON 对象");
+      }
+      return parsed;
+    }
+
+    /**
+     * 预览区：输入变量后按当前模板渲染。放在三个弹窗里共用，
+     * 因为「改之前先看看渲染结果」在查看和编辑时都成立。
+     */
+    function attachPreview(body, textareas) {
+      var vars = textArea("{}", { mono: true, placeholder: "预览变量，JSON 对象" });
+      vars.rows = 3;
+      body.appendChild(field("预览变量（JSON）", vars, "只用于本地预览，不会保存。"));
+      var host = el("div");
+      body.appendChild(host);
+      var show = button("预览渲染结果", { size: "sm" });
+      var actionRow = el("div", "actions");
+      actionRow.appendChild(show);
+      body.appendChild(actionRow);
+      var note = el("p", "field-hint");
+      body.appendChild(note);
+      show.addEventListener("click", function () {
+        var varsValue;
+        try {
+          varsValue = readVars(vars);
+        } catch (error) {
+          note.textContent = error instanceof SyntaxError
+            ? "预览变量 JSON 格式无效" : error.message;
+          note.classList.add("error");
+          return;
         }
-        draftId = prompt.draft ? prompt.draft.versionId : "";
-        renderVersions(prompt.versions || []);
-        renderAudits(prompt.audits || []);
-        return prompt;
+        note.classList.remove("error");
+        note.textContent = "";
+        post("/biz/" + enc(biz.bizId) + "/prompt/preview", {
+          systemTemplate: textareas.system.value,
+          userTemplate: textareas.user.value,
+          vars: varsValue
+        }).then(function (data) {
+          clear(host);
+          host.appendChild(renderedPreview(data));
+        }).catch(function (error) {
+          note.textContent = error.message;
+          note.classList.add("error");
+        });
       });
     }
 
+    /* ---------- 查看弹窗（只读） ---------- */
+
+    function openViewDialog(item) {
+      var body = el("div", "section");
+      var kv = el("div", "kv-grid");
+      addKv(kv, "版本", "v" + item.versionNo);
+      addKv(kv, "状态", statusLabel(item.status));
+      addKv(kv, "创建时间", formatTime(item.createTime));
+      addKv(kv, "操作人", item.createdBy || "—");
+      body.appendChild(kv);
+
+      var fields = templateFields(item, true);
+      body.appendChild(fields);
+      attachPreview(body, fields.textareas);
+
+      openModal({
+        title: "查看 v" + item.versionNo,
+        desc: "只读。要修改请点该版本的「修改」。",
+        wide: true,
+        body: body,
+        onMount: function (dialog) {
+          dialog.addAction(button("关闭", { tone: "primary", onClick: dialog.close }));
+        }
+      });
+    }
+
+    /* ---------- 编辑草稿弹窗 ---------- */
+
+    function openEditDialog(item) {
+      var body = el("div", "section");
+      var fields = templateFields(item, false);
+      body.appendChild(fields);
+      attachPreview(body, fields.textareas);
+      var note = el("p", "field-hint", "保存会覆盖 v" + item.versionNo
+        + " 的内容，版本号不变。想保留原内容就点「新建草稿」。");
+      body.appendChild(note);
+
+      var dialog = openModal({
+        title: "修改 v" + item.versionNo,
+        desc: "只改这一份草稿，不会生效。改完要点「发布」才会生效。",
+        wide: true,
+        body: body
+      });
+      var save = button("保存草稿", {
+        tone: "primary",
+        onClick: function () {
+          save.disabled = true;
+          note.textContent = "正在保存…";
+          note.classList.remove("error");
+          post("/biz/" + enc(biz.bizId) + "/prompt/draft", {
+            versionId: item.versionId,
+            systemTemplate: fields.textareas.system.value,
+            userTemplate: fields.textareas.user.value,
+            outputSchema: fields.textareas.schema.value
+          }).then(function () {
+            dialog.close();
+            toast("草稿已保存，尚未生效。", "ok");
+            report("v" + item.versionNo + " 已更新，尚未生效。", "ok");
+            return reload();
+          }).catch(function (error) {
+            save.disabled = false;
+            note.textContent = error.message;
+            note.classList.add("error");
+          });
+        }
+      });
+      dialog.footer.appendChild(button("取消", { onClick: dialog.close }));
+      dialog.footer.appendChild(save);
+    }
+
+    /* ---------- 新建草稿弹窗 ---------- */
+
+    function openCreateDialog() {
+      var body = el("div", "section");
+      var head = el("p", "card-desc",
+        "系统模板留空会继承当前生效版本；没有生效版本则用配置默认模板。");
+      body.appendChild(head);
+      var fields = templateFields(null, false);
+      body.appendChild(fields);
+      attachPreview(body, fields.textareas);
+      var note = el("p", "field-hint");
+      body.appendChild(note);
+
+      var dialog = openModal({
+        title: "新建草稿",
+        desc: "会生成一个新的版本号，原有版本保持不变。",
+        wide: true,
+        body: body
+      });
+      var create = button("创建草稿", {
+        tone: "primary",
+        onClick: function () {
+          create.disabled = true;
+          note.textContent = "正在创建…";
+          note.classList.remove("error");
+          post("/biz/" + enc(biz.bizId) + "/prompt/draft", {
+            systemTemplate: fields.textareas.system.value,
+            userTemplate: fields.textareas.user.value,
+            outputSchema: fields.textareas.schema.value
+          }).then(function (draft) {
+            dialog.close();
+            toast("已创建草稿 v" + draft.versionNo + "。", "ok");
+            report("新草稿 v" + draft.versionNo + " 已创建，尚未生效。", "ok");
+            return reload();
+          }).catch(function (error) {
+            create.disabled = false;
+            note.textContent = error.message;
+            note.classList.add("error");
+          });
+        }
+      });
+      dialog.footer.appendChild(button("取消", { onClick: dialog.close }));
+      dialog.footer.appendChild(create);
+    }
+
+    newDraft.addEventListener("click", openCreateDialog);
+
     reload().catch(function (error) {
       report(error.message, "error");
-    });
-
-    saveDraft.addEventListener("click", function () {
-      saveDraft.disabled = true;
-      post("/biz/" + enc(biz.bizId) + "/prompt/draft", draftBody(true))
-        .then(function (draft) {
-          saveDraft.disabled = false;
-          draftId = draft.versionId;
-          report("草稿已保存，尚未生效。", "ok");
-          toast("草稿已保存。", "ok");
-          return reload();
-        }).catch(function (error) {
-          saveDraft.disabled = false;
-          report(error.message, "error");
-        });
-    });
-
-    saveAsNew.addEventListener("click", function () {
-      saveAsNew.disabled = true;
-      post("/biz/" + enc(biz.bizId) + "/prompt/draft", draftBody(false))
-        .then(function (draft) {
-          saveAsNew.disabled = false;
-          draftId = draft.versionId;
-          report("已另存为新草稿。", "ok");
-          toast("新草稿已创建。", "ok");
-          return reload();
-        }).catch(function (error) {
-          saveAsNew.disabled = false;
-          report(error.message, "error");
-        });
-    });
-
-    preview.addEventListener("click", function () {
-      var varsValue;
-      try {
-        varsValue = parseVars();
-      } catch (error) {
-        report(error instanceof SyntaxError ? "预览变量 JSON 格式无效" : error.message, "error");
-        return;
-      }
-      post("/biz/" + enc(biz.bizId) + "/prompt/preview", {
-        systemTemplate: system.value,
-        userTemplate: user.value,
-        vars: varsValue
-      }).then(function (data) {
-        clear(previewHost);
-        var wrap = el("div", "section");
-        wrap.appendChild(el("p", "field-label", "系统消息"));
-        var systemPre = el("pre", "code-block", data.system || "（空）");
-        wrap.appendChild(systemPre);
-        wrap.appendChild(el("p", "field-label", "用户消息"));
-        var userPre = el("pre", "code-block", data.user || "（空）");
-        wrap.appendChild(userPre);
-        previewHost.appendChild(wrap);
-        report("预览已生成，见下方。", "ok");
-      }).catch(function (error) {
-        report(error.message, "error");
-      });
-    });
-
-    publish.addEventListener("click", function () {
-      if (!draftId) {
-        report("先保存草稿，再发布。", "error");
-        return;
-      }
-      publish.disabled = true;
-      post("/biz/" + enc(biz.bizId) + "/prompt/publish", { versionId: draftId })
-        .then(function () {
-          publish.disabled = false;
-          draftId = "";
-          report("已发布，业务渲染会读到这份模板。", "ok");
-          toast("提示词已发布。", "ok");
-          return reload();
-        }).catch(function (error) {
-          publish.disabled = false;
-          report(error.message, "error");
-        });
     });
 
     return section;

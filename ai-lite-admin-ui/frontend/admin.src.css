@@ -888,7 +888,8 @@ body {
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--color-slate-500);
+  /* 表头是 11.5px 小字，slate-500 在浅灰底上可读性偏弱，用 600 保证能看清。 */
+  color: var(--color-slate-600);
   text-align: left;
   white-space: nowrap;
 }
@@ -911,6 +912,8 @@ body {
 .table .cell-actions {
   width: 1%;
   white-space: nowrap;
+  /* 操作列收窄后右侧会留白，把按钮贴到该列右边缘，视觉重心落在表格右端。 */
+  text-align: right;
 }
 
 /* 模型 id 可能很长：限制首列宽度并截断，避免把其他列挤出去。 */
