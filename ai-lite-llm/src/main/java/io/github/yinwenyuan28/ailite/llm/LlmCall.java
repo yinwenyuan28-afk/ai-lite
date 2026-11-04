@@ -1,6 +1,8 @@
 package io.github.yinwenyuan28.ailite.llm;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 一次模型调用的公共参数：业务 id、模型选择、消息，以及这一次的独立超时。
@@ -19,6 +21,12 @@ public final class LlmCall {
     private Integer connectTimeoutMs;
     private Integer readTimeoutMs;
     private Integer maxTokens;
+    /**
+     * 只在这一次调用里追加的请求体字段。null 表示不追加。
+     *
+     * <p>优先级最高：供应商级、模型级、单次调用三层同名键时，这里覆盖前两层。</p>
+     */
+    private Map<String, Object> extraBody;
 
     private LlmCall(String bizId, String provider, String modelId, String thinkingLevel, String profile,
                     List<LlmMessage> messages, Integer connectTimeoutMs, Integer readTimeoutMs) {
@@ -84,7 +92,7 @@ public final class LlmCall {
     }
 
     /**
-     * 设置这一次的输出 token 上限。传 null 表示沿用模型配置的 maxTokens。
+     * 设置这一次调用的输出 token 上限。传 null 表示沿用模型配置的 maxTokens。
      *
      * <p>存在的理由：压缩摘要需要一个明显小于主调用的上限（{@code summary-max-tokens}），
      * 而模型配置里只允许一个值。没有这个覆盖，摘要请求可能把整个窗口都用来生成摘要。</p>
@@ -98,6 +106,24 @@ public final class LlmCall {
     }
 
     /**
+     * 追加只在这一次调用里生效的请求体字段。
+     *
+     * <p>用途是「这一通调用与众不同」的临时参数，例如某次请求要带一个追踪 ID 或
+     * 临时开关。长期生效的值应该写在模型级或供应商级的 {@code extra-body} 里。</p>
+     *
+     * <p>优先级：单次调用 &gt; 模型级 &gt; 供应商级。合并是递归的——嵌套对象按子键合并，
+     * 不是整块替换。传 null 表示清除之前设置的追加值。</p>
+     *
+     * @param extraBody 要追加的字段；null 表示不追加
+     * @return this
+     */
+    public LlmCall extraBody(Map<String, Object> extraBody) {
+        this.extraBody = extraBody == null ? null
+                : new LinkedHashMap<String, Object>(extraBody);
+        return this;
+    }
+
+    /**
      * 复制调用参数。用于步骤工厂在创建时做快照，避免调用方后续修改
      * {@link #timeouts(Integer, Integer)} 影响已构造的步骤。
      *
@@ -107,6 +133,8 @@ public final class LlmCall {
         LlmCall copy = new LlmCall(bizId, provider, modelId, thinkingLevel, profile, messages,
                 connectTimeoutMs, readTimeoutMs);
         copy.maxTokens = maxTokens;
+        copy.extraBody = extraBody == null ? null
+                : new LinkedHashMap<String, Object>(extraBody);
         return copy;
     }
 
@@ -120,6 +148,8 @@ public final class LlmCall {
         LlmCall copy = new LlmCall(bizId, provider, modelId, thinkingLevel, profile, messages,
                 connectTimeoutMs, readTimeoutMs);
         copy.maxTokens = maxTokens;
+        copy.extraBody = extraBody == null ? null
+                : new LinkedHashMap<String, Object>(extraBody);
         return copy;
     }
 
@@ -160,5 +190,12 @@ public final class LlmCall {
      */
     public Integer getMaxTokens() {
         return maxTokens;
+    }
+
+    /**
+     * @return 只在这一次调用里追加的请求体字段；null 表示不追加
+     */
+    public Map<String, Object> getExtraBody() {
+        return extraBody;
     }
 }

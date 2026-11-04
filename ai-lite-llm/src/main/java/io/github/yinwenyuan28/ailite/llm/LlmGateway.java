@@ -1342,7 +1342,7 @@ public final class LlmGateway {
             }
             final LlmRequest request = new LlmRequest(model, transcript, declareTools ? tools : null,
                     stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(),
-                    null, call.getMaxTokens());
+                    call.getExtraBody(), call.getMaxTokens());
             final long started = System.currentTimeMillis();
             CompletableFuture<LlmCompletion> future;
             try {
@@ -1573,7 +1573,7 @@ public final class LlmGateway {
             int round = completed + 1;
             LlmRequest request = new LlmRequest(model, transcript, declareTools ? tools : null,
                     stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(),
-                    null, call.getMaxTokens(), deltaSink);
+                    call.getExtraBody(), call.getMaxTokens(), deltaSink);
             long started = System.currentTimeMillis();
             LlmCompletion completion;
             // 许可按单次模型调用（每轮）获取（D4）：校验抛出点全部之后（F22），

@@ -371,9 +371,11 @@ public final class ModelResolver {
             putHeaderIgnoreCase(headers, entry.getKey(), entry.getValue());
         }
 
+        // 供应商级在前、模型级在后，递归合并：嵌套对象按子键合并，不是整块替换。
+        // 逐块替换会让「模型级只想补一个小项」把供应商级的同父子键全冲掉。
         Map<String, Object> extraBody = new LinkedHashMap<String, Object>();
-        extraBody.putAll(p.getExtraBody());
-        extraBody.putAll(m.getExtraBody());
+        deepMerge(extraBody, p.getExtraBody());
+        deepMerge(extraBody, m.getExtraBody());
 
         Map<String, Object> sampler = new LinkedHashMap<String, Object>();
         sampler.putAll(m.getSamplerParams());
@@ -394,6 +396,43 @@ public final class ModelResolver {
                 acceptsImage, m.isReasoning(), effective, m.getThinkingLevelMap(),
                 Strings.isBlank(m.getThinkingFormat()) ? "none" : m.getThinkingFormat().trim(),
                 sampler, extraBody, connect, read);
+    }
+
+    /**
+     * 递归合并 Map：嵌套对象按子键合并，其余按键覆盖。
+     *
+     * <p>与传输层 {@code TransportSupport.merge} 的语义一致，保证「两级之间」与
+     * 「配置与单次调用之间」的合并规则相同。此前这里用的是 {@code putAll}（整块替换），
+     * 于是模型级写一个同父键的小项，会把供应商级该父键下的子键全部冲掉。</p>
+     *
+     * <p>合并时把嵌套 Map 复制一份再往里写，避免修改 source 里的对象——
+     * source 直接来自配置对象，改它会污染全局配置。</p>
+     *
+     * @param target 目标
+     * @param source 来源；null 或空时不动
+     */
+    @SuppressWarnings("unchecked")
+    private static void deepMerge(Map<String, Object> target, Map<String, Object> source) {
+        if (source == null || source.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            String key = entry.getKey();
+            if (key == null) {
+                continue;
+            }
+            Object incoming = entry.getValue();
+            Object existing = target.get(key);
+            if (incoming instanceof Map && existing instanceof Map) {
+                deepMerge((Map<String, Object>) existing, (Map<String, Object>) incoming);
+            } else if (incoming instanceof Map) {
+                Map<String, Object> copy = new LinkedHashMap<String, Object>();
+                deepMerge(copy, (Map<String, Object>) incoming);
+                target.put(key, copy);
+            } else {
+                target.put(key, incoming);
+            }
+        }
     }
 
     /**
