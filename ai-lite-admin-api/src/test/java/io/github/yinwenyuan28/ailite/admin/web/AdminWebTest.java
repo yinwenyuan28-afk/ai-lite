@@ -383,6 +383,49 @@ public class AdminWebTest {
     }
 
     /**
+     * 能力参数的入参类型与显示名。
+     *
+     * <p>入参类型决定 {@code ModelResolver} 算出的 acceptsImage：只有含 image 时
+     * 调用方才能发送图片消息。早先这里是写死的 text，所以多模态模型永远配不出来。
+     * 显示名只影响展示，缺省时应回落到模型 id。</p>
+     */
+    @Test
+    public void capabilitiesSaveInputModesAndDisplayName() throws Exception {
+        mockMvc.perform(post("/ai-lite/admin/api/providers/demo/models")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"modelId\":\"vl\"}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/vl")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":true,\"inputModes\":[\"text\",\"image\"],"
+                                + "\"contextWindow\":32768,\"maxTokens\":4096,"
+                                + "\"thinkingFormat\":\"chat-template\",\"displayName\":\"视觉模型\"}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"inputModes\":[\"text\",\"image\"]")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"displayName\":\"视觉模型\"")));
+        assertThat(catalog.findModel("demo", "vl").getInputModes()).containsExactly("text", "image");
+        assertThat(catalog.findModel("demo", "vl").getDisplayName()).isEqualTo("视觉模型");
+
+        // 不带 inputModes 时按纯文本处理；不带 displayName 时保留原显示名。
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/vl")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":false,\"contextWindow\":8000,\"maxTokens\":1024,"
+                                + "\"thinkingFormat\":\"none\"}"))
+                .andExpect(status().isOk());
+        assertThat(catalog.findModel("demo", "vl").getInputModes()).containsExactly("text");
+        assertThat(catalog.findModel("demo", "vl").getDisplayName()).isEqualTo("视觉模型");
+
+        // 未知入参类型被拒绝，避免把拼错的类型悄悄写进库。
+        mockMvc.perform(put("/ai-lite/admin/api/providers/demo/models/vl")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasoning\":false,\"inputModes\":[\"videoo\"],"
+                                + "\"contextWindow\":8000,\"maxTokens\":1024,\"thinkingFormat\":\"none\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("未知入参类型")));
+    }
+
+    /**
      * 就绪接口的入参校验与未知模型处理。
      */
     @Test

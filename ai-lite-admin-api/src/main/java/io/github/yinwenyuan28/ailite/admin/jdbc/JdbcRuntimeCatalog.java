@@ -211,13 +211,61 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
      */
     public void saveCapabilities(String providerId, String modelId, boolean reasoning,
                                  int contextWindow, int maxTokens, String thinkingFormat) {
-        int updated = jdbc.update("UPDATE " + modelTable
-                        + " SET REASONING = ?, INPUT_MODES = ?, CONTEXT_WINDOW = ?,"
-                        + " MAX_TOKENS = ?, THINKING_FORMAT = ?, UPDATE_TIME = ?"
-                        + " WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
-                reasoning ? Integer.valueOf(1) : Integer.valueOf(0), "text",
-                Integer.valueOf(contextWindow), Integer.valueOf(maxTokens), thinkingFormat, now(),
-                providerId, modelId);
+        saveCapabilities(providerId, modelId, reasoning, new ArrayList<String>(), contextWindow,
+                maxTokens, thinkingFormat, null);
+    }
+
+    /**
+     * 保存能力参数，同时可更新显示名和入参类型。
+     *
+     * <p>入参类型决定 {@code ResolvedModel.acceptsImage}：只有包含 {@code image} 时
+     * 调用方才能把图片消息发给这个模型。早先这里写死成 {@code text}，导致支持图片的
+     * 模型在管理页上无论怎么配都不会被当成多模态。</p>
+     *
+     * @param providerId     供应商 id
+     * @param modelId        模型 id
+     * @param reasoning      是否支持推理
+     * @param inputModes     入参类型，如 text、image；空表示只收文本
+     * @param contextWindow  上下文窗口
+     * @param maxTokens      输出上限
+     * @param thinkingFormat 思考格式
+     * @param displayName    显示名；null 表示不改，空字符串表示回落到模型 id
+     */
+    public void saveCapabilities(String providerId, String modelId, boolean reasoning,
+                                 List<String> inputModes, int contextWindow, int maxTokens,
+                                 String thinkingFormat, String displayName) {
+        List<String> modes = inputModes == null || inputModes.isEmpty()
+                ? Collections.singletonList("text") : inputModes;
+        StringBuilder modesText = new StringBuilder();
+        for (String mode : modes) {
+            if (mode == null || mode.trim().isEmpty()) {
+                continue;
+            }
+            if (modesText.length() > 0) {
+                modesText.append(',');
+            }
+            modesText.append(mode.trim());
+        }
+        String modesValue = modesText.length() == 0 ? "text" : modesText.toString();
+        int updated;
+        if (displayName == null) {
+            updated = jdbc.update("UPDATE " + modelTable
+                            + " SET REASONING = ?, INPUT_MODES = ?, CONTEXT_WINDOW = ?,"
+                            + " MAX_TOKENS = ?, THINKING_FORMAT = ?, UPDATE_TIME = ?"
+                            + " WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
+                    reasoning ? Integer.valueOf(1) : Integer.valueOf(0), modesValue,
+                    Integer.valueOf(contextWindow), Integer.valueOf(maxTokens), thinkingFormat, now(),
+                    providerId, modelId);
+        } else {
+            String name = displayName.trim().isEmpty() ? modelId : displayName.trim();
+            updated = jdbc.update("UPDATE " + modelTable
+                            + " SET REASONING = ?, INPUT_MODES = ?, CONTEXT_WINDOW = ?,"
+                            + " MAX_TOKENS = ?, THINKING_FORMAT = ?, DISPLAY_NAME = ?, UPDATE_TIME = ?"
+                            + " WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
+                    reasoning ? Integer.valueOf(1) : Integer.valueOf(0), modesValue,
+                    Integer.valueOf(contextWindow), Integer.valueOf(maxTokens), thinkingFormat, name, now(),
+                    providerId, modelId);
+        }
         if (updated == 0) {
             throw new IllegalStateException("模型不存在: " + modelId);
         }

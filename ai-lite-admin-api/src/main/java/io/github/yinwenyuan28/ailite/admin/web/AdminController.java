@@ -53,6 +53,9 @@ public class AdminController {
     private static final Set<String> THINKING_FORMATS = new HashSet<String>(Arrays.asList(
             "none", "chat-template", "deepseek", "qwen",
             "reasoning-effort", "anthropic-budget", "anthropic-adaptive"));
+    /** 模型可以接收的输入类型。含 image 时调用方才允许发送图片消息。 */
+    private static final Set<String> INPUT_MODES = new HashSet<String>(Arrays.asList(
+            "text", "image", "audio", "video", "file"));
 
     private final AiLiteConfig config;
     private final JdbcRuntimeCatalog catalog;
@@ -340,9 +343,13 @@ public class AdminController {
     /**
      * 保存能力参数。**不改变就绪状态**，启用与否走 {@code PUT .../ready}。
      *
+     * <p>除四个必填参数外，还可选地带 {@code inputModes}（如 {@code ["text","image"]}）
+     * 和 {@code displayName}。入参类型决定模型能否接收图片：只有包含 {@code image}
+     * 时调用方才被允许发送图片消息。显示名只用于展示，不参与请求。</p>
+     *
      * @param name    供应商 id
      * @param modelId 模型 id
-     * @param body    推理开关、上下文窗口、输出上限、思考格式
+     * @param body    推理开关、上下文窗口、输出上限、思考格式；可选入参类型与显示名
      * @return 更新后的模型行
      */
     @PutMapping("/ai-lite/admin/api/providers/{name}/models/{modelId:.+}")
@@ -369,7 +376,11 @@ public class AdminController {
         if (!THINKING_FORMATS.contains(format)) {
             throw new IllegalArgumentException("未知思考格式: " + format);
         }
-        catalog.saveCapabilities(name, modelId, reasoning, contextWindow, maxTokens, format);
+        List<String> inputModes = inputModes(body.get("inputModes"));
+        String displayName = body.containsKey("displayName")
+                ? text(body.get("displayName")) : null;
+        catalog.saveCapabilities(name, modelId, reasoning, inputModes, contextWindow, maxTokens,
+                format, displayName);
         return ok(modelView(catalog.findModel(name, modelId), false));
     }
 
@@ -730,6 +741,7 @@ public class AdminController {
         row.put("modelId", model.getModelId());
         row.put("ready", Boolean.valueOf(model.isReady()));
         row.put("reasoning", Boolean.valueOf(model.isReasoning()));
+        row.put("inputModes", model.getInputModes());
         row.put("contextWindow", model.getContextWindow());
         row.put("maxTokens", model.getMaxTokens());
         row.put("thinkingFormat", model.getThinkingFormat());
@@ -792,6 +804,39 @@ public class AdminController {
             }
         }
         throw new IllegalArgumentException("版本不属于该业务");
+    }
+
+    /**
+     * 解析入参类型。只接受 text、image、audio、video、file；空或缺失表示只收文本。
+     *
+     * @param raw 请求体里的 inputModes，可以是数组或逗号分隔字符串
+     * @return 去重后的入参类型
+     */
+    private static List<String> inputModes(Object raw) {
+        List<String> modes = new ArrayList<String>();
+        if (raw instanceof List) {
+            for (Object item : (List<?>) raw) {
+                addMode(modes, item);
+            }
+        } else if (raw != null) {
+            for (String part : String.valueOf(raw).split(",")) {
+                addMode(modes, part);
+            }
+        }
+        return modes;
+    }
+
+    private static void addMode(List<String> modes, Object raw) {
+        String mode = text(raw);
+        if (mode.isEmpty()) {
+            return;
+        }
+        if (!INPUT_MODES.contains(mode)) {
+            throw new IllegalArgumentException("未知入参类型: " + mode);
+        }
+        if (!modes.contains(mode)) {
+            modes.add(mode);
+        }
     }
 
     private static Map<String, String> stringMap(Object raw) {
