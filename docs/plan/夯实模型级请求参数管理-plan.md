@@ -595,7 +595,7 @@ for (Map.Entry<String, String> e : m.getHeaders().entrySet()) {
 
 - `context-window` 为 NULL 时会被 `resolve` 读成 0，而 0 表示「未知，跳过全部预算检查与压缩」。同步来的模型只点了就绪、没填能力参数时，长会话不会触发压缩。这与本次修的不是同一个问题（本次是「数据库没值时回落哪」），记在这里备查，不在本次范围。
 - 页面新增的 JSON 输入框如果不做长度限制，用户可能把整段提示词粘进去。校验上限 16384 字符只是兜底，不是设计意图。
-- 两级 `extra-body` 之间是 `putAll` 顶层覆盖，嵌套对象整块替换；而 `extra-body` 与单次调用的 `extraBody` 之间是递归深合并。这个不一致在本次之前就存在，T10 只处理头名，不动这里。若要统一，属于另一个改动。
+- 两级 `extra-body` 之间原是 `putAll` 顶层覆盖，嵌套对象整块替换；而 `extra-body` 与单次调用的 `extraBody` 之间是递归深合并。这个不一致在本次之前就存在，T10 只处理头名，当时没动它。**用户随后要求一并处理，已改为三层统一递归深合并**，并同时补上 `LlmCall.extraBody`（此前 `LlmCall` 没有这个字段，网关一直传 null，单次调用临时加字段做不到）。见下方实施记录。
 
 ## 实施记录
 
@@ -608,3 +608,8 @@ for (Map.Entry<String, String> e : m.getHeaders().entrySet()) {
   1. **层级**：`.select-menu` 的 `z-index` 是 40，`.modal-backdrop` 是 60。菜单为了不被 overflow 裁切挂在 `body` 上，所以在弹窗里打开时被遮罩盖住。修法是新增 `raiseAboveModals()`，打开菜单时按「当前最上层弹窗 + 1」动态抬高。没有改成固定值，因为弹窗还能叠弹窗（确认框叠在弹窗上），固定值会在下一层复发。
   2. **变量重名**：`THINKING_LEVELS` 被定义了两次——原有的是纯 id 数组（含 `minimal`），本次新加的是 `{id,label}` 数组，后者覆盖前者。于是测试调用弹窗和业务绑定处的 `THINKING_LEVELS.map` 拿到整个对象当 id，选项显示成 `[object Object]`。这是本次改动引入的缺陷。修法是拆成两个名字：`THINKING_LEVEL_IDS`（纯 id，旧弹窗用）与 `THINKING_LEVEL_OPTIONS`（带标签，行编辑表用），并把 `minimal` 补回选项列表。
   浏览器实测：弹窗内菜单 `z-index=61 > 60`、命中最上层是 `select-option`、7 个档位标签正常、点选后回填为 `high`；非弹窗场景（业务绑定）也正常。
+- 2026-11-04：用户要求「LlmCall 支持单次 extraBody」与「两级 extra-body 改深合并」一起做掉。
+  - `LlmCall` 加 `extraBody(Map)` 链式方法与 `getExtraBody()`，`copy()` 与 `withMessages()` 都带上它。网关同步与异步两条路径原来把 `null` 写死传给 `LlmRequest`，现改为 `call.getExtraBody()`。在此之前「这一通调用临时加个字段」是做不到的。
+  - `ModelResolver.resolve` 里两行 `putAll` 换成新增的 `deepMerge`。合并时把嵌套 Map 复制一份再写，避免改到配置对象本身（有专门用例验证第二次调用不会被污染）。
+  - 新增 `ExtraBodyMergeTest`（7 项）：两级嵌套合并、同叶子键模型级覆盖、单次调用进入请求体、三层优先级、copy 保留、不污染配置。
+  - 真实链路实测：供应商级写 `chat_template_kwargs` 两个子键、模型级写同父键一个新的，抓包确认三个子键都在（修复前只剩模型级那个）。

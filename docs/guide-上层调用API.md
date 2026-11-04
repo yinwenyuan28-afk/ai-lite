@@ -234,6 +234,9 @@ LlmCall call = LlmCall.explicit("my-biz", "my-provider", "my-model", "high", mes
 // 本次调用的超时（覆盖供应商配置；null 表示沿用配置）
 call.timeouts(5000, 60000);
 
+// 本次调用临时追加请求体字段（优先级最高：单次调用 > 模型级 > 供应商级）
+call.extraBody(Collections.singletonMap("trace_id", traceId));
+
 // 只替换消息，保留模型选择、思考档和超时
 LlmCall next = call.withMessages(newMessages);
 ```
@@ -244,9 +247,14 @@ LlmCall next = call.withMessages(newMessages);
 | `biz(bizId, messages)` | 目录模式下按业务 id 读数据库绑定 | ⭐ |
 | `explicit(bizId, provider, modelId, thinkingLevel, messages)` | 直接指定供应商和模型 | ⭐ |
 | `timeouts(connectMs, readMs)` | 修改当前实例的超时并返回 `this` |  |
+| `maxTokens(n)` | 覆盖本次的输出上限；`null` 沿用模型配置 |  |
+| `extraBody(map)` | 只在本次调用追加的请求体字段，递归深合并；`null` 表示不追加 |  |
 | `withMessages(messages)` | 返回新实例，消息替换，其余保持 | ⭐ |
 | `getBizId()`、`getProvider()`、`getModelId()`、`getThinkingLevel()`、`getProfile()`、`getMessages()` | 只读访问 |  |
-| `getConnectTimeoutMs()`、`getReadTimeoutMs()` | 本次覆盖值，可能为 `null` |  |
+| `getConnectTimeoutMs()`、`getReadTimeoutMs()`、`getMaxTokens()`、`getExtraBody()` | 本次覆盖值，可能为 `null` |  |
+
+`extraBody` 优先级最高。长期生效的字段应该写在模型级或供应商级的 `extra-body` 里，不要每次调用都传——
+那样管理页上就看不到了，也没法按模型区分。
 
 `profile` 的优先级高于 `explicit`。如果两者都为空：没有运行时目录时，网关使用 `default-profile`；目录生效时，按业务 id 读数据库绑定，不再回退 `default-profile`。没有绑定时报「业务未配置模型」。
 

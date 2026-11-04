@@ -54,6 +54,16 @@ mvn spring-boot:run
 - 两级同名请求头（忽略大小写）由模型级覆盖供应商级。
 - `Authorization` 与 `Content-Type` 由库管理，不能在这两处配。
 
+请求体的附加字段是**递归合并**的，三层优先级：单次调用 > 模型级 > 供应商级。嵌套对象按子键合并，
+所以模型级只写一个子键时，供应商级同父键下的其它子键会保留。
+
+单次调用的临时字段用 `LlmCall.extraBody`：
+
+```java
+LlmCall call = LlmCall.biz("demo-chat", messages)
+        .extraBody(Collections.singletonMap("trace_id", traceId));
+```
+
 模型弹窗底部的「这次会发什么」会列出合并后的请求头键名（标注来自哪一级）与请求体附加字段名，
 不显示具体值——用来确认配置有没有生效，不泄露内容。
 
