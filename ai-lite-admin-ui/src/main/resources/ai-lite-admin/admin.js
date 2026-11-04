@@ -1189,12 +1189,10 @@
     section.appendChild(head);
 
     var tableSection = statusLine(section);
-    var dumpHost = el("div");
     var models = provider.models || [];
     if (!models.length) {
       section.appendChild(emptyState("还没有模型",
         "点「同步模型」从供应商读取，或手动添加一个。新加入的模型默认未就绪，补齐能力参数并打开就绪后才能被业务绑定。"));
-      section.appendChild(dumpHost);
       return section;
     }
 
@@ -1210,10 +1208,9 @@
     section.appendChild(wrap);
 
     models.forEach(function (model) {
-      tbody.appendChild(modelRow(provider, model, tableSection, dumpHost));
+      tbody.appendChild(modelRow(provider, model, tableSection));
     });
 
-    section.appendChild(dumpHost);
     return section;
   }
 
@@ -1225,7 +1222,7 @@
     return row;
   }
 
-  function modelRow(provider, model, tableStatus, dumpHost) {
+  function modelRow(provider, model, tableStatus) {
     var row = el("tr");
 
     var nameCell = el("td", "cell-name");
@@ -1296,7 +1293,7 @@
     });
     var tryBtn = button("测试", {
       size: "sm", title: "用当前配置发一次测试请求",
-      onClick: function () { openTryDialog(provider, model, tableStatus, dumpHost); }
+      onClick: function () { openTryDialog(provider, model, tableStatus); }
     });
     var remove = button("删除", {
       size: "sm", tone: "danger", title: "从本地列表删除这个模型",
@@ -1685,7 +1682,7 @@
     });
   }
 
-  function openTryDialog(provider, model, tableStatus, dumpHost) {
+  function openTryDialog(provider, model, tableStatus) {
     var body = el("div", "section");
     var levelSelect = select(THINKING_LEVEL_IDS.map(function (level) {
       return { id: level, label: level };
@@ -1713,7 +1710,6 @@
                 renderTryResult(resultHost, data);
                 tableStatus((data.ok ? "调用成功" : "调用失败") + "，"
                   + data.latencyMs + " 毫秒。", data.ok ? "ok" : "error");
-                showTryDump(dumpHost, data);
               }).catch(function (error) {
                 clear(resultHost);
                 resultHost.appendChild(el("p", "status-line error", error.message));
@@ -1725,6 +1721,19 @@
     return modal;
   }
 
+  /**
+   * 渲染测试调用结果，含真实发出的请求报文。
+   *
+   * <p>报文放在弹窗里而不是卡片下方：点了「发起调用」之后视线的焦点就在弹窗内，
+   * 放在弹窗外面用户根本不知道要滚下去看。此前它渲染在弹窗外的 dumpHost 上，
+   * 必须关掉弹窗才看得到。</p>
+   *
+   * <p>报文默认折叠。请求头里可能有业务方自己的追踪 ID 之类，不必一进页面就铺开；
+   * 但要看的时候必须能看到——这正是「配了自定义头却以为没生效」的解药。</p>
+   *
+   * @param host 结果容器
+   * @param data 接口返回的测试结果
+   */
   function renderTryResult(host, data) {
     clear(host);
     var kv = el("div", "kv-grid");
@@ -1741,26 +1750,51 @@
       reply.textContent = data.content;
       host.appendChild(reply);
     }
+    renderTryDump(host, data);
+  }
+
+  /**
+   * 折叠的「这次实际发了什么」。
+   *
+   * @param host 容器
+   * @param data 测试结果，含 request 与 response 文本
+   */
+  function renderTryDump(host, data) {
+    if (!data.request && !data.response) {
+      return;
+    }
+    var block = el("div", "try-dump");
+    var toggle = button("这次实际发了什么", { size: "sm" });
+    var open = false;
+    var content = el("div", "try-dump-body");
+    content.hidden = true;
+
+    if (data.request) {
+      content.appendChild(el("p", "field-label", "发给模型的请求"));
+      var req = el("pre", "code-block");
+      req.textContent = data.request;
+      content.appendChild(req);
+    }
+    if (data.response) {
+      content.appendChild(el("p", "field-label", "模型原始响应"));
+      var res = el("pre", "code-block");
+      res.textContent = data.response;
+      content.appendChild(res);
+    }
+
+    toggle.addEventListener("click", function () {
+      open = !open;
+      content.hidden = !open;
+      toggle.textContent = open ? "收起报文" : "这次实际发了什么";
+    });
+    block.appendChild(toggle);
+    block.appendChild(content);
+    host.appendChild(block);
   }
 
   function addKv(grid, key, value) {
     grid.appendChild(el("span", "kv-key", key));
     grid.appendChild(el("span", "kv-value", value));
-  }
-
-  function showTryDump(host, data) {
-    clear(host);
-    var details = el("div", "section");
-    details.appendChild(el("h3", "section-title", "最近一次测试调用的报文"));
-    details.appendChild(el("p", "field-label", "发给模型的请求"));
-    var req = el("pre", "code-block");
-    req.textContent = data.request || "（空）";
-    details.appendChild(req);
-    details.appendChild(el("p", "field-label", "模型原始响应"));
-    var res = el("pre", "code-block");
-    res.textContent = data.response || "（空）";
-    details.appendChild(res);
-    host.appendChild(details);
   }
 
   /* ---------------- 业务与提示词 ---------------- */
