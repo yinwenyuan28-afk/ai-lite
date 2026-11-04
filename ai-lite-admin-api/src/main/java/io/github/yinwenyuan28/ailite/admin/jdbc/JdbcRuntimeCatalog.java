@@ -52,6 +52,44 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
         this.bizTable = safeTable(bizTable);
         this.cacheMillis = cacheSeconds <= 0 ? 0L : cacheSeconds * 1000L;
         requireTables(jdbc, this.providerTable, this.modelTable, this.bizTable);
+        // 放在构造器里而不是自动装配里：直接 new 这个类的调用方也要能读旧库。
+        ensureProviderApiColumn(jdbc, this.providerTable);
+    }
+
+    /**
+     * 补齐旧库缺少的列。
+     *
+     * <p>0.1.14 之前 {@code AI_LITE_PROVIDER_OVERLAY} 没有 {@code API} 列，协议只能写在
+     * 配置文件里。现在协议可以由管理页覆盖，旧库需要补这一列，否则读取覆盖时整表查询
+     * 会失败。已有的行该列为 NULL，表示沿用配置文件，行为与升级前一致。</p>
+     *
+     * @param jdbc          JDBC
+     * @param providerTable 覆盖表
+     */
+    public static void ensureProviderApiColumn(JdbcTemplate jdbc, String providerTable) {
+        String table = safeTable(providerTable);
+        if (hasColumn(jdbc, table, "API")) {
+            return;
+        }
+        try {
+            jdbc.execute("ALTER TABLE " + table + " ADD COLUMN API VARCHAR(64)");
+        } catch (RuntimeException ex) {
+            // 已被别的实例加上，或数据库不允许在线改表：重查一次，仍然没有才报错。
+            if (!hasColumn(jdbc, table, "API")) {
+                throw new IllegalStateException(
+                        "覆盖表 " + table + " 缺少 API 列，且自动补齐失败，请手工执行: ALTER TABLE "
+                                + table + " ADD COLUMN API VARCHAR(64)", ex);
+            }
+        }
+    }
+
+    private static boolean hasColumn(JdbcTemplate jdbc, String table, String column) {
+        try {
+            jdbc.queryForList("SELECT " + column + " FROM " + table + " WHERE 1 = 0");
+            return true;
+        } catch (RuntimeException ex) {
+            return false;
+        }
     }
 
     /**
@@ -118,9 +156,9 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
         }
         jdbc.update("DELETE FROM " + providerTable + " WHERE PROVIDER_ID = ?", overlay.getProviderId());
         jdbc.update("INSERT INTO " + providerTable
-                        + " (PROVIDER_ID, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, UPDATE_TIME)"
-                        + " VALUES (?, ?, ?, ?, ?, ?)",
-                overlay.getProviderId(), overlay.getBaseUrl(), overlay.getApiKey(),
+                        + " (PROVIDER_ID, API, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, UPDATE_TIME)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                overlay.getProviderId(), overlay.getApi(), overlay.getBaseUrl(), overlay.getApiKey(),
                 overlay.getConnectTimeoutMs(), overlay.getReadTimeoutMs(), now());
         invalidate();
     }
@@ -349,13 +387,14 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
 
     private Snapshot read() {
         Map<String, ProviderOverlay> providers = new LinkedHashMap<String, ProviderOverlay>();
-        jdbc.query("SELECT PROVIDER_ID, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS FROM "
+        jdbc.query("SELECT PROVIDER_ID, API, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS FROM "
                 + providerTable, new org.springframework.jdbc.core.RowCallbackHandler() {
             @Override
             public void processRow(ResultSet rs) throws SQLException {
                 providers.put(rs.getString("PROVIDER_ID"), new ProviderOverlay(
                         rs.getString("PROVIDER_ID"), rs.getString("BASE_URL"), rs.getString("API_KEY"),
-                        integer(rs, "CONNECT_TIMEOUT_MS"), integer(rs, "READ_TIMEOUT_MS")));
+                        integer(rs, "CONNECT_TIMEOUT_MS"), integer(rs, "READ_TIMEOUT_MS"),
+                        rs.getString("API")));
             }
         });
         Map<String, CatalogModel> models = new LinkedHashMap<String, CatalogModel>();

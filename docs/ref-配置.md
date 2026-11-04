@@ -63,8 +63,8 @@ providers:
 
 | 字段 | 说明 |
 | --- | --- |
-| `api` | 协议：`openai-completions`、`openai-responses`、`anthropic-messages` |
-| `base-url` | 端点根地址，不要带 `/chat/completions`、`/responses`、`/v1/messages` |
+| `api` | 协议：`openai-completions`、`openai-responses`、`anthropic-messages`。可以不改文件，用管理页覆盖；覆盖值写在覆盖表的 `API` 列 |
+| `base-url` | 端点根地址。不要带协议路径，本库按协议自己追加：`openai-completions` → `/chat/completions`，`openai-responses` → `/responses`，`anthropic-messages` → `/v1/messages`（Anthropic 的 `base-url` 因此不要再带 `/v1`） |
 | `api-key` | 支持字面量、`${ENV}`、`${ENV:default}`、`$ENV` |
 | `api-key-env` | `api-key` 为空时从该环境变量读取 |
 | `api-keys` | 多 key 轮换池；配置后优先于 `api-key`/`api-key-env`。429/401 失败时把当前 key 冷却一段时间并换下一把（换 key 的指针只在失败时推进；全部 key 都在冷却中就先用第一把，冷却到期自动恢复） |
@@ -157,7 +157,7 @@ ai-lite:
 | `admin.page-enabled` | `false` | 为 `true` 时才提供自带页面 `GET /ai-lite/admin`。自己做前端时保持 `false`，只调 [管理 API](ref-管理API.md) |
 | `catalog.cache-seconds` | `5` | 目录读缓存秒数；写入后立刻清本机缓存；0 表示每次都读库 |
 | `catalog.setting-cache-seconds` | `10` | 调用正文档位的缓存秒数。档位在每次调用记录时都要读，不缓存等于每次模型调用都多一条 SELECT；`save` 会直接更新缓存，本机改完立即生效，跨节点最长等这个 TTL |
-| `catalog.provider-table` | `AI_LITE_PROVIDER_OVERLAY` | 覆盖地址、密钥、两个超时；空字段沿用配置文件 |
+| `catalog.provider-table` | `AI_LITE_PROVIDER_OVERLAY` | 覆盖协议、地址、密钥、两个超时；空字段沿用配置文件 |
 | `catalog.model-table` | `AI_LITE_MODEL` | 从 `GET {baseUrl}/models` 增量同步，或手工添加 |
 | `catalog.biz-table` | `AI_LITE_BIZ_BINDING` | 一个业务 id 对应一个供应商、模型和思考档 |
 | `catalog.setting-table` | `AI_LITE_ADMIN_SETTING` | 管理端运行时开关表，目前只存 call-body 档位 |

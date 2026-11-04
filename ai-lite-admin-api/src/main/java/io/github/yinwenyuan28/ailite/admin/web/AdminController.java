@@ -56,6 +56,9 @@ public class AdminController {
     /** 模型可以接收的输入类型。含 image 时调用方才允许发送图片消息。 */
     private static final Set<String> INPUT_MODES = new HashSet<String>(Arrays.asList(
             "text", "image", "audio", "video", "file"));
+    /** 可覆盖的供应商协议。与 transport 注册的 api 一致。 */
+    private static final Set<String> SUPPORTED_APIS = new HashSet<String>(Arrays.asList(
+            "openai-completions", "openai-responses", "anthropic-messages"));
 
     private final AiLiteConfig config;
     private final JdbcRuntimeCatalog catalog;
@@ -213,7 +216,7 @@ public class AdminController {
         AiLiteConfig.Provider provider = requireProvider(name);
         Endpoint endpoint = endpoint(name, provider);
         List<String> remote = ModelSyncClient.listRemote(
-                http, provider.getApi(), endpoint.baseUrl, endpoint.apiKey);
+                http, endpoint.api, endpoint.baseUrl, endpoint.apiKey);
         Set<String> stored = new HashSet<String>();
         for (CatalogModel model : catalog.listModels(name)) {
             stored.add(model.getModelId());
@@ -298,7 +301,7 @@ public class AdminController {
             thinkingLevel = LlmThinkingLevel.parse(thinkingLevel).wire();
         }
         ModelSyncClient.TryResult result = ModelSyncClient.tryChat(
-                http, provider.getApi(), endpoint.baseUrl, endpoint.apiKey, modelId, format, maxTokens,
+                http, endpoint.api, endpoint.baseUrl, endpoint.apiKey, modelId, format, maxTokens,
                 thinkingLevel, endpoint.connectMs, endpoint.readMs);
         Map<String, Object> data = new LinkedHashMap<String, Object>();
         data.put("ok", Boolean.valueOf(result.isOk()));
@@ -317,6 +320,35 @@ public class AdminController {
     @GetMapping("/ai-lite/admin/api/thinking-formats")
     public Map<String, Object> thinkingFormats() {
         return ok(thinkingFormatOptions());
+    }
+
+    /**
+     * 可选的供应商协议，以及各自追加的路径。
+     *
+     * <p>页面拿它渲染下拉；同时把「base-url 之后会接什么」讲清楚，
+     * 避免用户把完整端点写进 base-url 导致路径重复。</p>
+     *
+     * @return 协议 id、中文名、追加路径和说明
+     */
+    @GetMapping("/ai-lite/admin/api/apis")
+    public Map<String, Object> apis() {
+        List<Map<String, Object>> rows = new ArrayList<Map<String, Object>>();
+        rows.add(apiOption("openai-completions", "OpenAI Chat Completions", "/chat/completions",
+                "最常见的 OpenAI 兼容接口。base-url 写到 /v1 即可。"));
+        rows.add(apiOption("openai-responses", "OpenAI Responses", "/responses",
+                "OpenAI 新版 Responses 协议。base-url 写到 /v1 即可。"));
+        rows.add(apiOption("anthropic-messages", "Anthropic Messages", "/v1/messages",
+                "Anthropic 协议。本库会自己追加 /v1/messages，base-url 不要再带 /v1。"));
+        return ok(rows);
+    }
+
+    private static Map<String, Object> apiOption(String id, String label, String path, String detail) {
+        Map<String, Object> row = new LinkedHashMap<String, Object>();
+        row.put("id", id);
+        row.put("label", label);
+        row.put("path", path);
+        row.put("detail", detail);
+        return row;
     }
 
     /**
@@ -695,7 +727,10 @@ public class AdminController {
         Endpoint endpoint = describe(provider, overlay);
         Map<String, Object> row = new LinkedHashMap<String, Object>();
         row.put("name", name);
-        row.put("api", provider.getApi());
+        row.put("api", endpoint.api);
+        row.put("configApi", provider.getApi());
+        row.put("apiOverridden", Boolean.valueOf(overlay != null
+                && Strings.isNotBlank(overlay.getApi())));
         row.put("baseUrl", endpoint.baseUrl);
         row.put("apiKeyMasked", mask(endpoint.apiKey));
         row.put("apiKeyConfigured", Boolean.valueOf(!endpoint.apiKey.isEmpty()));
@@ -864,10 +899,22 @@ public class AdminController {
     }
 
     private ProviderOverlay merge(String name, ProviderOverlay current, Map<String, Object> body) {
+        String api = current == null ? null : current.getApi();
         String baseUrl = current == null ? null : current.getBaseUrl();
         String apiKey = current == null ? null : current.getApiKey();
         Integer connect = current == null ? null : current.getConnectTimeoutMs();
         Integer read = current == null ? null : current.getReadTimeoutMs();
+        if (body != null && body.containsKey("api")) {
+            String next = text(body.get("api"));
+            // 空串表示「撤销协议覆盖、回到配置文件」；非空必须是受支持的协议。
+            if (next.isEmpty()) {
+                api = null;
+            } else if (!SUPPORTED_APIS.contains(next)) {
+                throw new IllegalArgumentException("未知协议: " + next);
+            } else {
+                api = next;
+            }
+        }
         if (body != null && body.containsKey("baseUrl") && !text(body.get("baseUrl")).isEmpty()) {
             baseUrl = text(body.get("baseUrl"));
         }
@@ -882,7 +929,7 @@ public class AdminController {
                 && !text(body.get("readTimeoutMs")).isEmpty()) {
             read = Integer.valueOf(positive(body.get("readTimeoutMs"), "读取超时"));
         }
-        return new ProviderOverlay(name, baseUrl, apiKey, connect, read);
+        return new ProviderOverlay(name, baseUrl, apiKey, connect, read, api);
     }
 
     private Endpoint endpoint(String name, AiLiteConfig.Provider provider) {
@@ -897,11 +944,15 @@ public class AdminController {
     }
 
     private static Endpoint describe(AiLiteConfig.Provider provider, ProviderOverlay overlay) {
+        String api = provider.getApi() == null ? "" : provider.getApi().trim();
         String baseUrl = provider.getBaseUrl() == null ? "" : provider.getBaseUrl().trim();
         String apiKey = effectiveKey(provider);
         int connect = provider.getConnectTimeoutMs() == null ? 10000 : provider.getConnectTimeoutMs().intValue();
         int read = provider.getReadTimeoutMs() == null ? 120000 : provider.getReadTimeoutMs().intValue();
         if (overlay != null) {
+            if (Strings.isNotBlank(overlay.getApi())) {
+                api = overlay.getApi().trim();
+            }
             if (Strings.isNotBlank(overlay.getBaseUrl())) {
                 baseUrl = overlay.getBaseUrl().trim();
             }
@@ -918,7 +969,7 @@ public class AdminController {
         while (baseUrl.endsWith("/")) {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
         }
-        return new Endpoint(baseUrl, apiKey, connect, read);
+        return new Endpoint(api, baseUrl, apiKey, connect, read);
     }
 
     private static String effectiveKey(AiLiteConfig.Provider provider) {
@@ -1054,12 +1105,14 @@ public class AdminController {
     }
 
     private static final class Endpoint {
+        private final String api;
         private final String baseUrl;
         private final String apiKey;
         private final int connectMs;
         private final int readMs;
 
-        private Endpoint(String baseUrl, String apiKey, int connectMs, int readMs) {
+        private Endpoint(String api, String baseUrl, String apiKey, int connectMs, int readMs) {
+            this.api = api;
             this.baseUrl = baseUrl;
             this.apiKey = apiKey;
             this.connectMs = connectMs;

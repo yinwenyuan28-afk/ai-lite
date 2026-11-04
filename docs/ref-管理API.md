@@ -10,14 +10,15 @@
 
 | 方法与路径 | 作用 |
 | --- | --- |
-| GET `/ai-lite/admin/api/providers` | 配置文件里的供应商、生效地址、脱敏密钥、本地模型；`overlay=true` 表示正在用库内覆盖 |
-| POST `/ai-lite/admin/api/providers/{name}/overlay` | 写覆盖。空字段表示不改。不改配置文件 |
+| GET `/ai-lite/admin/api/providers` | 配置文件里的供应商、生效地址、脱敏密钥、本地模型；`overlay=true` 表示正在用库内覆盖；`apiOverridden=true` 表示协议被覆盖，`configApi` 是配置文件原值 |
+| POST `/ai-lite/admin/api/providers/{name}/overlay` | 写覆盖。空字段表示不改。`api` 传空串表示撤销协议覆盖、回到配置文件；传未知协议返回 400。不改配置文件 |
 | POST `/ai-lite/admin/api/providers/{name}/overlay/clear` | 删掉该供应商的覆盖 |
+| GET `/ai-lite/admin/api/apis` | 可选的供应商协议，以及各自在 `base-url` 之后追加的路径（`/chat/completions`、`/responses`、`/v1/messages`） |
 | POST `/ai-lite/admin/api/providers/{name}/connectivity` | 探测 `GET {baseUrl}/models`，不写库 |
 | POST `/ai-lite/admin/api/providers/{name}/models/sync` | 只返回远端模型 id，以及是否已在本地。不插入、不覆盖、不删除 |
 | POST `/ai-lite/admin/api/providers/{name}/models/adopt` | 正文 `{ "modelIds": ["..."] }`。只把勾选的新 id 插入为未就绪 |
 | POST `/ai-lite/admin/api/providers/{name}/models` | 手工添加一个未就绪模型，正文 `{ "modelId": "..." }` |
-| PUT `/ai-lite/admin/api/providers/{name}/models/{modelId}` | 保存能力参数，**不改就绪状态**。需要推理开关、上下文窗口、输出上限、思考格式 |
+| PUT `/ai-lite/admin/api/providers/{name}/models/{modelId}` | 保存能力参数，**不改就绪状态**。需要推理开关、上下文窗口、输出上限、思考格式；可选 `inputModes`（`["text","image"]` 这类数组，决定模型能否接收图片）和 `displayName`（只用于展示，空串表示回落到模型 id）。不传 `inputModes` 按 `["text"]` 写，不传 `displayName` 保留原值 |
 | PUT `/ai-lite/admin/api/providers/{name}/models/{modelId}/ready` | 启用或停用模型，正文 `{ "ready": true \| false }`。就绪只由这个接口改变 |
 | DELETE `/ai-lite/admin/api/providers/{name}/models/{modelId}` | 用户删除。仍被业务绑定时拒绝 |
 | POST `/ai-lite/admin/api/providers/{name}/models/{modelId}/try` | 实测调用。正文可含 `thinkingLevel`（默认 `off`）。`max_tokens` 用模型配置的输出上限；响应含脱敏后的完整 HTTP 请求与原始响应。Anthropic / Responses 协议尚未接入 |
@@ -50,3 +51,11 @@
 未就绪的模型不能被业务绑定（`PUT /biz/{bizId}` 会拒绝），调用时 `ModelResolver` 也会再检查一次。
 停用一个已绑定的模型**不会解除绑定**：绑定保留，但下一次调用在解析阶段失败。这是刻意的——
 静默解绑会让业务在无人察觉的情况下失去模型。
+
+**入参类型决定模型能不能收图片。** `inputModes` 存进 `AI_LITE_MODEL.INPUT_MODES`，由 `ModelResolver` 转成
+`ResolvedModel.acceptsImage`：只有其中包含 `image`，调用方才被允许发送图片消息。早先这一列写死成 `text`，
+所以支持图片的模型在管理页上怎么配都不会被当成多模态。可选值为 `text`、`image`、`audio`、`video`、`file`，
+写错会被 400 拒绝（`未知入参类型`）。
+
+**显示名只影响展示。** `displayName` 写进 `DISPLAY_NAME`，不参与模型请求；留空时回落到模型 id。
+

@@ -71,6 +71,31 @@ public class ModelResolverCatalogTest {
         assertThat(resolved.getReadTimeoutMs()).isEqualTo(3000);
     }
 
+    /**
+     * 协议可以由库内覆盖改掉，解析结果要跟着变；不覆盖时沿用配置文件。
+     *
+     * <p>这条是「管理页改供应商协议」能生效的前提：如果 {@code applyOverlay} 漏了
+     * api，页面改完协议，请求仍然会打到旧协议的路径上。</p>
+     */
+    @Test
+    public void overlayReplacesProtocol() {
+        BizBinding binding = new BizBinding("demo-chat", "demo", "qwen", "off");
+        AiLiteConfig.Llm llm = bareLlm();
+        llm.getProviders().get("demo").setApi("openai-completions");
+
+        ResolvedModel overridden = new ModelResolver(llm, 60_000L,
+                catalog(true, binding, ready("qwen"),
+                        new ProviderOverlay("demo", null, null, null, null, "anthropic-messages")))
+                .resolveBiz("demo-chat");
+        assertThat(overridden.getApi()).isEqualTo("anthropic-messages");
+
+        ResolvedModel fallback = new ModelResolver(llm, 60_000L,
+                catalog(true, binding, ready("qwen"),
+                        new ProviderOverlay("demo", null, null, null, null, null)))
+                .resolveBiz("demo-chat");
+        assertThat(fallback.getApi()).isEqualTo("openai-completions");
+    }
+
     @Test
     public void keyPoolIgnoresOverlayKey() {
         AiLiteConfig.Llm llm = bareLlm();

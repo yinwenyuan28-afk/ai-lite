@@ -215,6 +215,9 @@ public final class ModelResolver {
         if (overlay == null) {
             return copy;
         }
+        if (Strings.isNotBlank(overlay.getApi())) {
+            copy.setApi(overlay.getApi().trim());
+        }
         if (Strings.isNotBlank(overlay.getBaseUrl())) {
             copy.setBaseUrl(overlay.getBaseUrl().trim());
         }

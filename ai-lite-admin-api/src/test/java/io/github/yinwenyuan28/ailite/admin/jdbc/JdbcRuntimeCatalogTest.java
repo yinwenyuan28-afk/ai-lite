@@ -51,6 +51,53 @@ public class JdbcRuntimeCatalogTest {
         assertThat(catalog.findProvider("demo")).isNull();
     }
 
+    /**
+     * 协议覆盖要能写库读回；不写协议时该列为 null，表示沿用配置文件。
+     */
+    @Test
+    public void overlayRoundTripsProtocol() {
+        catalog.saveOverlay(new ProviderOverlay("demo", "http://override/v1", "secret",
+                null, null, "openai-responses"));
+        assertThat(catalog.findProvider("demo").getApi()).isEqualTo("openai-responses");
+
+        catalog.saveOverlay(new ProviderOverlay("demo", "http://override/v2", "secret",
+                null, null, null));
+        assertThat(catalog.findProvider("demo").getApi()).isNull();
+    }
+
+    /**
+     * 旧库的覆盖表没有 API 列：补列后能读写，已有行的协议保持空（沿用配置文件）。
+     */
+    @Test
+    public void ensuresApiColumnOnLegacyTable() {
+        JdbcTemplate legacy = SqliteFiles.open("legacy-overlay");
+        legacy.execute("CREATE TABLE AI_LITE_PROVIDER_OVERLAY ("
+                + "PROVIDER_ID VARCHAR(64) PRIMARY KEY, BASE_URL VARCHAR(500), API_KEY VARCHAR(500),"
+                + "CONNECT_TIMEOUT_MS INT, READ_TIMEOUT_MS INT, UPDATE_TIME TIMESTAMP)");
+        legacy.execute("CREATE TABLE AI_LITE_MODEL ("
+                + "MODEL_ROW_ID VARCHAR(64) PRIMARY KEY, PROVIDER_ID VARCHAR(64) NOT NULL,"
+                + "MODEL_ID VARCHAR(128) NOT NULL, READY INT NOT NULL, REASONING INT, INPUT_MODES VARCHAR(64),"
+                + "CONTEXT_WINDOW INT, MAX_TOKENS INT, THINKING_FORMAT VARCHAR(64),"
+                + "DISPLAY_NAME VARCHAR(128), UPDATE_TIME TIMESTAMP)");
+        legacy.execute("CREATE TABLE AI_LITE_BIZ_BINDING ("
+                + "BIZ_ID VARCHAR(64) PRIMARY KEY, PROVIDER_ID VARCHAR(64) NOT NULL,"
+                + "MODEL_ID VARCHAR(128) NOT NULL, THINKING_LEVEL VARCHAR(32) NOT NULL, UPDATE_TIME TIMESTAMP)");
+        legacy.update("INSERT INTO AI_LITE_PROVIDER_OVERLAY (PROVIDER_ID, BASE_URL, API_KEY)"
+                + " VALUES ('demo', 'http://old/v1', 'k')");
+
+        JdbcRuntimeCatalog.ensureProviderApiColumn(legacy, "AI_LITE_PROVIDER_OVERLAY");
+
+        JdbcRuntimeCatalog migrated = new JdbcRuntimeCatalog(legacy, "AI_LITE_PROVIDER_OVERLAY",
+                "AI_LITE_MODEL", "AI_LITE_BIZ_BINDING", 0);
+        assertThat(migrated.findProvider("demo").getApi()).isNull();
+        migrated.saveOverlay(new ProviderOverlay("demo", "http://old/v1", "k", null, null,
+                "anthropic-messages"));
+        assertThat(migrated.findProvider("demo").getApi()).isEqualTo("anthropic-messages");
+
+        // 再补一次是幂等的，不会因为列已存在而失败。
+        JdbcRuntimeCatalog.ensureProviderApiColumn(legacy, "AI_LITE_PROVIDER_OVERLAY");
+    }
+
     @Test
     public void syncDoesNotOverwriteReadyModel() {
         assertThat(catalog.insertModelIfAbsent("demo", "qwen")).isTrue();
