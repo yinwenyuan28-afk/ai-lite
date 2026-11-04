@@ -166,39 +166,9 @@ body {
   flex-direction: column;
 }
 
-.topbar {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 28px 32px 20px;
-  border-bottom: 1px solid var(--color-slate-200);
-  background-color: var(--color-white);
-}
-
-.page-title {
-  margin: 0;
-  font-size: 21px;
-  font-weight: 660;
-  letter-spacing: -0.01em;
-  color: var(--color-slate-900);
-}
-
-.page-sub {
-  margin: 5px 0 0;
-  font-size: 13px;
-  color: var(--color-slate-500);
-}
-
-.topbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
+/* 顶栏去掉后由内容区自己撑顶部留白，否则第一张卡片会贴到窗口上沿。 */
 .content {
-  padding: 24px 32px 56px;
+  padding: 28px 32px 56px;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -803,7 +773,8 @@ body {
 .btn-sm {
   height: 28px;
   padding: 0 9px;
-  border-radius: 7px;
+  /* 与普通按钮同半径。之前用 7px 显得比同页其他按钮更方，看起来像两套规范。 */
+  border-radius: 9px;
   font-size: 12px;
 }
 
@@ -912,8 +883,11 @@ body {
 .table .cell-actions {
   width: 1%;
   white-space: nowrap;
-  /* 操作列收窄后右侧会留白，把按钮贴到该列右边缘，视觉重心落在表格右端。 */
-  text-align: right;
+  /*
+   * 左对齐而不是右对齐：按钮数量不同的行（1 个 vs 2 个）右对齐会让首个按钮
+   * 位置随数量浮动，竖着看不齐；左对齐时首按钮固定在同一列，更好扫读。
+   */
+  text-align: left;
 }
 
 /* 模型 id 可能很长：限制首列宽度并截断，避免把其他列挤出去。 */
@@ -1229,6 +1203,78 @@ body {
 .toast.error .toast-icon { color: var(--color-rose-600); }
 .toast.info .toast-icon { color: var(--color-indigo-600); }
 
+/* ============ 折叠的操作记录 ============ */
+
+/*
+ * 「操作记录」默认收起。它比卡片头部窄一档：折叠栏贴着一行细边，
+ * 展开后表格直接接在下面，不额外套卡片，避免嵌套两层边框。
+ */
+.audit-block {
+  border: 1px solid var(--color-slate-200);
+  border-radius: 10px;
+  background-color: var(--color-white);
+  overflow: hidden;
+}
+
+.audit-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background-color: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--color-slate-800);
+}
+
+.audit-toggle:hover {
+  background-color: var(--color-slate-50);
+}
+
+.audit-toggle:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-indigo-500);
+}
+
+.audit-toggle .disclosure-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.audit-toggle .disclosure-name {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.audit-toggle .chevron {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--color-slate-400);
+  transition: transform 0.18s ease;
+}
+
+.audit-toggle[aria-expanded="true"] .chevron {
+  transform: rotate(180deg);
+}
+
+/* 展开区的表格贴边显示，去掉外层 table-wrap 的圆角，避免和折叠栏圆角打架。 */
+.audit-block .disclosure-body {
+  padding: 0;
+  border-top: 1px solid var(--color-slate-100);
+}
+
+.audit-block .disclosure-body[hidden] {
+  display: none;
+}
+
+.audit-block .table-wrap {
+  border: none;
+  border-radius: 0;
+}
+
 /* ============ 分页与筛选 ============ */
 
 /*
@@ -1336,7 +1382,6 @@ body {
     width: auto;
   }
 
-  .topbar,
   .content {
     padding-left: 18px;
     padding-right: 18px;
@@ -1346,12 +1391,6 @@ body {
 @media (max-width: 640px) {
   .form-grid {
     grid-template-columns: 1fr;
-  }
-
-  .topbar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
   }
 
   .modal-backdrop {

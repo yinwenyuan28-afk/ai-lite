@@ -599,40 +599,19 @@
 
   /* ---------------- 页签 ---------------- */
 
-  var PAGE_META = {
-    providers: {
-      title: "供应商与模型",
-      sub: "管理连接信息、模型能力与就绪开关。"
-    },
-    biz: {
-      title: "业务与提示词",
-      sub: "为业务绑定模型，编辑并发布提示词模板。"
-    },
-    calls: {
-      title: "调用日志",
-      sub: "查看调用摘要，按需记录模型输入输出。"
-    }
-  };
-
   var loaders = {
     providers: loadProviders,
     biz: loadBiz,
     calls: loadCalls
   };
 
-  var activeTab = "providers";
-
   function switchTab(tabId) {
-    activeTab = tabId;
     document.querySelectorAll(".nav-item").forEach(function (item) {
       item.setAttribute("aria-selected", item.getAttribute("data-tab") === tabId ? "true" : "false");
     });
     document.querySelectorAll(".panel").forEach(function (panel) {
       panel.hidden = panel.id !== tabId;
     });
-    var meta = PAGE_META[tabId];
-    document.getElementById("pageTitle").textContent = meta.title;
-    document.getElementById("pageSub").textContent = meta.sub;
     loaders[tabId]();
   }
 
@@ -640,10 +619,6 @@
     item.addEventListener("click", function () {
       switchTab(item.getAttribute("data-tab"));
     });
-  });
-
-  document.getElementById("refreshBtn").addEventListener("click", function () {
-    loaders[activeTab]();
   });
 
   /* ---------------- 通用状态行 ---------------- */
@@ -1381,6 +1356,9 @@
   /** 业务卡片的展开状态。保存绑定后会整页重载，靠它把卡片保持在展开。 */
   var expandedBiz = {};
 
+  /** 「操作记录」的展开状态，按业务 id 记，默认收起。 */
+  var expandedAudit = {};
+
   function bizCard(biz, ready) {
     var card = el("section", "card");
     var header = el("button", "disclosure");
@@ -1524,9 +1502,34 @@
     var auditTable = el("table", "table");
     var auditWrap = el("div", "table-wrap");
     auditWrap.appendChild(auditTable);
-    var auditHost = el("div", "section");
-    auditHost.appendChild(el("h3", "section-title", "审计"));
-    auditHost.appendChild(auditWrap);
+    /*
+     * 操作记录默认收起：它是排查时才看的辅助信息，常驻展开会把版本列表挤下去。
+     * 复用 disclosure 的样式，展开状态按业务 id 记住，刷新后不跳回收起。
+     */
+    var auditHost = el("div", "audit-block");
+    var auditToggle = el("button", "disclosure audit-toggle");
+    auditToggle.type = "button";
+    var auditLabel = el("span", "disclosure-main");
+    auditLabel.appendChild(el("span", "disclosure-name", "操作记录"));
+    var auditCount = el("span", "disclosure-meta");
+    auditToggle.appendChild(auditLabel);
+    auditToggle.appendChild(auditCount);
+    auditToggle.appendChild(icon("chevron", "chevron"));
+    auditHost.appendChild(auditToggle);
+
+    var auditBody = el("div", "disclosure-body");
+    auditBody.appendChild(auditWrap);
+    auditHost.appendChild(auditBody);
+
+    function applyAuditOpen(open) {
+      auditBody.hidden = !open;
+      auditToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      expandedAudit[biz.bizId] = open;
+    }
+    applyAuditOpen(!!expandedAudit[biz.bizId]);
+    auditToggle.addEventListener("click", function () {
+      applyAuditOpen(auditBody.hidden);
+    });
     section.appendChild(auditHost);
 
     function statusLabel(value) {
@@ -1640,6 +1643,8 @@
 
     function renderAudits(audits) {
       clear(auditTable);
+      clear(auditCount);
+      auditCount.appendChild(badge("共 " + ((audits && audits.length) || 0) + " 条"));
       var thead = el("thead");
       thead.appendChild(headerRow(["操作", "详情", "操作人", "时间"]));
       auditTable.appendChild(thead);
@@ -1647,7 +1652,7 @@
       auditTable.appendChild(tbody);
       if (!audits || !audits.length) {
         var row = el("tr");
-        var cell = el("td", null, "还没有审计记录。");
+        var cell = el("td", null, "还没有操作记录。");
         cell.colSpan = 4;
         cell.className = "muted cell-empty";
         row.appendChild(cell);
