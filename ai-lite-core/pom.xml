@@ -42,9 +42,10 @@
     <build>
         <plugins>
             <!--
-                本模块已无源码，所有类都迁到了 ai-lite-llm / ai-lite-agent。
-                japicmp 会把旧基线里的类全部判为「已删除」，因此必须跳过；
-                兼容性检查从 0.1.8 起在 ai-lite-llm / ai-lite-agent 上重建基线。
+                本模块没有源码，是纯聚合坐标，打出的 jar 只有 META-INF。
+                没有可比对的公开类：对基线跑 japicmp 会得到「所有类已删除」的
+                假失败。真实 API 全部在 ai-lite-llm 与 ai-lite-agent，那两个模块
+                的检查是开启的。
             -->
             <plugin>
                 <groupId>com.github.siom79.japicmp</groupId>

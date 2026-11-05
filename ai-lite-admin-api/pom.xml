@@ -78,17 +78,4 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-
-    <build>
-        <plugins>
-            <!-- 本模块尚未发布到 Central，没有 0.1.7 基线，契约检查跳过。 -->
-            <plugin>
-                <groupId>com.github.siom79.japicmp</groupId>
-                <artifactId>japicmp-maven-plugin</artifactId>
-                <configuration>
-                    <skip>true</skip>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
 </project>

@@ -120,6 +120,30 @@ Central 的强制要求只有 `.md5` 与 `.sha1`（官方 Requirements「Provide
 | 构建 success 但 Portal 上没有任何部署 | 可能给 reactor **最后一个模块**配了 `skipPublishing`——该插件以聚合模式工作，只在最后一个模块执行一次 publish（打包全部模块），跳过它等于跳过整批上传 |
 | 只有部分模块进 bundle（缺 parent/依赖） | 用 `-pl` 单独发布某模块时拿不到父 POM 继承的 url/licenses/scm/developers，必须整批 reactor 发布 |
 | `Javadocs must be provided but not found in entries` | 纯 Kotlin 模块（`sourceDirectory=src/main/kotlin`）产不出 javadoc jar。用 `prepare-package` 把源码复制到 `target/javadoc-src`，再由 `maven-jar-plugin` 打 `-javadoc` 分类制品；**必须显式 `<include>**/*.kt</include>`**，否则该插件按 class 规则过滤，产出空 jar |
+| 构建 success 但兼容性检查其实没跑 | 模块 pom 里写着 `<skip>true</skip>`。japicmp 跳过时不报错、不产出 diff，构建照样绿。release 工作流的 `Verify contract check coverage` 步骤会拦住：每个有源码且未豁免的模块都必须产出 `target/japicmp/api-compatibility-check.diff`，且首行基线版本与 `ai-lite.release.version` 一致 |
+
+### 4.2.1 兼容性检查的豁免名单
+
+`<skip>true</skip>` 会让检查静默失效，所以只在下列情况使用，且必须在 pom 注释里写清理由：
+
+| 模块 | 理由 |
+| --- | --- |
+| `ai-lite-core` | 无源码的聚合坐标，jar 里只有 `META-INF`，没有可比对的公开类 |
+| `ai-lite-demo` | 可运行示例，从未发布到 Central，取不到基线制品 |
+| `ai-lite-executor-jdk21` | 只在 JDK 21+ 构建，从未发布到 Central |
+| `ai-lite-http-okhttp-jdk21` | 同上 |
+
+新增豁免要同时改 `pom.xml` 与 `.github/scripts/verify-contract-coverage.sh` 的 `exempt` 列表；只改一边会让校验失败，这是有意的。
+
+**判断检查是否真的执行过**：看 `target/japicmp/api-compatibility-check.diff` 是否存在，首行是否为 `Comparing binary compatibility of ... against ...`。日志里出现 `Skipping execution because parameter 'skip' was set to true` 就是被跳过了。
+
+**验证这道检查有效**：拿一个公开方法做变异测试——把 `public` 改成包内可见，`mvn verify -Pcontract-check` 应报 `METHOD_LESS_ACCESSIBLE` 并失败。2026-11-05 用 `LlmResult.getStopReason()` 实测过。
+
+### 4.2.2 排障：检查开着却通过得太顺利
+
+2026-11-05 发布 0.1.15 时发现，`ai-lite-llm` 与 `ai-lite-agent` 的 `japicmp` 从 0.1.8 起一直配着 `<skip>true</skip>`，注释理由是「首次发版 0.1.8，没有 0.1.7 基线」。但基线早已前移到 0.1.14，这条豁免没人撤，等于这两个装着全部公开 API 的模块一直没被检查过。
+
+**教训**：豁免条件里含有会过期的前提（某个版本还不存在）时，要同时写清「什么时候该撤销」，最好落成可执行的校验，而不是靠人记得。现在由 `verify-contract-coverage.sh` 兜住这一类。
 
 ### 4.3 首次发布踩坑复盘（2026-10-26，0.1.0 → 0.1.7）
 

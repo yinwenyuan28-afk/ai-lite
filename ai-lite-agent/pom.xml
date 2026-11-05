@@ -37,17 +37,4 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-
-    <build>
-        <plugins>
-            <!-- 首次发版即 0.1.8，没有 0.1.7 基线；基线从 0.1.8 起建立。 -->
-            <plugin>
-                <groupId>com.github.siom79.japicmp</groupId>
-                <artifactId>japicmp-maven-plugin</artifactId>
-                <configuration>
-                    <skip>true</skip>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
 </project>

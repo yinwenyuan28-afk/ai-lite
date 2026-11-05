@@ -75,9 +75,10 @@
                 整批上传（构建仍返回 success，但 Portal 上不会有任何部署记录）。
                 排除 demo 自己的制品用父 pom release profile 的 excludeArtifacts。
 
-                上面那条只针对"发布"。API 兼容性门禁是另一件事：demo 从未发布过，
-                Central 上没有基线制品，所以要单独跳过 japicmp（父 pom 的
-                contract-check profile 会启用它）。它是可运行示例，不是对外契约。
+                上面那条只针对"发布"。API 兼容性检查是另一件事：demo 从未发布过，
+                Central 上取不到基线制品（0.1.14 返回 404），所以要单独跳过 japicmp
+                （父 pom 的 contract-check profile 会启用它）。它是可运行示例，
+                不是对外契约。
             -->
             <plugin>
                 <groupId>com.github.siom79.japicmp</groupId>

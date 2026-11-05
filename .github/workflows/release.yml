@@ -35,6 +35,12 @@ jobs:
       # 已在 japicmp 的 exclude 里，允许自由重构。
       - name: Build and verify (with API contract check)
         run: mvn -B verify -Pcontract-check
+      # 防止兼容性检查被静默跳过：模块 pom 里写 <skip>true</skip> 时，japicmp 会
+      # 直接跳过且构建照样成功。0.1.15 之前 ai-lite-llm / ai-lite-agent 就一直这样
+      # 空跑（理由是「没有 0.1.7 基线」，但基线早已前移）。脚本要求每个有源码、
+      # 未豁免的模块都产出比对结果，且基线版本正确。
+      - name: Verify contract check coverage
+        run: bash .github/scripts/verify-contract-coverage.sh
       - name: Collect artifacts
         run: |
           mkdir -p staging
