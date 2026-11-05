@@ -9,7 +9,7 @@
 | 层 | 使用（怎么用） | 原理（为什么） |
 | --- | --- | --- |
 | 快速入门 | [上层调用API使用指南](guide-上层调用API.md) §2 | 本文 §1–§4 |
-| HTTP 传输层 | [HTTP客户端使用指南](guide-HTTP客户端.md) | [HTTP传输层原理](desc-HTTP传输.md)、[HTTP传输并发选型评估](plan/HTTP传输并发选型评估.md)（调研留档）、本文 §5 |
+| HTTP 传输层 | [HTTP客户端使用指南](guide-HTTP客户端.md) | [HTTP传输层原理](desc-HTTP传输.md)、[HTTP 传输并发模型评估](plan/003-HTTP传输并发选型评估.md)（调研留档）、本文 §5 |
 | 网关层 | [单次模型调用入口](desc-单次调用.md)、[重试边界](desc-重试.md) | 本文 §4–§5、[用户级线程实现说明](desc-用户级线程.md) |
 | 编排层 | [Workflow异步执行器使用指南](guide-Workflow异步执行器.md) | [AgentLoop上下文说明](desc-AgentLoop上下文.md)、本文 §6 |
 | 会话层 | [上层调用API使用指南](guide-上层调用API.md) §5 | [上下文治理](desc-上下文治理.md)、本文 §8 |

@@ -414,4 +414,4 @@ LlmGateway → MicrometerLlmCallStore → JdbcLlmCallStore（或你自定义的�
 - [配置参考](ref-配置.md)：`ai-lite.store.jdbc.*`、`ai-lite.executor.*`、`ai-lite.metrics.llm-enabled`
 - [管理接口参考](ref-管理API.md)：调用记录的三个查询接口
 - [架构说明](desc-架构总览.md)：模块拓扑与分层
-- [夯实可观测性](plan/夯实可观测性-plan.md)：指标出口的设计记录
+- [可观测性（LLM 指标）](plan/010-可观测性LLM指标.md)：指标出口的设计记录

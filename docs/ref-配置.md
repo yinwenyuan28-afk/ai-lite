@@ -469,7 +469,7 @@ ai-lite:
 
 > Jetty 9.4 已 EOL，安全要求高的项目应评估替代实现；本实现默认关闭重定向、
 > 不使用 proxy auth/Basic auth，并强制 `Accept-Encoding: identity` 避免 SSE 被 gzip 缓冲。
-> 更多背景与风险见 [夯实 HTTP 传输并发](plan/夯实HTTP传输并发-plan.md)。
+> 更多背景与风险见 [HTTP 传输并发](plan/004-HTTP传输并发B-C双路径.md)。
 
 WebClient（真实响应式栈，适合已经使用 WebFlux 的项目）：
 
@@ -515,7 +515,7 @@ ai-lite:
 > 模块要求 Kotlin 1.9.25 / coroutines 1.7.3，Boot 2.1/2.7 的默认 Kotlin 版本
 > 都需要显式覆盖。CIO selector 使用 `Dispatchers.IO`，IO 池饱和会影响读事件。
 
-用户回调与 Agent 钩子的线程策略不属于本节，见 [夯实回调执行策略](plan/夯实回调执行策略-plan.md)。
+用户回调与 Agent 钩子的线程策略不属于本节，见 [回调执行策略](plan/005-回调执行策略.md)。
 
 ### 4.2 异步重试调度器
 

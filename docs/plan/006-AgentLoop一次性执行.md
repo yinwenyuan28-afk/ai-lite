@@ -1,6 +1,6 @@
-# 夯实 AgentLoop 一次性执行
+# AgentLoop 一次性执行
 
-**状态（2026-10-24）：同步 `run` 已实现并回归通过（Phase 0–5 全部完成，见第 11 节执行记录）；异步 `runAsync` 已拆分至独立计划《夯实AgentLoop异步执行器-plan.md》（含 AL-H04/H05、decideRound 共享与 AL-A1–A3）。** 本计划只覆盖一次性、无上下文持久化的 `AgentLoop`，不涉及 `AgentSessionLoop`、会话存储或 Workflow。
+**状态（2026-10-24）：同步 `run` 已实现并回归通过（Phase 0–5 全部完成，见第 11 节执行记录）；异步 `runAsync` 已拆分至独立计划《009-AgentLoop异步执行器.md》（含 AL-H04/H05、decideRound 共享与 AL-A1–A3）。** 本计划只覆盖一次性、无上下文持久化的 `AgentLoop`，不涉及 `AgentSessionLoop`、会话存储或 Workflow。
 
 一句话总纲：
 
@@ -305,7 +305,7 @@ error=null，异常路径 result=null、error=cause。
 **范围声明（2026-10-23 修订）：本轮只实现同步 `run`。** 异步 `runAsync` 的 AL-H04（递归）、
 AL-H05（非合作 transport 收敛）、`LlmCancelHandle` 取消监听全部延后；共享代码的改动必须保证
 `runAsync` 现有测试继续通过。
-**（2026-10-24 更新：同步 Phase 0–5 已全部完成；异步内容已拆分至《夯实AgentLoop异步执行器-plan.md》。）**
+**（2026-10-24 更新：同步 Phase 0–5 已全部完成；异步内容已拆分至《009-AgentLoop异步执行器.md》。）**
 
 ### Phase 0：网关前置（同步）✅ 已完成（2026-10-24）
 
@@ -361,7 +361,7 @@ AL-H05（非合作 transport 收敛）、`LlmCancelHandle` 取消监听全部延
 
 ### Phase 6：异步——已拆分至独立计划（2026-10-24）
 
-异步 `runAsync` 不再以存根形式挂在本计划。AL-H04（蹦床）、AL-H05（取消监听收敛）、`decideRound` 共享、AL-A1/A2/A3（并行工具 / 执行器 future 自适配 / 整轮超时），以及异步侧专项缺陷（终态优先级错位、CONTINUE 非工具轮不追加 assistant、异常路径不跑 afterRun、hooks 未拷贝）全部移入《夯实AgentLoop异步执行器-plan.md》，含分阶段实施与测试矩阵；调研依据见本文 10.4。
+异步 `runAsync` 不再以存根形式挂在本计划。AL-H04（蹦床）、AL-H05（取消监听收敛）、`decideRound` 共享、AL-A1/A2/A3（并行工具 / 执行器 future 自适配 / 整轮超时），以及异步侧专项缺陷（终态优先级错位、CONTINUE 非工具轮不追加 assistant、异常路径不跑 afterRun、hooks 未拷贝）全部移入《009-AgentLoop异步执行器.md》，含分阶段实施与测试矩阵；调研依据见本文 10.4。
 
 ---
 
@@ -405,7 +405,7 @@ AL-H05（非合作 transport 收敛）、`LlmCancelHandle` 取消监听全部延
 - 会话持久化、跨 run 记忆、checkpoint、resume、HITL、审批。
 - 图编排、DAG、多 Agent、handoff、guardrail agent。
 - 自动重试工具或模型请求；自动退避/熔断。
-- 并行工具执行（本轮不做；已由《夯实AgentLoop异步执行器-plan.md》的 AL-A1 落地，`ToolRunMode.PARALLEL` 对 `run` 与 `runAsync` 都生效）；流式 AgentLoop 入口。
+- 并行工具执行（本轮不做；已由《009-AgentLoop异步执行器.md》的 AL-A1 落地，`ToolRunMode.PARALLEL` 对 `run` 与 `runAsync` 都生效）；流式 AgentLoop 入口。
 - 每工具/总调用限额；`ToolErrorPolicy` SPI（本轮固定默认策略）。
 - 自动 token 预算、上下文截断、模型降级。
 - 结构化输出、输出重试预算。
@@ -510,5 +510,5 @@ AL-H05（非合作 transport 收敛）、`LlmCancelHandle` 取消监听全部延
 
 ### 后续
 
-- 异步：见独立计划《夯实AgentLoop异步执行器-plan.md》（蹦床化、`LlmCancelHandle` 取消监听、
+- 异步：见独立计划《009-AgentLoop异步执行器.md》（蹦床化、`LlmCancelHandle` 取消监听、
   非合作 transport 收敛、`decideRound` 共享、AL-A1–A3）。

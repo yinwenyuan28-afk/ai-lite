@@ -1,4 +1,4 @@
-# 夯实 HTTP 传输并发（B/C 双路径）
+# HTTP 传输并发（B/C 双路径）
 
 **状态（2026-10-22）：Phase 0–5 已实现，Phase 6 文档已补齐。** 配置选择、`okhttp-virtual`（JDK 21）、`ai-lite-http-jetty`、`ai-lite-http-webclient`、`ai-lite-http-ktor-cio` 及对应测试、并发基准均已落地。本计划只改 HTTP 传输层与 Starter 装配，不改 `LlmGateway`、`Workflow`、`AgentLoop`、`AgentSessionLoop` 的公开 API。
 
@@ -111,7 +111,7 @@ ai-lite:
 - 用户自定义 `HttpExecutor` / `AsyncHttpExecutor` Bean 仍然优先；`transport` 只打 INFO/WARN。
 - 启动日志打印实际 `HttpExecutor` 类型、`transport`、是否被自定义 Bean 覆盖。
 - `dispatcher.*` 只对 OkHttp 变体生效；`jetty.*` 只对 Jetty；`ktor.*` 只对 Ktor；`webclient` 的连接池由应用的 `ReactorResourceFactory` 决定。不适用的显式配置打 WARN。
-- 用户回调与 Agent 钩子的线程策略不在本计划：见 [夯实回调执行策略](夯实回调执行策略-plan.md)。本计划只保证“传输层内部解析 inline、完成线程不被内部逻辑长时间占用”。
+- 用户回调与 Agent 钩子的线程策略不在本计划：见 [回调执行策略](005-回调执行策略.md)。本计划只保证“传输层内部解析 inline、完成线程不被内部逻辑长时间占用”。
 - `jdk8` 要真正不引入 OkHttp，需要从 Starter 排除 `ai-lite-http-okhttp`，再引入 `ai-lite-http-jdk8`。
 
 ### 2.3 与执行器配置的关系
@@ -295,7 +295,7 @@ WebClient 的 Mono/Flux、Ktor 的 suspend 只存在于传输模块内部
 
 用户 `onDelta`、`StreamListener`、AgentLifecycle 钩子的线程归属、串行执行器、队列/取消策略、`afterRun` 终态收敛，已经拆到独立计划：
 
-- [夯实回调执行策略](夯实回调执行策略-plan.md)
+- [回调执行策略](005-回调执行策略.md)
 
 本计划只负责：
 
@@ -366,7 +366,7 @@ HTTP 计划与回调计划可以独立实施；不引入 NIO 传输时，OkHttp 
 
 - `docs/配置说明.md`：`ai-lite.http.*` 字段、默认值、适用 transport、兼容矩阵。
 - `docs/用户级线程实现说明.md`：各传输线程模型。
-- `docs/plan/HTTP传输并发选型评估.md`：更新为“已调研 + 选型结论”，删除残留的“优先 Reactor Netty”旧建议。
+- `docs/plan/003-HTTP传输并发选型评估.md`：更新为“已调研 + 选型结论”，删除残留的“优先 Reactor Netty”旧建议。
 - `README.md`：模块表、配置示例、exclusion、兼容矩阵。
 - 发布说明：Jetty 主路径、WebClient/Ktor 可选、Boot 2.1 legacy。
 
@@ -420,7 +420,7 @@ HTTP 计划与回调计划可以独立实施；不引入 NIO 传输时，OkHttp 
 - WebClient 同一字节码在 Boot 2.1/2.7 探针通过；显式依赖 reactor-netty；RN 0.8 重复 POST 风险文档化。
 - Ktor 在 Boot 2.1/2.7 下 SSE/取消/连接复用通过；`engine { requestTimeout = 0 }`；Kotlin/coroutines 版本覆盖文档化。
 - 公开 API 与核心模块签名不变；不引入模块时 jar 不变。
-- 回调执行策略不在本计划验收范围，见 [夯实回调执行策略](夯实回调执行策略-plan.md)。
+- 回调执行策略不在本计划验收范围，见 [回调执行策略](005-回调执行策略.md)。
 - 文档、配置表、兼容矩阵、基准结论齐全。
 
 ---
@@ -457,10 +457,10 @@ HTTP 计划与回调计划可以独立实施；不引入 NIO 传输时，OkHttp 
 
 ## 8. 与现有计划的关系
 
-- 本计划取代 `docs/plan/HTTP传输并发选型评估.md` 中的“待评估”部分；评估文档保留为背景与基准依据（已与本计划同目录留档）。
-- 不影响 `夯实oneWithRetry-plan.md`：重试入口不变，传输实现可替换。
+- 本计划取代 `docs/plan/003-HTTP传输并发选型评估.md` 中的“待评估”部分；评估文档保留为背景与基准依据（已与本计划同目录留档）。
+- 不影响 `002-oneWithRetry显式重试.md`：重试入口不变，传输实现可替换。
 - 不影响 Workflow / AgentLoop 计划：它们只依赖 `HttpExecutor`/`AsyncHttpExecutor`。
-- 用户回调与 Agent 钩子的线程策略见 [夯实回调执行策略](夯实回调执行策略-plan.md)；本计划不修改 `LlmGateway`/`AgentLoop` 的回调语义。
+- 用户回调与 Agent 钩子的线程策略见 [回调执行策略](005-回调执行策略.md)；本计划不修改 `LlmGateway`/`AgentLoop` 的回调语义。
 
 ---
 
@@ -532,5 +532,5 @@ C3 可选     ktor-cio（Kotlin 用户/高并发流式；覆盖 Kotlin/coroutine
 
 ### 10.3 仍待推进
 
-- 回调执行策略：独立计划 [夯实回调执行策略](夯实回调执行策略-plan.md)，尚未实施；当前用户回调和 Agent 钩子仍可能在传输/工具线程上执行。
+- 回调执行策略：独立计划 [回调执行策略](005-回调执行策略.md)，尚未实施；当前用户回调和 Agent 钩子仍可能在传输/工具线程上执行。
 - 基准是开发机上的相对比较，不是受控容量测试；生产容量需要按真实供应商、网络和 CPU 复测。

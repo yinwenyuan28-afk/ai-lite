@@ -249,7 +249,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 
 ## 文档
 
-**命名规范**：`docs/` 下文件名前缀即类型——`desc-` 原理说明（讲为什么这样运作）、`guide-` 使用指南（讲怎么用）、`ref-` 速查工具书，文件列表按前缀自动聚类；`docs/plan/`（计划与调研留档，命名 `夯实X-plan`）与 `docs/testing/`（测试设计）是内部记录。每篇开头都有定位框：属于哪一层、讲什么、不讲什么。生词查 [术语表](docs/ref-术语表.md)；想知道每层看哪些文档，《架构总览》开头有「按层找文档」导航表。
+**命名规范**：`docs/` 下文件名前缀即类型——`desc-` 原理说明（讲为什么这样运作）、`guide-` 使用指南（讲怎么用）、`ref-` 速查工具书，文件列表按前缀自动聚类；`docs/plan/`（计划与调研留档，命名 `NNN-说明.md`，序号按创建时间递增）与 `docs/testing/`（测试设计）是内部记录。每篇开头都有定位框：属于哪一层、讲什么、不讲什么。生词查 [术语表](docs/ref-术语表.md)；想知道每层看哪些文档，《架构总览》开头有「按层找文档」导航表。
 
 **全景门户**
 
@@ -282,17 +282,21 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 
 **内部留档（docs/plan/ 设计审查与调研 + docs/testing/ 测试设计）**
 
-- [夯实单次模型调用入口](docs/plan/夯实单次模型调用入口-plan.md)：入口 parity、L1/L2 取消、异常与重试边界。
-- [夯实 oneWithRetry](docs/plan/夯实oneWithRetry-plan.md)：显式重试、错误分类、退避与取消的实现记录。
-- [夯实 Workflow 顺序执行器](docs/plan/夯实Workflow顺序执行器-plan.md) / [夯实 Workflow 异步执行器](docs/plan/夯实Workflow异步执行器-plan.md)：顺序与异步执行器的原则、蹦床（循环代替递归）推进、取消与失败定位。
-- [夯实 AgentLoop 一次性执行](docs/plan/夯实AgentLoop一次性执行-plan.md) / [夯实 AgentLoop 异步执行器](docs/plan/夯实AgentLoop异步执行器-plan.md)：Agent 循环的终态、钩子、异步推进循环（泵）结构与异步加固。
-- [夯实 HTTP 传输并发](docs/plan/夯实HTTP传输并发-plan.md)：传输模块设计与验收；其立项前的[选型评估](docs/plan/HTTP传输并发选型评估.md)（Reactor Netty 为什么不可用、Jetty 9.4 怎么胜出）同目录留档。
-- [夯实回调执行策略](docs/plan/夯实回调执行策略-plan.md)：用户回调与 Agent 钩子的串行执行、队列/取消。
-- [夯实可观测性](docs/plan/夯实可观测性-plan.md)：Micrometer 指标出口。
-- [夯实限流熔断](docs/plan/夯实限流熔断-plan.md)：出口保护（并发限流、熔断、Retry-After、多 key 轮换）的设计与审查记录。
-- [夯实 Agent 运行时能力](docs/plan/夯实Agent运行时能力-plan.md)：typed entries、上下文预算与自动压缩、工具结果截断、同步流式、用量记账、会话列举的实现记录——含三处"静默丢压缩条目"缺陷的定位、T3-G 往返门禁，以及实施中另外发现的四个缺陷。
-- [夯实对外契约冻结](docs/plan/夯实对外契约冻结-plan.md)：API 稳定性审计、`.internal` 包边界、SPI 演化承诺与 japicmp 门禁。
-- [夯实模型级请求参数管理](docs/plan/夯实模型级请求参数管理-plan.md)：给 `AI_LITE_MODEL` 补五个 JSON 列，让目录模式下的请求体与 YAML 路径一致（思考档映射、采样参数、请求头、附加请求体）。
+- [单次模型调用入口契约](docs/plan/001-单次模型调用入口契约.md)：入口 parity、L1/L2 取消、异常与重试边界。
+- [oneWithRetry](docs/plan/002-oneWithRetry显式重试.md)：显式重试、错误分类、退避与取消的实现记录。
+- [Workflow 顺序执行器](docs/plan/007-Workflow顺序执行器.md) / [Workflow 异步执行器](docs/plan/008-Workflow异步执行器.md)：顺序与异步执行器的原则、蹦床（循环代替递归）推进、取消与失败定位。
+- [AgentLoop 一次性执行](docs/plan/006-AgentLoop一次性执行.md) / [AgentLoop 异步执行器](docs/plan/009-AgentLoop异步执行器.md)：Agent 循环的终态、钩子、异步推进循环（泵）结构与异步加固。
+- [HTTP 传输并发](docs/plan/004-HTTP传输并发B-C双路径.md)：传输模块设计与验收；其立项前的[选型评估](docs/plan/003-HTTP传输并发选型评估.md)（Reactor Netty 为什么不可用、Jetty 9.4 怎么胜出）同目录留档。
+- [回调执行策略](docs/plan/005-回调执行策略.md)：用户回调与 Agent 钩子的串行执行、队列/取消。
+- [可观测性（LLM 指标）](docs/plan/010-可观测性LLM指标.md)：Micrometer 指标出口。
+- [限流熔断（出口自我保护）](docs/plan/011-限流熔断出口保护.md)：出口保护（并发限流、熔断、Retry-After、多 key 轮换）的设计与审查记录。
+- [Agent 运行时能力](docs/plan/013-Agent运行时能力.md)：typed entries、上下文预算与自动压缩、工具结果截断、同步流式、用量记账、会话列举的实现记录——含三处"静默丢压缩条目"缺陷的定位、T3-G 往返门禁，以及实施中另外发现的四个缺陷。
+- [对外契约冻结（生产上线前）](docs/plan/012-对外契约冻结.md)：API 稳定性审计、`.internal` 包边界、SPI 演化承诺与 japicmp 门禁。
+- [模型级请求参数管理](docs/plan/016-模型级请求参数管理.md)：给 `AI_LITE_MODEL` 补五个 JSON 列，让目录模式下的请求体与 YAML 路径一致（思考档映射、采样参数、请求头、附加请求体）。
+- [管理页与业务热配置](docs/plan/014-管理页与业务热配置.md)：管理页的运行时配置写入与热生效。
+- [拆分最小依赖（方案 B'）](docs/plan/015-拆分最小依赖ai-lite-llm.md)：让单次调用加一个 HTTP 客户端不必拖入整套编排代码。
+- [基础能力代码审查](docs/plan/017-基础能力代码审查.md)：单次调用、运行时配置、异步与 NIO 的一次只读审查，含 20 条缺陷的定位与修复方向。
+- [修复异步调用挂起与取消失效](docs/plan/018-修复异步调用挂起与取消失效.md)：上篇审查里三条 P0 的修复实施记录。
 - [测试索引](docs/testing/测试索引.md)：按主题索引全部对抗性测试设计；另有[异步重试测试用例](docs/testing/异步重试测试用例.md)（oneWithRetryAsync 的 55 条验收清单）与[网关](docs/testing/网关异步对抗性测试设计.md)、[AgentLoop](docs/testing/AgentLoop异步对抗性测试设计.md)、[SessionLoop](docs/testing/SessionLoop异步对抗性测试设计.md)三篇对抗性测试设计。
 
 **基准**

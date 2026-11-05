@@ -428,7 +428,7 @@
 
 - 0.x 阶段 API 未冻结（升级 0.1.x 可能有破坏性调整；1.0 起按语义化版本承诺）。
 - 虚拟模型路由 / 供应商故障转移不在范围内。
-- Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/HTTP传输并发选型评估.md) 的替代方案讨论。
+- Jetty 9.4 已 EOL，安全敏感场景见 [HTTP 传输并发选型评估](docs/plan/003-HTTP传输并发选型评估.md) 的替代方案讨论。
 
 [0.1.12]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.12
 [0.1.11]: https://github.com/yinwenyuan28-afk/ai-lite/releases/tag/v0.1.11

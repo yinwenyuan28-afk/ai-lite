@@ -2,7 +2,7 @@
 
 > **本文在哪一层**：HTTP 传输层（原理说明）。
 > **讲什么**：三层职责怎么切、六种传输各自的线程模型、一次异步请求在传输层内部的生命周期、SSE 逐行解析、取消怎么贯穿到 socket、Retry-After 从哪来、并发上限的真正决定者。
-> **不讲什么**：传输怎么配怎么切、依赖怎么加 → [HTTP客户端使用指南](guide-HTTP客户端.md)；线程池全景与配置键 → [架构总览](desc-架构总览.md) §5.5；选型的完整论证过程 → [HTTP传输并发选型评估](plan/HTTP传输并发选型评估.md)（内部留档）。生词查 [术语表](ref-术语表.md)。
+> **不讲什么**：传输怎么配怎么切、依赖怎么加 → [HTTP客户端使用指南](guide-HTTP客户端.md)；线程池全景与配置键 → [架构总览](desc-架构总览.md) §5.5；选型的完整论证过程 → [HTTP 传输并发模型评估](plan/003-HTTP传输并发选型评估.md)（内部留档）。生词查 [术语表](ref-术语表.md)。
 
 ---
 
@@ -144,7 +144,7 @@ LlmCancelHandle.cancel() / future.cancel(true)
 - **Reactor Netty 1.0 需要 reactor-core 3.2+ / Netty 4.1.43+，与 Boot 2.1 的依赖线冲突**；降级到 RN 0.8 又有重复 POST 的已知缺陷。此路不通。
 - **Jetty 9.4 由 Boot BOM 管理，跨 Boot 2.1/2.7 都能用，纯 NIO 无 Netty/Reactor 传递依赖**，成为 C 路径主选；代价是 9.4 的连接超时全局共享、无内置 SSE 解析（行解码自己做）。
 - **WebClient / Ktor CIO 作为可选路径**：前者给已用 WebFlux 的应用，后者给 Kotlin 技术栈；都有额外依赖成本。
-- 基准数据（100/500/1000 并发的吞吐、延迟、线程数）见 [HTTP 传输并发基准](../benchmark/http-transport-benchmark/README.md)；完整论证过程（三个选项、判定规则）见内部留档 [HTTP传输并发选型评估](plan/HTTP传输并发选型评估.md)。
+- 基准数据（100/500/1000 并发的吞吐、延迟、线程数）见 [HTTP 传输并发基准](../benchmark/http-transport-benchmark/README.md)；完整论证过程（三个选项、判定规则）见内部留档 [HTTP 传输并发模型评估](plan/003-HTTP传输并发选型评估.md)。
 
 ---
 
@@ -155,4 +155,4 @@ LlmCancelHandle.cancel() / future.cancel(true)
 - [用户级线程实现](desc-用户级线程.md)——okhttp-virtual 与执行器模式的实测数据
 - [单次模型调用入口](desc-单次调用.md)——传输层之上的网关主线（含线程接力）
 - [配置参考](ref-配置.md)——`ai-lite.http.*` 全部配置键
-- [HTTP传输并发选型评估](plan/HTTP传输并发选型评估.md)——选型论证全文（内部留档）
+- [HTTP 传输并发模型评估](plan/003-HTTP传输并发选型评估.md)——选型论证全文（内部留档）

@@ -240,5 +240,5 @@ LlmResult callWithRetry(LlmGateway gateway, LlmCall call, int maxAttempts,
 - [HTTP 客户端使用指南](guide-HTTP客户端.md)
 - [架构说明](desc-架构总览.md)
 - [用户级并发与取消](desc-用户级线程.md)
-- [夯实单次模型调用入口](plan/夯实单次模型调用入口-plan.md)
-- [异步重试实现计划](plan/夯实oneWithRetry-plan.md)
+- [单次模型调用入口契约](plan/001-单次模型调用入口契约.md)
+- [异步重试实现计划](plan/002-oneWithRetry显式重试.md)

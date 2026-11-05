@@ -1,7 +1,7 @@
-# 夯实 Workflow 异步执行器
+# Workflow 异步执行器
 
 **状态（2026-10-23）：已实施并通过回归。** 同步版见
-[夯实 Workflow 顺序执行器](夯实Workflow顺序执行器-plan.md)；执行记录见第 13 节。
+[Workflow 顺序执行器](007-Workflow顺序执行器.md)；执行记录见第 13 节。
 
 一句话总纲：
 
@@ -638,9 +638,9 @@ ai-lite-retry-*（仅 oneStepWithRetryAsync）
 
 ## 12. 相关文档
 
-- [夯实 Workflow 顺序执行器](夯实Workflow顺序执行器-plan.md)
+- [Workflow 顺序执行器](007-Workflow顺序执行器.md)
 - [Workflow 异步执行器使用指南](../guide-Workflow异步执行器.md)
-- [夯实 oneWithRetry](夯实oneWithRetry-plan.md)
+- [oneWithRetry](002-oneWithRetry显式重试.md)
 - [单次模型调用入口](../desc-单次调用.md)
 - [API 使用指南](../guide-上层调用API.md)
 - [架构说明](../desc-架构总览.md)

@@ -1,4 +1,4 @@
-# 夯实 Workflow 顺序执行器
+# Workflow 顺序执行器
 
 **状态（2026-10-22）：已按 Phase 0–5 实现并回归通过。** 审查结论与补充决策见第 10 节，执行记录见第 11 节。同步版本已落地；异步 `runAsync` 留作后续，不在本轮范围。
 
@@ -383,5 +383,5 @@ Workflow 夯实完成后，同样的“预校验 / 取消分层 / 失败可定�
 
 ### 后续
 
-- 异步 `runAsync` 见 [夯实 Workflow 异步执行器](夯实Workflow异步执行器-plan.md)；实现时复用 `oneWithRetryAsync` 的调度/取消模型，但 Workflow 自身仍不内置重试。
+- 异步 `runAsync` 见 [Workflow 异步执行器](008-Workflow异步执行器.md)；实现时复用 `oneWithRetryAsync` 的调度/取消模型，但 Workflow 自身仍不内置重试。
 - 编排层重试仍是独立决策：需要先定义步骤级/整链级、工具副作用和请求数语义。

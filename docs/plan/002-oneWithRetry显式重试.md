@@ -1,4 +1,4 @@
-# 夯实 oneWithRetry
+# oneWithRetry
 
 **状态（2026-10-22）：同步版、Kotlin suspend 版、异步版 `oneWithRetryAsync` 均已实现；55 个异步测试用例已落成 JUnit/Kotlin 测试。** 本计划只改单次模型调用入口，**不涉及编排层**：不改 `Workflow`、`AgentLoop`、`AgentSessionLoop`，也不新增工具/步骤级重试。
 
@@ -37,7 +37,7 @@ oneWithRetry
 - `Workflow`、`AgentLoop`、`AgentSessionLoop` 的任何改动。
 - 工具重试、步骤重试、整轮编排重试。
 - Java 异步 `oneWithRetryAsync`：原计划不在首轮范围；第 9 节已单独设计并实施。
-- 用户回调与 Agent 钩子的线程归属：见独立的 [夯实回调执行策略](夯实回调执行策略-plan.md)。
+- 用户回调与 Agent 钩子的线程归属：见独立的 [回调执行策略](005-回调执行策略.md)。
 - 流式重试、协程流式重试。
 - `Retry-After` 响应头支持；本轮只用指数退避。
 - 超时策略、熔断、限流、总预算。
@@ -362,7 +362,7 @@ completion callback
 - 工具、多轮、`roundAsync`、`toolLoopAsync` 的重试。
 - `Workflow`、`AgentLoop`、`AgentSessionLoop` 的改动。
 - 修改 `oneAsync` 的默认行为（仍然只尝试一次）。
-- 用户回调与 Agent 钩子的线程策略；见 [夯实回调执行策略](夯实回调执行策略-plan.md)。
+- 用户回调与 Agent 钩子的线程策略；见 [回调执行策略](005-回调执行策略.md)。
 
 ---
 

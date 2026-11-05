@@ -506,4 +506,4 @@ public LlmCallStore llmCallStore(JdbcTemplate jdbc) {
 - [重试边界](desc-重试.md)
 - [配置参考](ref-配置.md)
 - [架构说明](desc-架构总览.md)
-- [HTTP 传输并发模型评估](plan/HTTP传输并发选型评估.md)
+- [HTTP 传输并发模型评估](plan/003-HTTP传输并发选型评估.md)

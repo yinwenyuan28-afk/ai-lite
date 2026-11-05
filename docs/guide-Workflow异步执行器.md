@@ -5,7 +5,7 @@
 > **不讲什么**：底下单次模型调用怎么跑 → [单次模型调用入口](desc-单次调用.md)；Agent 循环的上下文 → [AgentLoop上下文说明](desc-AgentLoop上下文.md)。生词查 [术语表](ref-术语表.md) §5。
 
 适用范围：`ai-lite` 0.1.8；JDK 8+；Spring Boot 2.1 ~ 2.7。
-设计背景见 [夯实 Workflow 异步执行器](plan/夯实Workflow异步执行器-plan.md)。
+设计背景见 [Workflow 异步执行器](plan/008-Workflow异步执行器.md)。
 
 一句话理解：
 
@@ -390,8 +390,8 @@ ai-lite-retry-*（仅 oneStepWithRetryAsync）
 
 ## 13. 相关文档
 
-- [夯实 Workflow 异步执行器](plan/夯实Workflow异步执行器-plan.md)
-- [夯实 Workflow 顺序执行器](plan/夯实Workflow顺序执行器-plan.md)
+- [Workflow 异步执行器](plan/008-Workflow异步执行器.md)
+- [Workflow 顺序执行器](plan/007-Workflow顺序执行器.md)
 - [API 使用指南](guide-上层调用API.md)
 - [单次模型调用入口](desc-单次调用.md)
 - [重试边界](desc-重试.md)

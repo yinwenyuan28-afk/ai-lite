@@ -1,6 +1,6 @@
-# 夯实 AgentLoop 异步执行器
+# AgentLoop 异步执行器
 
-**状态（2026-10-24）：已实现并全量回归通过（执行记录见第 10 节）。** 本计划覆盖 `AgentLoop.runAsync` 的异步专项加固与能力扩展，是《夯实AgentLoop一次性执行-plan.md》（下称"同步计划"，其 Phase 0–5 已完成）的后续独立计划。契约基线沿用同步计划 §5，本文不重复，只写异步侧的差异与新增。
+**状态（2026-10-24）：已实现并全量回归通过（执行记录见第 10 节）。** 本计划覆盖 `AgentLoop.runAsync` 的异步专项加固与能力扩展，是《006-AgentLoop一次性执行.md》（下称"同步计划"，其 Phase 0–5 已完成）的后续独立计划。契约基线沿用同步计划 §5，本文不重复，只写异步侧的差异与新增。
 
 一句话总纲：
 
@@ -242,7 +242,7 @@ runAsync(...)
 
 ## 8. 引用
 
-- 契约基线：《夯实AgentLoop一次性执行-plan.md》§5（终态矩阵、钩子策略、取消边界、工具语义）、§10.4（Spring AI / LangChain4j 二次核实结论）。
+- 契约基线：《006-AgentLoop一次性执行.md》§5（终态矩阵、钩子策略、取消边界、工具语义）、§10.4（Spring AI / LangChain4j 二次核实结论）。
 - 结构先例：`Workflow` 的 `AsyncWorkflowRun`（Workflow.java:512-629：wip drain + catch Throwable、pendingOutcome 单写者、每步独立取消句柄）。
 - 网关交互点：`invokeAsync`（LlmGateway.java:451-500）、预取消短路（:920-925）、transport 完成时收敛（:943-966）、`RetryRun.startAttempt/cancelFromOuter/recordTerminal`（:582/:777/:1059-1064）。
 - 调度器：`RetryScheduler`（`aiLiteRetryScheduler` bean 与 `shared()` 单例是两个实例——AL-A3 取 getter 注入）。

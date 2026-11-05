@@ -23,7 +23,7 @@ AI Lite 的用户级并发不是"自己造一个虚拟线程"，而是两条互�
 | Kotlin 协程桥接 | 8+ | 否 | 顺序写法 + suspend |
 | JDK 21 虚拟线程 | 21+ | 否（阻塞时卸载载体） | 顺序写法 + 阻塞 API |
 
-> `Java 异步 API` 这一行只承诺“不占调用方线程”。OkHttp `enqueue` 每个在途请求仍占一个 Dispatcher 线程；只有 NIO/event-loop 传输才能把大量等待压到少量线程。详见 [HTTP 传输并发模型评估](plan/HTTP传输并发选型评估.md)。
+> `Java 异步 API` 这一行只承诺“不占调用方线程”。OkHttp `enqueue` 每个在途请求仍占一个 Dispatcher 线程；只有 NIO/event-loop 传输才能把大量等待压到少量线程。详见 [HTTP 传输并发模型评估](plan/003-HTTP传输并发选型评估.md)。
 
 ---
 
