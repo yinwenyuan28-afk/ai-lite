@@ -1,0 +1,304 @@
+---
+status: implemented
+created: "2026-11-05 10:04"
+updated: "2026-11-05 10:52"
+type: 修复计划
+scope: F-01 / F-02 / F-03
+---
+
+# 修复异步调用挂起与取消失效（P0：F-01 / F-02 / F-03，3/3 done）
+
+> **定位**：属于网关层、传输层与编排层基础。只讲审查留档里三条 P0 怎么修、怎么验；不讲 P1/P2，不改公开 API，不引入新依赖。
+> 
+> **前置文档**：[基础能力代码审查](基础能力代码审查-plan.md) 的 F-01 / F-02 / F-03；正确模型参考 [夯实 Workflow 异步执行器](夯实Workflow异步执行器-plan.md) §2.4。
+> 
+> **本计划的写法**：每节先给一句话目标 + **改前 / 改后最小代码对比**（只保留能说明问题的那几行），再给落地清单与验收用例。看懂改什么，再看怎么改。
+> 
+> **纪律**：**先补对抗性用例、确认跑红，再动代码、确认跑绿。** 用例改前不红，说明对缺陷的理解有误，先停下来复核，不要直接改代码。
+
+---
+
+## 0. 目标与边界
+
+三条 P0 对应两条硬契约：
+
+| 契约                                          | 被谁打破      |
+| ------------------------------------------- | --------- |
+| 任何 `*Async` 入口的 future 一定会在有限时间内收敛          | F-01、F-02 |
+| 取消一定能中断在途 HTTP 请求，而不只是把 future 改成 `ABORTED` | F-03      |
+
+**边界（明确不做）**：不改 `LlmGateway` / `LlmTransport` / `HttpExecutor` 的公开签名；不改会话数据格式；不碰 P1 清单的大多数条目；不引入新依赖；保持 JDK 8 字节码与 Boot 2.1 兼容。
+
+**必须一并处理的最小耦合项**（不扩展范围，但不处理会让 P0 修复失效）：
+
+| 编号   | 为什么必须带上                                                                               |
+| ---- | ------------------------------------------------------------------------------------- |
+| F-15 | F-01 的兜底走 `failBarrier`，而它在 io 模式下是**入队**的，可能被 `completeBarrier.close()` 清掉；兜底必须能抢占终态 |
+| F-16 | `LlmCancelHandle` 的 abort 动作抛异常会跳过取消监听器，非合作传输下仍会挂                                     |
+| F-07 | 若按建议把 worker 改成「一任务一提交」，正好一并解决共享回调池饥饿                                                 |
+| F-08 | F-01 的 `transcript` 快照化同时消除取消线程与传输线程的 CME                                             |
+
+---
+
+## 1. 顺序与依赖
+
+```text
+批次 A  补三组对抗性用例（不改产品代码）→ 确认全红
+   ↓
+批次 B  修 F-02（回调通道自愈）        ← F-01 的兜底要经过这条通道
+   ↓
+批次 C  修 F-01（统一收敛兜底）
+   ↓
+批次 D  修 F-03（每请求 fresh 句柄）   ← 相对独立，可与 B/C 并行开发，但最后合流回归
+   ↓
+批次 E  全量回归 + 六种传输 parity + 文档/CHANGELOG 同步
+```
+
+**先修 F-02 的理由**：F-01 的 `catch (Throwable) → failBarrier(...)` 在 `callback.mode=io` 下要把任务送进 `SerialCallbackExecutor`。worker 若仍会停摆，兜底本身也送不出去，F-01 等于没修。
+
+---
+
+## 2. F-02：让回调通道自愈
+
+**一句话目标**：不管任务怎么退出，都要摘掉「正在作业」的牌子；一个任务抛错不能打断后面所有任务。
+
+**改前 / 改后（最小对比）**
+
+```java
+// 改前：SerialCallbackExecutor.java:90-102
+for (;;) {
+    synchronized (this) {
+        task = queue.pollFirst();
+        if (task == null) { running = false; return; }  // 只有队列空才摘牌子
+    }
+    task.run();                                         // 抛错 → 整个方法退出
+}
+
+// 改后（示意）
+try {
+    for (;;) {
+        synchronized (this) {
+            task = queue.pollFirst();
+            if (task == null) return;
+        }
+        try { task.run(); }
+        catch (Throwable t) { /* 记录，继续下一个任务 */ }
+    }
+} finally {
+    running = false;                                     // 不管怎么退出都摘牌子
+}
+```
+
+另有一处同源缺陷要一起修（`:55-63`）：`running = true` 写在 `pool.execute(...)` **之后**，内联 Executor 下会被覆写成 true。
+
+```java
+// 改后（示意）：先置位，失败回滚
+running = true;
+try { pool.execute(worker); }
+catch (RejectedExecutionException ex) { running = false; ...; return false; }
+```
+
+**落地清单**
+
+| #   | 文件                                   | 改动                                                                                          |
+| --- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
+| 1   | `SerialCallbackExecutor.java:90-102` | `drainWorker()` 整体包 `try/finally`，`task.run()` 包 `catch(Throwable)`；`running` 只在 finally 复位 |
+| 2   | `SerialCallbackExecutor.java:47-71`  | `submit()` 先置位再 execute、拒绝时回滚；返回 `false` 的语义保持                                              |
+| 3   | `SerialCallbackExecutor.java:77-80`  | `close()` 同步复位 `running`，清空队列                                                               |
+| 4   | `SerialCallbackExecutor.java`（结构）    | worker 改为「执行一个任务后重新提交自己」，不再长期占住共享池线程（顺带解决 F-07）                                             |
+| 5   | `LlmGateway.java:1182-1191`          | `onDelta` 包装由 `catch (RuntimeException)` 改 `catch (Throwable)`                              |
+| 6   | `AgentLoop.java:1322-1330`           | `callbackExec()` 提交的任务统一包装，不让业务异常直接冒泡到 `task.run()`                                         |
+
+**验收用例**（改前应为红）
+
+| 用例                                      | 输入                                                                 | 断言                                 |
+| --------------------------------------- | ------------------------------------------------------------------ | ---------------------------------- |
+| `callbackErrorDoesNotStallQueue`        | `CallbackPolicy.io(pool, 64)`，第 2 个 `onDelta` 抛 `RuntimeException` | 第 3 个 delta 与完成屏障仍执行，`result` 正常完成 |
+| `callbackErrorDoesNotStallQueueOnError` | 同上，但抛 `AssertionError`                                             | 同上，且异常被记录                          |
+| `inlineExecutorSubmitDoesNotStall`      | `CallbackPolicy.io(Runnable::run, cap)`                            | 连续 `submit` 都能执行，通道不卡死             |
+| `closeResetsRunningFlag`                | 中途 `close()`                                                       | `running` 复位，后续不出现"假成功"            |
+| `sharedPoolSaturationIsVisible`         | 3 个 run 并发、共享池 `max=2`                                             | 后续 run 得到 OVERLOAD 或正常推进，**不静默挂起** |
+
+**风险**：worker 改成「一任务一提交」会改变线程占用模型，需跑 `benchmark/qps-benchmark` 确认 io 模式吞吐无明显回归；`finally` 里复位 `running` 与新一轮 `submit` 的竞态要用同一把锁复核。
+
+---
+
+## 3. F-01：任何路径都恰好收敛一次
+
+**一句话目标**：把「回调体里手工调一次 `completeBarrier`」改成「框架保证任何异常都会被翻译成一次 `failBarrier`」。
+
+**改前 / 改后（最小对比）**
+
+```java
+// 改前：LlmGateway.java:1371
+future.whenComplete((completion, error) -> {
+    permit.verdict(error);              // 可抛
+    recordTerminal(...);                // 可抛（CME / 扩展点）
+    completeBarrier(result(...));       // 抛在它之前就永挂
+});
+
+// 改后（示意）
+safeWhenComplete(future, (completion, error) -> {
+    ...                                 // 原有逻辑一行不动
+    completeBarrier(result(...));
+});
+
+// 统一原语（建议放 internal/llm/FutureSupport.java）
+static <T> void safeWhenComplete(CompletableFuture<T> f,
+                                 BiConsumer<T, Throwable> body,
+                                 Consumer<Throwable> converge) {
+    f.whenComplete((v, e) -> {
+        try { body.accept(v, e); }
+        catch (Throwable t) { converge.accept(wrap(t)); }   // 抢占终态
+    });
+}
+```
+
+`converge` 必须**直接** `result.completeExceptionally(...)` 抢占终态，不能走 io 模式的入队 `failBarrier`（F-15）。
+
+**落地清单**
+
+| #   | 文件                                             | 改动                                                                                         |
+| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| 1   | 新增 `internal/llm/FutureSupport.java`           | `safeWhenComplete` / `wrap`；统一记录兜底异常，不吞 cause                                              |
+| 2   | `LlmGateway.java:1371`、`:1436`、`:826`、`:838`   | 全部 `whenComplete` 改走统一原语；`RetryRun.onAttemptComplete` 兜底 `convergeFailure(wrapFailure(t))` |
+| 3   | `AgentLoop.java:896`、`:922`、`AgentSessionLoop` | 同上（编排层已有 `catch(Throwable)` 的地方复核不重复包装）                                                    |
+| 4   | `LlmGateway.java:1272-1280`、`:1488-1492`       | `cancelledByListener` / `cancelledByFuture` 整段包 `try/catch(Throwable)`，保证收敛一定执行            |
+| 5   | `LlmGateway.java:1762-1785`                    | `record()` 前对 `transcript` 做不可变快照；`brief` / `CallBodyText` 的异常不冒泡                          |
+| 6   | `LlmGateway.java:1798-1832`                    | `Attempt` 改为单线程写 + 记录时复制（或快照化），消除取消线程的撕裂读                                                  |
+| 7   | `LlmGateway.java:1208-1243`                    | 兜底路径直接抢占终态；`completeBarrier` 的 `close()` 不再清掉 `failBarrier` 任务（F-15）                       |
+
+**验收用例**（改前应为红）
+
+| 用例                                       | 输入                                                                | 断言                                       |
+| ---------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------- |
+| `extensionPointFailureCompletesFuture`   | 自定义 `RetryPolicy.retryable` 抛 `IllegalStateException`             | `oneWithRetryAsync` future 异常完成，cause 保留 |
+| `callBodyPolicyFailureCompletesFuture`   | `CallBodyPolicy.level()` 抛异常 + `oneAsync`                         | future 异常完成，不是挂起                         |
+| `errorFromDeltaDoesNotHang`              | `onDelta` 抛 `AssertionError` + io 模式                              | future 异常完成（与 F-02 用例合并验证）               |
+| `cancelWhileAppendingTranscriptHasNoCme` | `CallBodyPolicy != NONE` + `toolLoopAsync` + 外部 `cancel.cancel()` | 返回 `ABORTED`，无 CME 冒泡，终态记录恰好一条           |
+| `terminalRecordedExactlyOnce`            | 上述所有失败路径                                                          | `LlmCallStore` 只收到一条终态记录                 |
+
+**风险**：包装异常不能丢原 cause、不能改变成功路径行为；`safeWhenComplete` 自身不能再抛（内部也要兜底）；终态 CAS 语义不能被绕过。
+
+---
+
+## 4. F-03：每次真实 HTTP 请求一个句柄
+
+**一句话目标**：回到 `LlmCancelHandle` 本来的用法 —— 一个句柄只服务一条连接；调用方手里的那把只做转发。
+
+**改前 / 改后（最小对比）**
+
+```java
+// 改前：LlmGateway.java:718 / :1343 —— 整次 toolLoop 所有轮共用一个
+final LlmCancelHandle effectiveCancel = cancel == null ? new LlmCancelHandle() : cancel;
+...
+new LlmRequest(..., effectiveCancel, ...);     // 每轮都传同一个
+
+// 改后（示意，照 Workflow.java:647 / :563 的正确模型）
+final LlmCancelHandle outer = cancel == null ? new LlmCancelHandle() : cancel;
+final AtomicReference<LlmCancelHandle> inFlight = new AtomicReference<>();
+
+outer.bindAbort(() -> {                        // 外层只转发，传输层不会碰它
+    LlmCancelHandle current = inFlight.get();
+    if (current != null) current.cancel();
+});
+outer.onCancel(run::cancelledByListener);      // 兜底收敛只注册一次
+
+// 每轮 startRound
+LlmCancelHandle roundCancel = new LlmCancelHandle();
+inFlight.set(roundCancel);
+roundCancel.onCancel(run::cancelledByListener); // 监听器随该轮句柄回收
+new LlmRequest(..., roundCancel, ...);
+...
+inFlight.compareAndSet(roundCancel, null);     // 本轮结束，清掉在途引用
+```
+
+关键在于：**传给传输层的是 `roundCancel`**，所以上一轮 `finally` 的 `unbind(null)` 只能擦自己的板子，碰不到下一轮。`Workflow.java:647` 和 `RetryRun:821` 已经是这个模型，本项目不是从零设计，是把既有正确模型下沉到网关。
+
+**落地清单**
+
+| #   | 文件                                           | 改动                                                                                             |
+| --- | -------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| 1   | `LlmGateway.java:718-732`（`invokeAsync`）     | 外层句柄改 forwarder；`onCancel` 注册一次，不再每轮累积                                                         |
+| 2   | `LlmGateway.java:1327-1345`（`startRound`）    | 每轮 new `roundCancel`，放进 `LlmRequest`；结束时清 `inFlight`                                           |
+| 3   | `LlmGateway.java:733-739`                    | `result.whenComplete` 的 `isCancelled()` 路径统一走 `outer.cancel()` → 转发当前轮                         |
+| 4   | `AgentLoop.java:890-891`、`AgentSessionLoop`  | 不再把同一个 `ctx.getCancel()` 贯穿所有轮，改为每轮 fresh + 外层转发                                               |
+| 5   | `LlmCoroutines.kt:61/67/74`                  | `oneWithRetry` 每次尝试 fresh 句柄                                                                   |
+| 6   | `LlmGateway.java:168-226`（同步 `oneWithRetry`） | 每次尝试 fresh；Javadoc `:175` 的「同一句柄贯穿所有尝试」改成与实际一致                                                 |
+| 7   | `LlmCancelHandle.java:96-101`                | `runAbort` 用 `try/finally` 保证 `runCancelListeners()` 一定执行；`guarded` 改 `catch(Throwable)`（F-16） |
+
+**待确认的设计决策**（动手前定下来，写进实施记录）
+
+1. 外部传入的句柄取消后，是否还要允许后续轮发起？按现有 L2 契约应为「不再推进」，实现上由每轮入口的 `outer.isCancelled()` 检查保证。
+2. `inFlight` 清空时机：在传输 future 完成之后、发起下一轮之前，避免「取消打到已结束轮」。
+3. 是否需要给 `onCancel` 加解绑 API？按「监听器随句柄回收」的前提，用 fresh 句柄后不需要；若 `AgentLoop` 仍有 run 级监听器，需单独评估。
+
+**验收用例**（改前应为红）
+
+| 用例                                     | 输入                                                                 | 断言                                       |
+| -------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------- |
+| `secondRoundCancelAbortsInFlightHttp`  | fake/OkHttp transport + `toolLoopAsync`，第 2 轮在途时 `cancel.cancel()` | 底层 `Call.cancel()` / abort 被调用，且不再发第 3 轮 |
+| `lateUnbindDoesNotClearNextRoundAbort` | 网关工具循环（此前只有 Workflow 步骤级有用例）                                       | 第 N 轮的 `unbind` 不清掉第 N+1 轮的 abort        |
+| `agentLoopMultiRoundCancel`            | `AgentLoop.runAsync` 多轮                                            | 同 `secondRoundCancelAbortsInFlightHttp`  |
+| `coroutineRetryCancelUsesFreshHandle`  | `LlmCoroutines.oneWithRetry` 第 2 次尝试在途                             | 在途请求被中断                                  |
+| `cancelListenersDoNotAccumulate`       | 10 轮工具循环                                                           | 句柄上的监听器数量不随轮次增长（包内可见性测试或计数钩子）            |
+| `sixTransportsCancelParity`            | 六种 `HttpExecutor` 各跑一次                                             | 取消都真的关 socket / dispose 订阅               |
+
+**风险**
+
+- 这是三条里唯一改变**对象所有权模型**的修复，影响面最大：`LlmCoroutines` 的取消链、自定义 `LlmTransport` 的 `bindAbort` 假设、以及 `future.cancel(true)` 路径都要回归。
+- 同步 `oneWithRetry` 的取消路径当前用 `return one(call, cancel)` 产生 `ABORTED`，改 fresh 句柄后要确认仍返回规范的 `ABORTED`（见审查留档 F-45）。
+- 文档同步：`docs/desc-单次调用.md`、`docs/desc-用户级线程.md` 的取消链、`docs/plan/夯实单次模型调用入口-plan.md` 的 L1–L4 描述。
+
+---
+
+## 5. 统一验收门禁
+
+| #   | 门禁                                           | 标准                                                                      |
+| --- | -------------------------------------------- | ----------------------------------------------------------------------- |
+| 1   | 批次 A 用例改前全红                                  | 每条 P0 至少一个用例能稳定复现；不红则先复核理解                                              |
+| 2   | `mvn -B verify`（JDK 8）                       | 975+ 用例全绿，新增用例全绿                                                        |
+| 3   | `mvn -B -Dspring-boot.version=2.7.18 verify` | Boot 2.7 兼容                                                             |
+| 4   | JDK 21 虚拟线程模块                                | 5 个虚拟线程用例 + 新增取消用例                                                      |
+| 5   | 六种传输 parity                                  | `secondRoundCancelAbortsInFlightHttp` 在六种实现上都通过                         |
+| 6   | 公开 API                                       | `japicmp` 门禁通过（参考 [夯实对外契约冻结](夯实对外契约冻结-plan.md)），无签名变化                   |
+| 7   | 性能                                           | `benchmark/qps-benchmark` 在 `callback.mode=io` 下无明显吞吐回归                 |
+| 8   | 文档                                           | 审查留档 F-01~F-03 状态改为 `fixed` 并写实施记录；取消链与 L1–L4 文档同步；`CHANGELOG.md` 记行为变化 |
+
+---
+
+## 6. 改动文件清单
+
+| 模块                            | 文件                                                                                                                                                                                                                        |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ai-lite-llm`                 | `llm/LlmGateway.java`、`llm/SerialCallbackExecutor.java`、`llm/LlmCancelHandle.java`、`internal/llm/FutureSupport.java`（新增）、`llm/CallbackPolicy.java`（仅复核）                                                                   |
+| `ai-lite-agent`               | `assembly/Workflow.java`（仅作为参考模型，预计不改）、`assembly/AgentLoop.java`、`session/AgentSessionLoop.java`                                                                                                                          |
+| `ai-lite-executor-coroutines` | `LlmCoroutines.kt`                                                                                                                                                                                                        |
+| 测试                            | `ai-lite-llm/src/test/.../llm/`：新增 `P0RegressionTest`（或按主题拆 3 个类）；`ai-lite-llm/src/test/.../http/`：六传输 cancel parity；`ai-lite-agent/src/test/.../assembly/`：AgentLoop 多轮取消；`ai-lite-executor-coroutines/src/test/`：协程重试取消 |
+| 文档                            | `docs/plan/基础能力代码审查-plan.md`、`docs/desc-单次调用.md`、`docs/desc-用户级线程.md`、`docs/plan/夯实单次模型调用入口-plan.md`、`CHANGELOG.md`                                                                                                       |
+
+---
+
+## 7. 完成定义（Definition of Done）
+
+- [x] 三组对抗性用例先跑红，截图/日志留档 —— 批次 A 共 10 条，改前 9 failures + 1 timeout
+- [x] F-02 / F-01 / F-03 依次修复，每组用例转绿
+- [x] F-15 / F-16 / F-07 / F-08 四个耦合项处理完毕并有对应用例
+- [ ] 第 5 节 8 项门禁全部通过 —— **5/8 通过**；JDK 21 虚拟线程（本机 JDK 8）、`benchmark/qps-benchmark`、六传输逐一重跑 `secondRoundCancelAbortsInFlightHttp` 三项受环境限制未执行，见审查留档 §11.6
+- [x] 审查留档 F-01~F-03 标记 `fixed`，注明修复提交与新增用例名 —— 实施记录见审查留档 §11
+- [x] 取消链与 L1–L4 文档、`CHANGELOG.md` 同步
+- [x] 未改动任何公开 API 签名，未引入新依赖
+
+> **实施结果**：详见 [基础能力代码审查](基础能力代码审查-plan.md) 第 11 节（含改动清单、与计划的偏离及理由、门禁实测结果）。
+
+---
+
+## 8. 讲法约定（本计划沿用）
+
+用户反馈有效的讲解方式，后续实施记录与评审也照此写：
+
+1. **先给可运行的最小示例与实际输出**，再讲原理；不要一上来堆术语。
+2. **抽象概念先给「你会写的代码」**（具体用法），再讲设计意图。
+3. **改前 / 改后最小代码对比**：只保留能说明问题的那几行，去掉无关上下文。
+4. **复杂时序用编号表 + 状态列**（如「槽里的内容」），比纯文字有效。
+5. **一句话类比**用于建立直觉（如「只有一个贴纸位的公告板」），但不替代准确定义。

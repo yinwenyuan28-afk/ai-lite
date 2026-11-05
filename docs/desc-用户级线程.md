@@ -456,7 +456,7 @@ okhttp3.Call.cancel() → 关闭连接
 
 代码位置：
 
-- `LlmGateway.invokeAsync` 在 `cancel == null` 时也会创建一个内部 `LlmCancelHandle`，所以 `future.cancel(...)` 永远能中断底层请求，不要求调用方显式传句柄。
+- `LlmGateway.invokeAsync` 在 `cancel == null` 时也会创建一个内部 `LlmCancelHandle`，所以 `future.cancel(...)` 永远能中断底层请求，不要求调用方显式传句柄。**传入的句柄只做外层转发器**：网关每次真实 HTTP 请求另建一份一次性句柄交给传输层，取消时转发到当前在途的那一轮；同步重试与 `LlmCoroutines.oneWithRetry` 同理，每次尝试一份新句柄并双向同步取消状态。这样上一轮响应到达后立刻发起下一轮时，`unbind` 不会擦掉新一轮绑定的 abort。
 - `AgentLoop.runAsync` 同样创建内部句柄，并把 `ctx.getCancel()` 传给 `gateway.roundAsync`，所以取消能打断进行中的模型请求，而不只是"下一轮不再发"。
 - `AgentSessionLoop.resumeAsync` 也会在内部创建句柄，并把返回 future 的 `cancel()` 接到句柄上；取消会穿过 `thenCompose` 传到内层循环，不再需要调用方额外传句柄。
 - `OkHttpExecutor.buildCall` 把 `Call.cancel()` 绑定到 `LlmCancelHandle`。

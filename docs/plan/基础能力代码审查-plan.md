@@ -1,0 +1,561 @@
+---
+status: P0-fixed
+created: "2026-11-05 09:33"
+updated: "2026-11-05 10:45"
+type: 代码审查留档
+fixed: "F-01 / F-02 / F-03（见第 11 节实施记录）"
+---
+
+# 基础能力代码审查（单次调用 / 运行时配置 / 异步与 NIO）（P0 3/3 已修复）
+
+> **定位**：属于网关层、传输层、运行时配置层与编排层基础。本文记录 2026-11-05 一次**只读**代码审查确认的缺陷、根因、复现条件与修复方向；不讲提示词版本流转、会话存储的业务逻辑、管理页 UI，也不做公开 API 重设计。
+> 
+> **状态**：F-01 / F-02 / F-03 三条 P0 已于 2026-11-05 修复并有对抗性用例覆盖，实施记录见第 11 节；其余 P1/P2 仍为待办。行号基于审查当日的工作区版本，改动后会漂移；引用时以类名 + 方法名为准。
+> 
+> **级别口径**：P0 = 违反「future 永不挂起 / 取消能中断在途 / 热更新即时生效」硬契约；P1 = 特定配置或并发路径下产生错误行为；P2 = 边界、健壮性、跨实现一致性风险。
+> 
+> **路径缩写**：`LlmGateway.java:1371` = `ai-lite-llm/src/main/java/io/github/yinwenyuan28/ailite/llm/LlmGateway.java:1371`；`JettyHttpExecutor.java`、`JdbcRuntimeCatalog.java` 等类名在仓库内唯一，省略全路径。
+
+---
+
+## 0. 结论先行
+
+整体工程质量高：975 个用例，蹦床推进、终态 CAS、重试竞态、取消句柄、限流熔断状态机都有对抗性覆盖；配置合并语义（NULL 回落、`{}` 清空、整份替换、头名大小写去重）实现扎实且有测试佐证。**问题不在功能缺失，而在三个抽象的边界没守住**，且恰好都落在现有测试的单线程、单节点、happy-path 覆盖之外：
+
+| #   | 契约级破口（白话版）                                           | 后果                                  | 状态 |
+| --- | ---------------------------------------------------- | ----------------------------------- | --- |
+| 1   | 回调里「通知调用方」的那行代码，前面还有会抛异常的语句；异常一抛，那行就被跳过，而且异常本身还被静默收走 | 扩展点抛异常时 `*Async` future **永久挂起**    | ✅ 已修复 |
+| 2   | 回调队列的工人线程一旦遇到任务抛错就直接退出，表示「有人在跑」的标志再也回不去，后续任务只排队不执行   | 一个 `Error` 停摆整条回调通道，future **永久挂起** | ✅ 已修复 |
+| 3   | 一次性的取消句柄被好几轮请求共用，上一轮结束时解绑，会把下一轮刚绑上的「中断连接」动作一起清掉      | 取消只收敛 future，**在途 HTTP 继续跑**        | ✅ 已修复 |
+
+另外两个系统性风险：**NIO 传输把 SSE 的 JSON 解析与用户回调压在 event loop 线程上**（打破了「非阻塞」的根本承诺，而基准测试绕过协议层，测不到），以及**六种 `HttpExecutor` 只统一了方法签名、没统一语义**（超时、取消、行上限、gzip、close 门禁、回调线程各有各的行为）。
+
+运行时配置线的问题集中在**缓存并发失效竞态、三表快照无事务、模型表缺逻辑唯一键、能力参数 NULL 静默降级**；管理端无鉴权与异常原文回显是独立的部署风险。
+
+---
+
+## 1. 审查范围与方法
+
+只读审查，逐行核对源码 → 对照设计文档 → 反查 `src/test` 覆盖，对关键结论做二次读码验证。
+
+| 线          | 主要文件                                                                                                                                                                                                                                                  |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 单次调用主干     | `LlmGateway.java`（全 1834 行，重点 `invoke` / `invokeAsync` / `AsyncRun` / `RetryRun` / `Attempt` / `record`）、`LlmCall.java`、`RetryPolicy.java`、`RetrySupport.java`、`RetryScheduler.java`、`LlmTransport.java`、三种协议适配器                                      |
+| 运行时配置      | `AiLiteConfig.java`、`ModelResolver.java`、`catalog/*.java`、`JdbcRuntimeCatalog.java`、`JdbcCallBodyPolicy.java`、`AiLiteCatalog*AutoConfiguration.java`、`AiLiteAutoConfiguration.java`、`AdminController.java`、`ai-lite-catalog.sql`、各 `spring.factories` |
+| 异步与编排基础    | `Workflow.java`、`AgentLoop.java`、`AgentSessionLoop.java`、`ExecutorProvider.java` 及四个实现、`LlmCoroutines.kt`、`CallbackPolicy.java`、`SerialCallbackExecutor.java`、`AsyncLlmCallLogger.java`、`ProviderGuard.java`、`LlmCancelHandle.java`                   |
+| HTTP / NIO | `http/` 六个 SPI 接口、`Utf8LineBuffer.java`、六种 `HttpExecutor` 实现、`TransportSupport.java`                                                                                                                                                                  |
+| 对照文档       | `docs/desc-单次调用.md`、`docs/desc-HTTP传输.md`、`docs/desc-配置和运行时配置.md`、`docs/desc-用户级线程.md`、`docs/plan/夯实*-plan.md`、`benchmark/*/README.md`                                                                                                                |
+
+---
+
+## 2. P0：三条硬契约破口
+
+### F-01 `whenComplete` 无 `Throwable` 兜底 → future 永久挂起（P0）
+
+**一句话**
+唯一负责「把结果交给调用方」的那行代码，被它前面一句抛出的异常跳过了；异常本身又被 `whenComplete` 悄悄收走，于是既没有结果、也没有报错、也没有日志。
+
+**现象**
+调用 `oneAsync` / `roundAsync` / `toolLoopAsync` / `oneWithRetryAsync` 后，只要某个扩展点抛异常，返回的 future 就一直停在「未完成」：`get()` 一直等，`thenAccept` 永远不触发，日志里什么都没有。
+
+#### 先用 10 行代码看懂它
+
+不依赖本项目，复制即可运行：
+
+```java
+CompletableFuture<String> http   = new CompletableFuture<>();  // 模拟 HTTP 请求
+CompletableFuture<String> result = new CompletableFuture<>();  // 模拟返回给调用方的那个
+
+http.whenComplete((resp, err) -> {
+    System.out.println("步骤 1：写调用记录");
+    int x = 1 / 0;                 // 模拟写记录时出错
+    result.complete(resp);          // 步骤 2：唯一把结果交给调用方的地方
+});
+
+http.complete("模型回复");
+System.out.println("http 完成了吗? " + http.isDone());     // true
+System.out.println("result 完成了吗? " + result.isDone());  // false
+```
+
+输出：
+
+```text
+步骤 1：写调用记录
+http 完成了吗? true
+result 完成了吗? false
+```
+
+**注意：输出里没有异常堆栈，程序也不报错，就这么安静地结束了。** 这就是「永久挂起」——`result` 停在未完成状态。
+
+#### 三个朴素问题
+
+| 问题          | 答案                                                                                                                                                                         |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 谁在等？        | 调 `oneAsync` 的业务代码，手里拿着 `result`（`LlmGateway.java:1142`）                                                                                                                   |
+| 谁负责通知他？     | 只有回调体里的 `completeBarrier(...)`（`:1413`），全网关没有第二处会自动完成它                                                                                                                     |
+| 为什么那句没执行到？  | Java 的规则很简单：方法里抛了异常，后面的语句就不执行。回调体是「先写记录、再通知结果」的顺序                                                                                                                          |
+| 为什么连报错都看不见？ | `whenComplete(...)` 登记的回调如果抛异常，异常不会冒出来，而是被装进 `whenComplete` 的**返回值**里。项目里写的是 `future.whenComplete(...);` —— 返回值没赋给任何变量，等于把异常扔进一个没人打开的抽屉；而 `http` 这个 future 早就「成功」了，不会因为它失败 |
+
+#### 示例里的东西对应项目哪一行
+
+| 最小示例     | 项目代码                                                                        |
+| -------- | --------------------------------------------------------------------------- |
+| `http`   | `:1349` 协议适配器 `completeAsync(request)` 返回的 future                           |
+| `result` | `:1142` `AsyncRun` 里返回给调用方的 `CompletableFuture<LlmResult>`                  |
+| 整个回调体    | `:1371` 的 `future.whenComplete((completion, error) -> {...})`               |
+| 「写调用记录」  | `:1411` `recordTerminal(...)` → `record():1762` → `CallBodyText.input(...)` |
+| 「通知调用方」  | `:1413` `completeBarrier(result(...))`                                      |
+
+项目里的实际顺序（简化后）：
+
+```java
+future.whenComplete((completion, error) -> {
+    ...                                  // 归还许可、累加用量
+    recordTerminal(attempt, round, ...); // :1411  写调用记录，可能抛异常
+    completeBarrier(result(...));        // :1413  抛了就永远走不到这里
+});
+```
+
+`LlmGateway.java:1371`（`startRound`）、`:1436`（`toolFuture`）、`:826` + `:838`（`RetryRun.onAttemptComplete`）、`AgentLoop.java:896` / `:922` 都是同一种写法：丢弃返回值、回调体无保护。
+
+#### 为什么会真的抛
+
+可抛的点都在 `record()` 里 `logger.record(row)` **之前**，或直接在回调体内：自定义 `RetryPolicy.retryable` 谓词（`onAttemptComplete:868`）、`CallBodyPolicy.level()`（`:1779`）、`CallBodyText.input/output`（`:1781`，并发遍历 `transcript` 的 CME）、`ProviderGuard.Permit.verdict`（`:1375`）、`completion.getUsage()` / `getToolCalls()` 为 null 时的 NPE（`:1395` / `:1409`）。
+
+> **复核更正（2026-11-05）**：`LlmCallStore.insert` **不是**触发点。`AsyncLlmCallLogger.java:45-63` 在任务体里用 `catch (Throwable)` 吞掉存储异常、用 `catch (RuntimeException)` 吞掉线程池拒绝，存储故障不会冒泡到 `whenComplete`。`toolFuture.whenComplete`（`:1436`）内层虽有 `try/catch(RuntimeException)`（`:1440-1465`），外层 `startRound` 的 `whenComplete`（`:1371`）仍无保护。
+
+> **为什么编排层不挂**：`Workflow.advance():587` 与 `AgentLoop.drainLoop():771` 的泵体都包了 `catch (Throwable)`，异常会被 `fail(...)` 收敛成终态。所以同一个坏扩展点，在 `Workflow.runAsync` 里会报错，在 `gateway.oneAsync` 里静默挂起 —— 这是排查时最迷惑人的地方。
+
+#### 触发 / 复现
+
+① `RetryPolicy.builder().retryable(p -> { throw new IllegalStateException(); })` + `oneWithRetryAsync`；② 自定义 `CallBodyPolicy.level()` 抛异常 + 任意 `oneAsync`；③ `CallBodyPolicy` 非 NONE + `toolLoopAsync` 正在追加 `tool_result` + 外部 `cancel.cancel()`（`record():1781` 遍历 `attempt.transcript` 与传输线程 `transcript.add()` 并发 → `ConcurrentModificationException`）。
+
+> 补充：`Attempt`（`LlmGateway.java:1798-1807`）全字段非 volatile，`input/output/total/latencyMs/completion/transcript` 由传输线程写、取消线程读，存在撕裂读与可见性问题，见 F-08。
+
+#### 解决方式
+
+核心不是加日志，而是**保证出事时也给 `result` 一个交代**：
+
+```java
+future.whenComplete((completion, error) -> {
+    try {
+        // 原有全部逻辑，包括 completeBarrier(...)
+    } catch (Throwable t) {
+        result.completeExceptionally(t);   // 或 failBarrier(wrap(t))：出事也要让 result 结束
+    }
+});
+```
+
+上面 10 行示例加上这层兜底后再跑，`result 完成了吗? true`，调用方拿到的是异常而不是无限等待。落到项目里：
+
+1. 抽 `safeWhenComplete(future, body)`，覆盖网关、`:1436`、`:826`、`AgentLoop.java:896` / `:922`、`AgentSessionLoop` 的全部 `whenComplete` 注册点；兜底里调 `failBarrier(...)`。
+2. `onAttemptComplete` 同样兜底 `convergeFailure(wrapFailure(t))`。
+3. `cancelledByListener` / `cancelledByFuture` 整段包 `try/catch(Throwable)`，保证收敛一定执行。
+4. `record()` 前对 `transcript` 做不可变快照；`Attempt` 改为单线程写 + 记录时复制。
+5. 注意 `failBarrier` 在 io 模式下是**入队**的（F-15 提到可能被 `completeBarrier.close()` 清掉），兜底路径最好直接抢占终态，别再排队。
+
+**结果（验收）**
+任一扩展点抛 `RuntimeException` 或 `Error`，所有 `*Async` 入口在有限时间内异常完成，并保留原始异常作为 cause；终态记录恰好一条。
+
+---
+
+### F-02 `SerialCallbackExecutor` worker 无 `finally` → 回调通道永久停摆（P0）
+
+**一句话**
+回调队列只有一个工人；工人执行某个任务时被异常打跑，门口「正在作业中」的牌子却没摘下来，调度员就再也不派新工人了 —— 后面所有任务（包括「通知调用方」那个）永远堆在队列里。
+
+**现象**
+`callback.mode=io` 下，用户 `onDelta` 抛 `AssertionError` / `LinkageError` 之类的 `Error` 后，这次调用后续所有增量与「完成屏障」都不再执行，`result` 永挂；`submit()` 还一直返回 `true`，看起来一切正常。
+
+#### 先用最小示例看懂它
+
+把 `SerialCallbackExecutor` 剥到最简（不依赖本项目，可直接跑）：
+
+```java
+Deque<Runnable> queue = new ArrayDeque<>();
+boolean running = true;
+
+queue.add(() -> System.out.println("delta 1"));
+queue.add(() -> { throw new RuntimeException("onDelta 炸了"); });
+queue.add(() -> System.out.println("完成：result.complete()"));  // 通知调用方的任务
+
+while (true) {                                   // drainWorker()
+    Runnable t = queue.poll();
+    if (t == null) { running = false; return; }  // 只有「队列空」才摘牌子
+    t.run();                                      // 抛异常 → 整个循环直接没了
+}
+```
+
+输出：
+
+```text
+delta 1
+```
+
+第三条永远不打印。**关键就是 `running = false` 只写在「队列空了」那一行**：任务抛异常让整个方法提前退出，绕过了它，牌子永远是 `true`。之后 `submit()` 看到 `running == true`，只往队列里塞、不再启动工人。
+
+#### 三个朴素问题
+
+| 问题                | 答案                                                                                            |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| 队列里排的是什么？         | 用户 `onDelta` 回调任务，以及排在他们后面的「完成屏障」任务（`completeBarrier`）                                        |
+| 为什么没人再干活？         | `submit()` 只在 `!running` 时派工人；`running` 卡在 true，后续只入队                                         |
+| 为什么调用方拿不到结果？      | `result.complete(...)` 写在完成屏障任务里，它排在队列中永远不出队                                                  |
+| 为什么 `Error` 特别危险？ | `LlmGateway.java:1185-1191` 只 `catch (RuntimeException)`，`AssertionError` 之类直接漏到 `task.run()` |
+
+#### 示例对应项目哪一行
+
+| 最小示例                          | 项目代码                                |
+| ----------------------------- | ----------------------------------- |
+| `queue` / `running`           | `SerialCallbackExecutor.java:28-30` |
+| `submit()` 里的 `if (!running)` | `:55`                               |
+| `drainWorker()` 的循环           | `:90-102`                           |
+| `t.run()` 裸调用、无 finally       | `:100`                              |
+| 「完成屏障」任务                      | `LlmGateway.java:1213-1219`         |
+
+#### 为什么会真的抛
+
+类注释把正确性寄托于「实现应自行捕获业务异常」，但调用方并没有全包：`AgentLoop.java:1322-1330` 的 `callbackExec()` 把未包装的 `command` 直接交给 `barrier.submit`；`LlmGateway.java:1182-1191` 的 delta 任务只挡 `RuntimeException`；`LlmGateway.java:1213-1219` 的完成屏障任务里 `result.complete()` 会当场触发 `whenComplete` 链（写调用记录、熔断采样），其中任何异常同样冒泡到 `task.run()`。
+
+**另一处同源缺陷**：`:55-63` 的 `running = true` 写在 `pool.execute(...)` **之后**。若传入内联 Executor（`Runnable::run`），worker 同步跑完并把 `running` 复位为 false，随后 `:63` 又覆写成 true，通道同样永久停摆。`close():77-80` 只置 `closed` 并清队列，也不复位 `running`。
+
+#### 触发 / 复现
+
+① `CallbackPolicy.io(pool, 64)` + `oneByStreamAsync` + `onDelta` 抛 `AssertionError`；② `CallbackPolicy.io(Runnable::run, cap)`（内联池）构造后任意 `submit`。`SerialCallbackExecutorTest` 四个用例的 task 均不抛异常，`LlmGateway.setCallbackPolicy` 全仓无测试调用 —— 该路径零覆盖。
+
+#### 解决方式
+
+```java
+try {
+    while (true) {
+        Runnable t = queue.poll();
+        if (t == null) return;
+        try { t.run(); } catch (Throwable e) { /* 记录，继续下一个 */ }
+    }
+} finally {
+    running = false;   // 不管怎么退出都摘牌子
+}
+```
+
+1. `task.run()` 包 `try/catch(Throwable)`，单个任务出错不打断循环；整段套 `finally` 统一复位 `running`。
+2. `submit` 改成先置位再 `execute`、失败回滚（修内联 Executor 那处）。
+3. `onDelta` 包装改捕获 `Throwable`；`close()` 同步复位 `running` 并清空队列。
+4. worker 改为「执行一个任务后重新提交自己」，还能顺带解决 F-07 的共享池饥饿。
+
+**结果（验收）**
+新增「回调抛 RuntimeException / Error 后后续 delta 与终态仍到达」用例；内联 Executor 下 `submit` 不卡死。
+
+---
+
+### F-03 one-shot 取消句柄被跨轮复用 → 取消不中断在途 HTTP（P0）
+
+**一句话**
+取消句柄像一块**只有一个贴纸位**的公告板：第 1 轮贴「取消时关我的连接」，第 2 轮贴上自己的，但第 1 轮收尾时执行「把板子擦干净」，把第 2 轮刚贴的也擦掉了。用户取消时板子是空的 —— future 显示已取消，HTTP 却还在跑。
+
+**现象**
+`toolLoopAsync` / `AgentLoop.runAsync` / `LlmCoroutines.oneWithRetry` 在第 2 轮（或第 2 次尝试）在途时取消，只把 future 收敛成 `ABORTED`，底层请求继续跑到读超时或响应结束（继续计费、占 OkHttp Dispatcher 线程）。同时 `onCancel` 监听器随轮次在 `CopyOnWriteArrayList` 中累积，持有已结束 `AsyncRun` 的引用。
+
+#### 先用最小示例看懂它
+
+```java
+class CancelHandle {
+    Runnable abort;                              // 只有一个贴纸位
+    void bindAbort(Runnable r) { abort = r; }
+    void cancel() { if (abort != null) abort.run(); }
+}
+
+CancelHandle h = new CancelHandle();
+h.bindAbort(() -> System.out.println("关闭第 1 轮连接"));   // ① 第 1 轮绑定
+
+// 第 1 轮响应到达：complete() 当场触发网关回调，内联发起第 2 轮
+h.bindAbort(() -> System.out.println("关闭第 2 轮连接"));   // ③ 第 2 轮绑定
+
+// 回到第 1 轮的 finally
+h.bindAbort(null);                                        // ④ unbind：槽空了
+
+h.cancel();                                               // ⑤ 什么都不打印
+```
+
+**为什么 ④ 排在 ③ 后面**：`OkHttpExecutor.java:165` 先 `future.complete(...)`，而 `finally` 里的 `unbind`（`:175`）在这之后；`future.complete` 会**当场**跑完 `whenComplete`，网关就在同一条线程上立刻发起第 2 轮。所以真实顺序是 ① → ③ → ④，而不是直觉上的 ① → ④ → ②。
+
+#### 三个朴素问题
+
+| 问题          | 答案                                                                                                                                               |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 句柄为什么只能贴一张？ | `LlmCancelHandle.java:27` 只有一个 `volatile Runnable abort` 字段，`bindAbort` 就是直接覆盖                                                                   |
+| 为什么会共用一块板？  | `LlmGateway.java:718` 整个 `AsyncRun`（一次 toolLoop 的所有轮）只建一个 `effectiveCancel`；`:1343-1345` 每轮 `LlmRequest` 都复用它                                    |
+| 契约自己怎么说的？   | `LlmCancelHandle.java:17-19` 的 Javadoc 明写「一个句柄只服务一次调用 …… 需要重试或发起新请求时请创建新的句柄」；同步 `oneWithRetry` 的 Javadoc（`:175`）却写「同一个取消句柄贯穿所有尝试」，自相矛盾           |
+| 谁已经做对了？     | `Workflow.java:647`（每步 fresh 句柄）和 `RetryRun:821`（每次尝试 fresh 句柄）；`docs/plan/夯实Workflow异步执行器-plan.md §2.4/§9` 已记录并修过同类缺陷，但修复没同步到网关、AgentLoop 与协程重试 |
+
+#### 完整时序
+
+| 顺序  | 发生了什么                                           | 槽里的内容          |
+| --- | ----------------------------------------------- | -------------- |
+| ①   | 第 1 轮 `bindAbort`                               | 关第 1 轮连接       |
+| ②   | `complete()` 当场触发下游，内联发起第 2 轮                   | 关第 1 轮连接       |
+| ③   | 第 2 轮 `bindAbort`                               | 关第 2 轮连接       |
+| ④   | **回到第 1 轮的 `finally`：`unbind(null)`**           | **空**          |
+| ⑤   | 用户 `cancel()` → `runAbort()` 拿到 `abort == null` | 没动作可关，HTTP 继续跑 |
+
+另外，`AgentLoop.java:890-891` 的 `ctx.getCancel()` 贯穿所有轮次、`LlmCoroutines.kt:61/67/74` 每次尝试复用同一 `cancel`；`:727-732` 每轮把 `onCancel` 监听器注册到同一句柄且无解绑 API，监听器会一直累积。
+
+#### 触发 / 复现
+
+OkHttp 适配器 + `AgentLoop.runAsync`（轮次 N 的 `onResponse` 内联推进泵并 bind 轮次 N+1，随后轮次 N 的 `finally unbind` 清空）+ 轮次 N+1 在途时 `cancel.cancel()`。`WorkflowAsyncTest.lateUnbindOfPreviousStepDoesNotClearNextStepAbort` 只覆盖 Workflow 步骤级，网关工具循环 / AgentLoop / 协程重试无回归用例。
+
+#### 解决方式
+
+**每次真实 HTTP 请求用一个新句柄**，外层句柄只做 `onCancel` 转发（照 `AsyncWorkflowRun` 实现）。这样第 1 轮的 `unbind` 清的是自己的板子，碰不到第 2 轮的。
+
+1. 把「每次请求 fresh 句柄」下沉为网关内部不变量，而不是靠各编排层自觉。
+2. 或给 `bindAbort` 加版本号/CAS，让迟到的 `unbind` 不能清掉新一轮绑定。
+3. 给 `onCancel` 提供解绑或按轮清理，避免监听器累积。
+4. 同步 `oneWithRetry` 的 Javadoc 与实现一并改成每次尝试 fresh。
+
+**结果（验收）**
+新增「toolLoop 第 2 轮在途取消，底层 `Call.cancel()` 被调用」和「AgentLoop 多轮取消不残留监听器」两条对抗性用例，六种传输逐一验证。
+
+---
+
+## 3. P1：确认缺陷清单
+
+### 3.1 异步与取消
+
+| 编号   | 位置                                                                         | 现象                                                                                                                                                 | 根因                                                                                                                                  | 修复方向                                                                                     |
+| ---- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| F-04 | `LlmGateway.java:1258-1266`、`:1488-1492`                                   | io 模式下队列溢出或 `future.cancel(true)` 后，已排队的 delta 仍继续投递，`onDelta` 在终态之后触发                                                                             | `failOverload` / `cancelledByFuture` 不调 `barrier.close()`；`cancel.cancel()` 触发的监听器因 `result.isDone()` 直接返回（`:1273`），无任何路径关屏障        | 收敛前先 `closeBarrier()`；`onDelta` 包装在 `closed` 后直接丢弃                                       |
+| F-05 | `ProviderGuard.java:390-402`、`:405-418`                                    | 开启 guard 且 `io()` 饱和/停机时，排队 waiter 被移出队列但永不回调，`AsyncRun.next()` 等许可 → future 永挂                                                                    | `dispatchGrant` 的 `catch (RejectedExecutionException)` 只 `permit.release()`；`dispatchReject` 直接吞掉                                   | 拒绝时在调用线程（或兜底 executor）同步 `onRejected(reason)`，让网关收敛 OVERLOAD                             |
+| F-06 | `AgentLoop.java:1487`、`:1501-1508`                                         | `PARALLEL` + `callback.mode=io` 时 `afterTool` 钩子与消息写回落在工具载体线程，回调策略契约失效                                                                             | 串行链 `:1365/:1422` 用了 `thenComposeAsync(..., cbExec)`，并行链的 `thenApply` / `thenRun` 漏传                                                | 两处补 `cbExec`；补 PARALLEL + io 的线程名断言                                                      |
+| F-07 | `SerialCallbackExecutor.java:47-71`、`AiLiteAutoConfiguration.java:317-319` | 并发 N 个长生命周期 run 时 N 个 worker 长期占满共享回调池（`core=2,max=8`），第 9 个 run 的回调静默排队、`submit` 仍返回 true                                                         | 每 run 只提交一个长循环 worker，两层有界背压（per-run 队列 + 共享池队列）不互通；`AbortPolicy` 下首个 submit 被拒会让整 run 直接 OVERLOAD                                  | worker 改为「一个任务后重新提交自己」；共享池饱和映射为 per-run 的 OVERLOAD 而非静默排队                                |
+| F-08 | `LlmGateway.java:1276-1279`、`:1392-1395`、`:1762-1785`、`:1798-1832`         | 开启 `CallBodyPolicy` 时取消线程 `record()` 遍历 `ArrayList` 与传输线程 `add()` 并发 → CME；异常被 `LlmCancelHandle` 的 guarded 监听器吞掉，`completeBarrier` 不执行 → future 永挂 | `Attempt` 全字段非 volatile、`transcript` 为共享可变 ArrayList；`guarded` 只 catch `RuntimeException`                                           | 见 F-01 第 4 点；`cancelledByListener` 全包 `try/catch(Throwable)`                             |
+| F-09 | `LlmGateway.java:713-716`、`:1282`、`:1436-1461`                             | `toolLoopAsync` 用同步完成型 transport/ToolExecutor + 大 `maxRounds` 时栈溢出                                                                                 | `next → startRound → whenComplete(内联) → toolFuture.whenComplete(内联) → next` 形成同步递归；`Workflow`/`AgentLoop` 有 wip 蹦床，网关 `AsyncRun` 没有 | `AsyncRun.next()` 改 pendingOutcome + wip 蹦床；或给 `maxRounds` 设硬上界                          |
+| F-10 | `LlmGateway.java:929-960`、`:965-977`                                       | 取消退避时撤掉的是早已触发的旧 `ScheduledFuture`，真实待执行任务仍留在延迟队列，滞留整个 `RetryRun`（`Retry-After` 可达数十秒）                                                              | `retryScheduler.schedule(...)` 在 `synchronized` 之外；零延迟 transport 下 attempt1 的 `scheduleRetry` 可能后写字段、覆盖 attempt2 的 S2               | `schedule()` 移进锁内，或给每代 `ScheduledFuture` 附 generation，`runScheduledAttempt` 用 CAS 只清自己那代 |
+| F-11 | `RetryScheduler.java:55`、`AiLiteAutoConfiguration.java:201`                | 容器停机时处于退避期的 `oneWithRetryAsync` future 永挂                                                                                                          | `setExecuteExistingDelayedTasksAfterShutdownPolicy(false)` + `destroyMethod="shutdownNow"`，延迟任务直接丢弃且无其它收敛路径                         | 停机时对在途 future 统一 `completeExceptionally(停机异常)`；或改优雅关闭并让延迟任务正常触发后检查 `terminal`            |
+| F-12 | `AgentSessionLoop.java:280-281`、`:291`                                     | `io()` 饱和时 `resumeAsync` 同步抛 `RejectedExecutionException`，破坏「异步入口返回 future」契约                                                                      | `CompletableFuture.supplyAsync` 在 `executor.execute` 被拒时同步抛出；`Workflow.adapt():523` 已显式捕获，此处漏了                                      | 包 try/catch 返回 `failedFuture`，`thenApplyAsync` 的宿主线程拒绝同样处理                               |
+| F-13 | `LlmCoroutines.kt:76-77`                                                   | 协程重试忽略 `Retry-After`，429/503 下按指数退避狂轰服务端，与同步/异步口径不一致                                                                                               | `var wait = policy.delayMs(attempt)`；Java 两侧（`:208-211` / `:898-902`）都 `min(retryAfterMs, maxBackoffMs)`                            | 抽 `RetrySupport.backoffMs(policy, failure, attempt)` 供三入口共用                              |
+| F-14 | `AsyncLlmCallLogger.java:45-63`、`LlmGateway.java:103`                      | 手工构造 `LlmGateway` 未传 executor 时退化为 `DirectExecutorProvider`，落库（可能 JDBC 阻塞）内联在 OkHttp Dispatcher / 调用线程；拒绝与停机时静默丢记录                                 | `executor.io().execute(...)` 在 direct 模式就是 `command.run()`；`catch (RuntimeException)` 只打 warn                                       | 默认也给有界守护池；`record` 先入有界队列由专用单线程消费；丢弃计数指标化 + shutdown 时 drain                             |
+| F-15 | `LlmGateway.java:1208-1243`                                                | io 模式下 `onDelta` 抛异常时，完成屏障先 `barrier.close()` 清掉排在后面的 `failBarrier` 任务，异常被吞、调用方看到成功                                                                | `completeBarrier` 任务体第一句就是 `barrier.close()`（`queue.clear()`）                                                                       | `close()` 改为只置 `closed` 不清队列，或放在 `result.complete` 之后；`failBarrier` 直接抢占终态               |
+| F-16 | `LlmCancelHandle.java:34-40`、`:80-84`、`:96-101`                            | abort 动作抛异常时 `runCancelListeners()` 不执行；监听器抛 `Error` 时循环中断，后续监听器（含收敛器）不执行 → 非合作传输下 future 永挂                                                       | `runAbort` 的 `action.run()` 无 try/catch；`guarded` 只 `catch (RuntimeException)`                                                      | `runAbort` 用 `try/finally` 保证监听器执行；`guarded` 改捕获 `Throwable`                             |
+
+### 3.2 NIO 与 HTTP 传输
+
+| 编号   | 位置                                                                                                                                                              | 现象                                                                                                                                                                                             | 根因                                                                                                                                                                                               | 修复方向                                                                                                          |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| F-17 | `JettyHttpExecutor.java:291-296`、`WebClientHttpExecutor.java:311-326`、`OpenAiCompletionsTransport.java:97-103/372-415`                                          | NIO/响应式路径在 selector / `webflux-http-nio-*` event loop 上同步做 `Utf8LineBuffer.accept` → `handleEvent`(Jackson) → `onDelta`；用户回调稍慢即卡住同一 loop 的所有连接                                                 | `CallbackPolicy`（`AiLiteAutoConfiguration.java:334` 默认 `inline()`）只包装 `onDelta`，`SseCollector.accept` + JSON 解析始终 inline 在传输线程；`benchmark/http-transport-benchmark/README.md:4-5` 明示基准绕过协议适配器与网关 | `onContent`/`onNext` 只做字节拷贝与 `release`，行列表投递到独立解析/回调池（Reactor 用 `publishOn`）；把回调策略作用域上移到 `StreamListener` 包装层 |
+| F-18 | `OkHttpExecutor.java:260-264`、`Jdk8HttpExecutor.java:147-148`、`KtorCioHttpExecutor.kt:87-88`、`JettyHttpExecutor.java:380-381`、`LlmRequest.java:93-101`          | 同一份 `timeouts(0, 0)` 在四种实现里是四种语义：OkHttp/Jdk8/Ktor 无限、Jetty 取 10s、WebClient 靠 Netty 默认；供应商静默挂起即永久占线程/连接                                                                                         | 契约写「非正值由传输实现取默认」，`effective*()` 把 0 原样透传；OkHttp 的 `newBuilder()` 还覆盖掉 client 自带的 10s 默认                                                                                                          | 在 SPI 边界统一「`≤0` 取默认值」归一化；OkHttp 不无条件覆盖 client 级超时                                                             |
+| F-19 | `WebClientHttpExecutor.java:162-171`、`:251-254`、`:261-280`                                                                                                      | 非流式调用在「服务端先回 200 响应头、再停发 body」时永久挂起                                                                                                                                                            | `mono.timeout(connectTimeout)` 只包住 `spec.exchange()`（到响应头）；`bodyToMono(String)` 与 `errorBody` 无 `.timeout(...)`；只有流式分支 `:194-197` 给 `body` 加了超时；同步 `future.get()`(`:88/:108`) 也无兜底               | 非流式 body / errorBody 补 `.timeout(readTimeout)`；同步 `get` 加兜底                                                   |
+| F-20 | `JettyHttpExecutor.java:291-296`、`WebClientHttpExecutor.java:311-326` / `:353-366`、`KtorCioHttpExecutor.kt:126-134`                                             | 取消后同一 chunk 内的多行仍全部交付；WebClient 取消后 `onComplete` 还会尝试 `future.complete(null)`；Ktor 同步路径阻塞读无法中断                                                                                                 | Jetty 异步 `onLine` 循环只判 `failed` 不判 cancel（同步 `:163` 反而每行检查）；WebClient `bindAbort` 没有 `done.set(true)`；Ktor 同步入口完全没有 `bind`/`bindAbort`                                                           | 所有 onLine 循环前查取消；WebClient 取消路径置 `done`；Ktor 同步入口也走 `bind`                                                    |
+| F-21 | `Jdk8HttpExecutor.java:57-65`、`:248-253`                                                                                                                        | `future.cancel(true)` 只改 future 状态，底层 `HttpURLConnection` 继续跑、`disconnect()` 永不调用                                                                                                              | `CompletableFuture.supplyAsync(() -> execute(request), executor)` 没有把 future 与 connection 绑定；六种实现里只有 Jdk8 缺这条链                                                                                   | 持有 connection 引用，`whenComplete` 中判 `isCancelled()` 后 disconnect；或把 future 与 cancel handle 绑定                  |
+| F-22 | `OkHttpExecutor.java:334-340`、`:50-52`、`Jdk8HttpExecutor.java:248-253`                                                                                          | close 后异步入口向已 shutdown 的池提交 → `RejectedExecutionException` **直接抛给调用方**（不是 failed future），同步入口却仍可能成功；单参 `OkHttpExecutor(OkHttpClient)` 硬编码 `ownsDispatcher=true`，close 会关掉用户自管的 dispatcher 与连接池 | 无 `AtomicBoolean closed`、无 `ensureOpen`；构造器注释（`:56`）要求「用户传入的客户端传 false」，单参重载没照做                                                                                                                  | 补 `closed` 门禁 + 所有入口 `openOrFail`；单参构造器改 `false` 或明确标注语义                                                      |
+| F-23 | `JettyHttpExecutor.java:368-371`、`Jdk8HttpExecutor.java:149` 有；`OkHttpExecutor`、`WebClientHttpExecutor`、`KtorCioHttpExecutor.kt`、`VirtualThreadOkHttpFactory` 无 | 流式 `Accept-Encoding: identity` 只有 2/6 实现设置；OkHttp 默认 `transparentGzip` 会自动加 gzip 并解压，SSE 被压缩即破坏逐行语义                                                                                            | `docs/desc-HTTP传输.md:85-90` 把该头列为三条流式契约之一，但只有 Jetty/Jdk8 落地；`JettyHttpExecutorTest.java:60` 是唯一断言                                                                                                | 六种实现统一覆盖式设置该头，补 parity 测试                                                                                     |
+| F-24 | `JettyHttpExecutor.java:160-165`、`OkHttpExecutor.java:127/209`、`Jdk8HttpExecutor.java:123-131` 无界；`Jetty:264`、`WebClient:198`、`Ktor:238/361-393` 有 1MB 上限       | 同步 `BufferedReader.readLine()` / `readUtf8Line()` 路径可无限累积字符串打爆堆；同一响应在不同实现下行切分规则也不同（三套）                                                                                                         | 行上限只加在异步 `Utf8LineBuffer` / `BoundedAppendable` 路径                                                                                                                                               | 所有同步读行路径套有界读取；建立 SSE 行切分 parity 用例（裸 `\r`、BOM、跨 chunk 多字节）                                                    |
+| F-25 | `WebClientHttpExecutor.java:194-216`、`:261-280`                                                                                                                 | 取消 / 读超时 / 提前终止时，`concatMap` 预取队列里尚未投递给 mapper 的 `DataBuffer` 不走 `finally { DataBufferUtils.release }`，堆外内存增长                                                                                  | 正常路径释放正确，但缺 `.doOnDiscard(DataBuffer.class, DataBufferUtils::release)`；`docs/plan/夯实HTTP传输并发-plan.md §3.3` 自要求「所有分支都要释放」                                                                         | 在 `toDataBuffers()` 的 Flux 上加 `doOnDiscard`，或 `Flux.usingWhen` 统一兜底                                           |
+| F-26 | `JettyHttpExecutor.java:203/217-223/546-558`、`OkHttpExecutor.java:285-293`、`Jdk8HttpExecutor.java:182-197`                                                      | 成功体与错误体读取无界：Jetty 成功分支 `limit<=0 → allowed = remaining`，OkHttp `body.string()` 全量读入后才截 300 字符                                                                                                  | 只有非 2xx 走 `MAX_ERROR_BYTES`；`OkHttpExecutorAdversarialTest.java:73` 只验证消息截断，未验证读入上限                                                                                                              | 统一有界读取 + 明确「超限时丢弃但必须排空/关闭连接」                                                                                  |
+| F-27 | `JettyHttpExecutor.java:361-363`、`:414`、`:612-615`                                                                                                              | `readTimeout<=0` 时 `client.setIdleTimeout(0)`（无限）且 `newRequest` 不设 `request.idleTimeout` → 零兜底超时；`headerTimeout()` 返回 `Long.MAX_VALUE` 传给 `get(timeout, MILLISECONDS)` 的换算待实测                  | 客户端级兜底被主动关掉，请求级又不给默认值                                                                                                                                                                            | client 级给合理默认 idleTimeout；`newRequest` 对 `≤0` 取默认；核实 V1                                                       |
+| F-28 | `Jdk8HttpExecutor.java:144-151`                                                                                                                                 | `executeRaw` 跟随 3xx 重定向，管理台试跑看到最终 2xx 而非原始 3xx，违反 `RawHttpExecutor.java:32`「3xx 原样返回」                                                                                                          | `HttpURLConnection` 默认 `instanceFollowRedirects=true`；Jetty 已 `followRedirects(false)`                                                                                                           | 显式 `setInstanceFollowRedirects(false)`；其余实现的默认值见 V9                                                           |
+| F-29 | `ModelResolver.java:627-639`、`:560-571`                                                                                                                         | 热更新改变 `api-keys` 条数时，两线程各自 new `KeyRotation` 并先后覆盖 `rotations`，先返回者在「孤儿实例」上写 `cooldownUntil`/`cursor`，429 后冷却失效                                                                                | `putIfAbsent` 之后 `:637` 无条件 `put` 覆盖，非 CAS；`markKeyFailure` 各自 `cursor.set(idx)` 互相覆盖                                                                                                            | `compute` 原子重建，或把 size 变化收敛到单一锁内                                                                              |
+| F-30 | `LlmCallException.java:144-162`                                                                                                                                 | `Retry-After: 9223372036854775807` 时 `seconds * 1000L` 溢出为负/小值，退避可能当作 0                                                                                                                        | `Long.parseLong` 接受接近 `Long.MAX_VALUE` 的值，乘法无检查                                                                                                                                                  | `Math.multiplyExact` + 钳制上限（如 24h）                                                                            |
+
+### 3.3 运行时配置与目录
+
+| 编号   | 位置                                                                                                                     | 现象                                                                                                                                                                             | 根因                                                                                                                                                                                                          | 修复方向                                                                                                                                            |
+| ---- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| F-31 | `JdbcRuntimeCatalog.java:211-214` / `:509-524`；`JdbcCallBodyPolicy.java:87-98` / `:143-147`                            | 管理页保存后声称「写入后立刻清本机缓存」，实际高并发下最长要再等一个完整 `cacheSeconds`（默认 5s），`invalidate()` 完全失效                                                                                                 | `invalidate()` 不持锁，`load()` 在 `synchronized(this)` 内 `read()` 后**无条件写回**并重置 TTL：A 持锁读库 → B 写库并 invalidate → A 把旧/半新快照写回并设新 TTL；`JdbcCallBodyPolicy.level()` 连 `synchronized` 都没有                            | `invalidate()` 加同一把锁；或 `AtomicLong generation`，`load()` 写回前 CAS 校验、不一致则丢弃重读。`JdbcCallBodyPolicy` 的「读库+写缓存」整段与 `save/invalidate` 同锁              |
+| F-32 | `JdbcRuntimeCatalog.java:526-569`、`:225-233`、`:488-493`                                                                | 一次解析可能拿到跨时刻组合：绑定指向的模型刚被删除/置未就绪、overlay 的 DELETE 已完成而 INSERT 未做、旧密钥配新地址；DELETE 成功 INSERT 失败时配置永久丢失                                                                              | `read()` 用三条独立 `jdbc.query` 拼一个 `Snapshot`，无 `@Transactional`；写侧同样是多条非原子语句。`Snapshot` 对象不可变，但内容不是数据库的一致视图                                                                                                   | `TransactionTemplate` 把三条查询包进同一只读事务；写操作包单事务；或加 `REVISION`/版本列按单一版本取值                                                                            |
+| F-33 | `ai-lite-catalog.sql:1,30-49`、`JdbcRuntimeCatalog.java:284-300` / `:428` / `:553` / `:696-698`                         | 两个请求同时 adopt 同一 `(PROVIDER_ID, MODEL_ID)` 会插两行；后续 `UPDATE ... WHERE PROVIDER_ID=? AND MODEL_ID=?` 命中全部重复行，`read()` 可能取到未初始化行 → 图片被拒、预算检查跳过；同一毫秒 `UPDATE_TIME` 相等时取哪行取决于数据库返回顺序 | 主键只有 `MODEL_ROW_ID`，无逻辑唯一索引；判重靠 `SELECT COUNT(*)` 后 INSERT；`:553` 平局用 `>=`（后读覆盖先读）且无 `ORDER BY`；时间戳只有毫秒精度、不是乐观锁                                                                                             | 加 `(PROVIDER_ID, MODEL_ID)` 唯一索引 + `MERGE`/`ON CONFLICT DO NOTHING`；`read()` 加 `ORDER BY UPDATE_TIME DESC, MODEL_ROW_ID` 并明确平局规则；用序列或版本列替代毫秒时间戳 |
+| F-34 | `ModelResolver.java:290-317` / `:387-392`、`JdbcRuntimeCatalog.java:294-297`                                            | 目录模式下「只启用（READY=1）但未填能力参数」的模型，`contextWindow=0`、`maxTokens=8192`、`input=["text"]`、`reasoning=false`：上下文预算与自动压缩整条静默跳过、图片被拒、YAML 同名模型的能力参数完全不生效，且不报错                             | `toConfigModel` 只对后五个 Map 做 NULL → YAML 回落，前七项只来自 DB；`CatalogModel.reasoning` 是 primitive 无法保留 NULL 三态；`READY` 与能力参数解耦使「就绪但参数为空」成为合法状态。`docs/plan/夯实模型级请求参数管理-plan.md:596` 已把 `context-window NULL→0` 记为观察项 | 前七项也实现 NULL → YAML 回落，`reasoning` 改 `Boolean`；或 `setReady(true)` 时强制校验能力参数，拒绝启用未配置模型                                                            |
+| F-35 | `AiLiteAdminAutoConfiguration.java:32-42`、`AdminController.java:54` 及全类端点                                              | `ai-lite.admin.enabled=true` 后 `/ai-lite/admin/api/**` 全部对外开放：可改写 `API_KEY`/`BASE_URL`（把流量引到任意端点）、放行模型、发起真实模型请求、读调用记录与正文                                                       | 装配条件只有「Web 应用 + DispatcherServlet + 开关」，无任何 `@PreAuthorize`/Security/token/拦截器；README:112 只说「调试时打开」，没要求置于鉴权之后                                                                                               | 内置 token/角色校验或独立管理端口；无 Spring Security 且端点暴露时启动期拒绝或强制 WARN；文档写成硬约束                                                                              |
+| F-36 | `JdbcRuntimeCatalog.java:616/642/669`、`AdminController.java:883-887`、`JdbcCallBodyPolicy.java:121-123`                 | JSON 列损坏时 400 响应体与日志带出 Jackson 解析异常原文（可能含自定义头/凭据片段）                                                                                                                            | `throw new IllegalStateException(where + " 不是合法 JSON: " + ex.getMessage(), ex)`；`badRequest()` 原样回显 `ex.getMessage()`；叠加 F-35 无鉴权                                                                           | 异常消息只保留「表名 + 行列定位 + 字段名」，不拼原文、不挂 cause 到对外异常；管理端 400 用固定文案                                                                                      |
+| F-37 | `AiLiteCatalogAutoConfiguration.java:111-117`、`AiLiteAdminAutoConfiguration.java:79-82`、`AdminController.java:811-829` | 用户自定义 `CallBodyPolicy` Bean 后，管理页档位恒显示 `none`、PUT 抛「档位不可用」，而网关实际用的是用户策略 —— 正是 `CallBodySettings.java:11-12` 要避免的「显示与实际不一致」                                                     | `@ConditionalOnMissingBean(CallBodyPolicy.class)` 的条件类型与返回类型 `CallBodySettings` 不对称                                                                                                                         | 条件改 `@ConditionalOnMissingBean(CallBodySettings.class)`，或注册只读适配 Bean                                                                            |
+| F-38 | `LlmGateway.java:443-448`、`ModelResolver.java:148-172`                                                                 | `resolveFor()` 公开且无 `allows` 校验；`resolveExplicit(..., useCatalog=true)` 被管理页「测试调用」用来发真实请求，绕过绑定/就绪/出口保护/调用记录（`docs/desc-配置和运行时配置.md:181-183` 已承认）                               | 真正发请求的 `invoke`/`invokeAsync` 都在 `resolve()` 前做 `allows(bizId)`，但这两条读路径绕开了它；返回的 `ResolvedModel` 含明文 `getApiKey()`                                                                                           | 明确这两条路径的定位（内部/管理端），收敛为包内可见或加校验；调用记录侧不得暴露明文 key                                                                                                  |
+
+> **已核对非缺陷**：biz-id 治理在 `invoke`(`LlmGateway.java:1521-1536`) 与 `invokeAsync`(`:682-697`) 两处都在 `resolve()` 前校验，`oneWithRetry` 每次尝试都重新走 `one()`，工具循环/流式/异步/重试均无绕过；`LlmCall.bizId` 是 `final` 且 `copy()` 保留。表名可配置经 `safeTable()` 白名单（`JdbcRuntimeCatalog.java:708-714`）逐处核对，当前无注入点，`CatalogTableNamesTest` 有覆盖。
+
+---
+
+## 4. 根因级架构问题
+
+### 4.1 取消句柄的所有权模型没有统一
+
+`LlmCancelHandle` 是 one-shot（Javadoc 明写），`Workflow` 与 `RetryRun` 按「每步/每次尝试 fresh」实现，`AsyncRun`、`AgentLoop`、`AgentSessionLoop`、`LlmCoroutines.oneWithRetry` 却复用。`bindAbort` 是单槽 + `unbind` 清空，一旦跨轮复用，「先 complete 后 unbind」就是确定性冲突。项目自己的 `docs/plan/夯实Workflow异步执行器-plan.md §2.4` 已经定位过同类缺陷，但修复停留在单个调用点，没有沉淀成网关内部不变量。**建议**：把「每次真实 HTTP 请求一个句柄」写成网关层约束，外层句柄只做 forwarder，并在代码里用类型/工厂强制，而不是靠注释和自觉。
+
+### 4.2 异步链缺少统一的收敛原语
+
+`Workflow.advance()`、`AgentLoop.drainLoop()` 有 `catch(Throwable)` 兜底，网关的 `whenComplete` / `onAttemptComplete` 裸奔；`SerialCallbackExecutor` 又把「任务不抛异常」写进注释当作前提。结果是「future 永不挂起」这条契约依赖每一层都写对 try/catch。**建议**：抽 `safeWhenComplete` / `safeSubmit` 两个原语，把兜底变成结构性保证；终态收敛统一走一个 `converge(...)` CAS 入口。
+
+### 4.3 SPI 只约束了签名，没约束语义
+
+六种 `HttpExecutor` 在「`≤0` 超时、取消是否关 socket、行长度上限、`Accept-Encoding: identity`、`close()` 门禁、回调线程归属、SSE 行切分规则」上各有行为；`CallbackPolicy` 的作用层次又偏低（只包装 `onDelta`，管不到 `handleEvent` 的 JSON 解析）。于是「切换 `ai-lite.http.transport`」不是换实现，而是无预警改变语义。**建议**：
+
+1. 在 `HttpRequest` / SPI 边界统一归一化超时与头，把「≤0 取默认」写进契约测试；
+2. 把回调策略作用域上移到 `StreamListener` 包装层，让协议解析与用户回调都不在 event loop；
+3. 把六份同构的 happy-path 测试模板换成**同一套契约用例跑六种实现**的 parity 套件（超时、取消、行上限、gzip、close、回调线程、`DataBuffer` 释放）。
+
+> `benchmark/http-transport-benchmark/README.md:4-5` 明示基准**不经过协议适配器和网关**，测的是裸传输；因此「0 错误 / 线程稳定」不能证明生产链路安全，F-17 恰好被基准数据掩盖。
+
+---
+
+## 5. 六种传输契约对照表
+
+| 实现               | 异步流回调线程                                | 取消关 socket                                         | 流式背压 / 行上限                                    | `≤0` 超时                                               | `close()` 门禁 | `identity` |
+| ---------------- | -------------------------------------- | -------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------- | ------------ | ---------- |
+| `okhttp`（默认）     | OkHttp Dispatcher 平台线程，不与 selector 共线程 | 有 `Call.cancel()`，bind + `cancelCallWithFuture` 双路 | 阻塞 `readUtf8Line()`，**无行上限**                  | **0 = 无限**，且 `newBuilder` 覆盖 client 默认 10s            | **无**        | **无**      |
+| `okhttp-virtual` | 虚拟线程（结构同 OkHttp）                       | 同上                                                 | 同上                                            | 同上                                                    | 同上           | 无          |
+| `jetty`（NIO 主路径） | **Jetty selector 线程**，inline 解析 + 回调   | `request.abort()`；**异步 onLine 循环不查 cancel**        | 异步 1MB 上限，**同步无**                             | 连接取 10s，帧间 `≤0` 无限                                    | 有            | 有          |
+| `webclient`      | **Reactor event loop**，inline 解析 + 回调  | `Disposable.dispose()`；**取消后 `done` 未置位**          | `concatMap` 预取 + 无界 `request`；缺 `doOnDiscard` | 靠 Netty 默认；`connectTimeout` 实为「到响应头」；**非流式 body 无超时** | 有            | 无          |
+| `ktor-cio`       | `Dispatchers.IO`（与 CIO selector 共池）    | 异步 `job.cancel()`；**同步路径无 bind**                   | suspend 挂起 + `BoundedAppendable` 1MB          | **0 = 无限**                                            | 有            | 无          |
+| `jdk8`           | 自建 `newCachedThreadPool`（无界），每请求一临时线程  | 仅 handle 链 `disconnect()`；**`future.cancel` 不传导**  | 阻塞 `readLine()`，**无行上限**                      | **0 = 无限**                                            | **无**        | 有          |
+
+---
+
+## 6. P2 / 边界问题（归档）
+
+| 编号   | 位置                                                                               | 问题                                                                                                                                                                                                        |
+| ---- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F-39 | `LlmGateway.java:362-379`                                                        | `sleepCancellable` 用 `System.currentTimeMillis()` 墙钟，而 deadline 用 `nanoTime()`（`RetrySupport` 注释明确要求单调时钟）；NTP 回拨会让退避提前结束或大幅延长                                                                             |
+| F-40 | `LlmGateway.java:1787-1795`、`CallBodyText.java`、`ModelSyncClient.java:1003-1006` | 脱敏是**精确子串替换** `apiKey → "***"`；URL 编码、截断、派生形式不脱敏；`applyOverlay` 在配置 `api-keys` 池时忽略 DB 单 key 覆盖，管理页改单把密钥对多 key 供应商无效且无提示                                                                                  |
+| F-41 | `Utf8LineBuffer.java:42-70` / `:77-89`                                           | 不剥离 UTF-8 BOM（首行 `\uFEFFdata:` 会让 `TransportSupport.java:89` 的 `startsWith("data:")` 失败）；超长行抛异常前未 `reset()`，异常后状态残留、本次已解析行全部丢弃                                                                            |
+| F-42 | `AiLiteAutoConfiguration.java:85-90`、`ModelResolver.java:75-88`                  | `AiLiteConfig` 是全可变 POJO、单例共享，无 `@RefreshScope`；Spring Cloud `/refresh` 会重新绑定但 `bizIds` 的构造期 HashSet 不更新、`validateStructure()` 不重跑，`providers` Map 引用可能部分生效 → 比「完全不刷新」更危险的半刷新状态，且 `LinkedHashMap` 并发读写无同步 |
+| F-43 | `CoroutineExecutorProvider.kt:33-47`                                             | `io()` 是 `fixedThreadPool` + **无界** `LinkedBlockingQueue`，与 `PlatformExecutorProvider` 的有界语义不一致；该池同时是 suspend 恢复的载体，阻塞任务占满 `2*CPU` 条线程即饿死所有等待恢复的协程                                                        |
+| F-44 | `AiLiteAutoConfiguration.java:98/124/201`、`PlatformExecutorProvider.java:56`     | 停机时同时 `shutdownNow()` 掉 `io()`、retry 调度器、回调池，没有任何「在途 future 统一以停机异常收敛」机制；`AsyncLlmCallLogger` 的记录静默丢弃                                                                                                     |
+| F-45 | `LlmGateway.java:183-226`                                                        | 同步 `oneWithRetry` 取消时 `return one(call, cancel)` 会重新走完整 `resolve()` / `validate` / 写一条 ABORTED 记录；若此刻目录刷新或配置不可用，取消路径抛 CONFIG 异常而非返回规范的 `ABORTED`                                                          |
+
+---
+
+## 7. 待验证疑点（不臆测，写明需要什么）
+
+| 编号  | 疑点                                                                                                                                                                                                               | 需要的验证                                                                               |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| V1  | F-36 中「Jackson `JsonParseException.getMessage()` 含源文本片段」是否真把密钥带进响应体，决定它从「信息泄漏」升级为「密钥泄漏」                                                                                                                          | 确认 `pom.xml` 锁定的 `jackson-databind` 版本、`AiLiteJson.createMapper()` 配置，以及损坏列里是否存过敏感值 |
+| V2  | `JettyHttpExecutor.java:612-615` `headerTimeout()` 在 `readTimeout<=0` 时返回 `Long.MAX_VALUE`，传给 `InputStreamResponseListener.get(timeout, MILLISECONDS)` 的纳秒换算是否溢出/立即超时                                            | Jetty 9.4 实测                                                                        |
+| V3  | `JettyHttpExecutor.java:383` 锁外 `clients.get(key)` 与 `:341` `close()` 的 `clients.clear()` 竞态                                                                                                                     | 关闭期并发请求用例                                                                           |
+| V4  | `WebClientHttpExecutor.java:252-254` 用 `connectTimeout` 对 `exchange()` 做整体 timeout，慢首 token 模型可能被误杀                                                                                                              | 真实供应商压测                                                                             |
+| V5  | `ProviderGuard.java:317-326` 半开探测超时把 state 翻回 OPEN 并拒绝排队 waiter，而探测线程的迟到成功结论被 `:446-449` 作废，是否符合预期                                                                                                               | 状态机语义确认                                                                             |
+| V6  | 取消后迟到结论仍采样：`LlmGateway.java:1246-1250` 只 release 不 verdict，随后 `:1371-1378` 仍 `verdict(error)`                                                                                                                    | 指标口径确认                                                                              |
+| V7  | `AiLiteCatalogNoJdbcAutoConfiguration.java:18` 把 `@ConditionalOnMissingBean` 标在 `@Configuration` 类上（Boot 官方建议仅用于 `@Bean` 方法）；`AiLiteCatalogAutoConfiguration.java:129-139` 用精确类名判定 `hasPromptStore`，自定义子类/代理是否误判 | `ApplicationContextRunner` 装配用例                                                     |
+| V8  | 多 `DataSource` 且用户自建两个 `JdbcTemplate`、无 `@Primary` 时是否抛 `NoUniqueBeanDefinitionException`                                                                                                                        | 装配用例                                                                                |
+| V9  | OkHttp / `VirtualThreadOkHttpFactory` / Ktor 未显式关 `followRedirects`，`executeRaw` 是否同样跟随 3xx（F-28 已确认 Jdk8）                                                                                                       | 3xx 契约用例跑六种实现                                                                       |
+| V10 | `AgentLoop.java:1322-1331` 的 `callbackExec` 在 `barrier.submit` 失败时抛 `LlmCallException`（非 `RejectedExecutionException`），JDK 8 的 `thenComposeAsync` 是否同步传播并打死 io 池 worker                                          | JDK 8 实机用例                                                                          |
+
+---
+
+## 8. 测试缺口与建议补的对抗性用例
+
+现有 975 个用例覆盖的是**单线程顺序、单节点、happy-path 与状态机**；本次发现几乎都落在以下盲区：并发 `invalidate`/`load`、跨轮 late-unbind、io 模式回调抛异常、event loop 阻塞、超时 `≤0`、取消后的 delta 数量、DataBuffer 异常路径释放、close 竞态、跨实现 parity。`LlmGateway.setCallbackPolicy` 全仓无测试调用；六种传输测试是六份同构模板；`docs/plan/夯实HTTP传输并发-plan.md §5` 声明的若干测试项在实现测试类中并未落地。
+
+建议按批次补：
+
+1. **终态收敛**：扩展点抛 `RuntimeException` / `Error` 时所有 `*Async` 入口仍异常完成；`onDelta` 抛 Error 后后续 delta 与终态仍到达；内联 sharedExecutor 的 `submit`；`failBarrier` 不被完成屏障清掉。
+2. **取消链**：toolLoop 第 2 轮在途取消时底层 `Call.cancel()` 被调用；AgentLoop 多轮取消不残留监听器；取消后 delta 计数为 0；六种传输的 `future.cancel` 都关 socket；`LlmCancelHandle` abort 动作抛异常时监听器仍执行。
+3. **配置并发**：并发 `invalidate()` 与 `load()` 不复活旧快照；三表读到一致视图；并发 adopt 不产生重复行；同毫秒平局确定性；`setReady(true)` 拒绝能力参数为空的模型。
+4. **传输 parity**：同一套用例跑六种实现 —— `≤0` 超时、非流式 body 超时、取消后不回调、行长度上限、BOM、`Accept-Encoding: identity`、close 后行为、`executeRaw` 不跟随 3xx、回调线程归属。
+5. **NIO 专项**：在 event loop 上放慢 `onDelta` 后其它连接是否受影响；`doOnDiscard` 释放计数；`publishOn` 后线程名断言。
+6. **停机与资源**：退避期停机的在途重试收敛；guard 载体池拒绝时 waiter 收敛；`io()` 饱和下 `resumeAsync` 返回 failed future。
+
+---
+
+## 9. 修复顺序与验收
+
+| 批次                     | 内容                                                                                            | 验收                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| **批次 1（P0）**           | F-01 `safeWhenComplete` + `Attempt` 快照、F-02 回调 worker `finally` 与 submit 顺序、F-03 每请求 fresh 句柄 | 「future 永不挂起 / 取消能中断在途」两条契约在六种传输下都有对抗性用例；`mvn -B verify` 975+ 用例全绿 |
+| **批次 2（超时与取消 parity）** | F-18/F-19/F-20/F-21/F-22/F-23/F-24/F-28；建立跨实现契约测试套件                                           | 六种实现同一套用例通过，语义漂移项清零                                                |
+| **批次 3（NIO 线程模型）**     | F-17、F-25、F-26、F-27；回调策略作用域上移                                                                 | event loop 慢回调不影响其它连接；DataBuffer 释放计数为零泄漏                          |
+| **批次 4（运行时配置）**        | F-31/F-32/F-33/F-34/F-35/F-36/F-37；能力参数回落与唯一键需要 DDL 变更，注意 `CHANGELOG` 与升级脚本                   | 并发热更新即时生效、三表一致、无重复行、管理端鉴权与固定错误文案                                   |
+| **批次 5（编排与健壮性）**       | F-04 ~ F-16、F-29/F-30、F-39 ~ F-45                                                             | io 模式、`PARALLEL`、guard、停机路径补齐对抗性用例                                 |
+| **批次 6（疑点）**           | V1 ~ V10 逐项实测，确认的升级为缺陷、不成立的写明结论                                                               | 疑点表全部闭环                                                            |
+
+> 版本影响提示：F-33（唯一索引）与 F-34（能力参数回落）涉及表结构/解析行为变更，需按 `docs/ref-发布.md` 走版本与 `CHANGELOG`；F-03 若改动句柄所有权，注意 `docs/desc-用户级线程.md` 的取消链与 `docs/plan/夯实单次模型调用入口-plan.md` 的 L1–L4 契约描述要同步。
+
+---
+
+## 10. 审查读过的文件清单
+
+**核心（`ai-lite-llm`）**：`LlmGateway.java`(全)、`LlmCall.java`、`LlmRequest.java`、`LlmResult.java`、`LlmCompletion.java`、`LlmCancelHandle.java`、`LlmCallException.java`、`RetryPolicy.java`、`RetrySupport.java`、`RetryScheduler.java`、`CallbackPolicy.java`、`SerialCallbackExecutor.java`、`AsyncToolExecutor.java`、`ToolExecutor.java`、`AsyncHttpExecutor.java`、`HttpExecutor.java`、`RawHttpExecutor.java`、`HttpRequest.java`、`HttpResult.java`、`StreamListener.java`、`Utf8LineBuffer.java`、`AiLiteConfig.java`、`ModelResolver.java`、`catalog/*.java`、`guard/ProviderGuard.java`、`internal/llm/*.java`、`internal/executor/*.java`、`transport/*.java`、`json/AiLiteJson.java`。
+
+**编排（`ai-lite-agent`）**：`Workflow.java`(全)、`AgentLoop.java`(全)、`AgentSessionLoop.java`、`AgentLoopContext.java`、`AgentLifecycle.java`、`SyncStep/AsyncStep.java`、`session/InMemoryAgentSessionStore.java`。
+
+**传输（六个模块）**：`OkHttpExecutor.java`、`OkHttpClientFactory.java`、`VirtualThreadOkHttpFactory.java`、`JettyHttpExecutor.java`、`WebClientHttpExecutor.java`、`KtorCioHttpExecutor.kt`、`Jdk8HttpExecutor.java`。
+
+**配置与装配**：`JdbcRuntimeCatalog.java`、`JdbcCallBodyPolicy.java`、`AiLiteCatalog*Properties/AutoConfiguration.java`、`AiLiteAdminAutoConfiguration.java`、`AiLiteAsyncCheckAutoConfiguration.java`、`AdminController.java`、`ModelSyncClient.java`、`AiLiteAutoConfiguration.java`、`AiLitePrompt*AutoConfiguration/Properties.java`、`AiLiteSessionAutoConfiguration.java`、`HttpTransportReporter.java`、各 `META-INF/spring.factories`、`ai-lite-catalog.sql`、`ai-lite-demo/src/main/resources/schema.sql`。
+
+**执行器**：`CoroutineExecutorProvider.kt`、`LlmCoroutines.kt`、`VirtualThreadExecutorProvider.java`、`PlatformExecutorProvider.java`、`DirectExecutorProvider.java`。
+
+**测试（检索方法名与关键内容）**：`LlmGatewayAsyncRetryTest`、`LlmGatewayAsyncRetryParityTest`、`LlmGatewayAsyncTest`、`LlmGatewayGuardTest`、`LlmGatewayAdversarialTest`、`LlmSingleCallCancellationTest`、`LlmCancelHandleListenerTest`、`SerialCallbackExecutorTest`、`Utf8LineBufferTest`、`WorkflowAsyncTest`、`AgentLoopAsyncHardeningTest`、`AgentLoopIoModeTest`、`AgentSessionLoopAsyncTest`、`LlmCoroutines*Test`、`ProviderGuardTest`、`ModelResolver*Test`、`JdbcRuntimeCatalogTest`、`CallBodyPolicyCacheTest`、`CatalogTableNamesTest`、`CatalogAssemblyTest`、`AiLiteAutoConfiguration*Test`、六种 `*HttpExecutorTest`、`OkHttpExecutorAdversarialTest`。
+
+---
+
+## 11. P0 实施记录（2026-11-05）
+
+> **状态**：F-01 / F-02 / F-03 已修复并有对抗性用例覆盖。改动在工作区（未提交），实施计划见 [修复异步调用挂起与取消失效](修复异步调用挂起与取消失效-plan.md)。
+>
+> **纪律**：先补用例、确认跑红，再改代码、确认跑绿。批次 A 的 10 条用例在改前全部失败（9 failures + 1 timeout），确认缺陷可复现后才动产品代码。
+
+### 11.1 对抗性用例（先跑红）
+
+| 用例类 | 覆盖 | 改前 |
+| --- | --- | --- |
+| `CallbackChannelRegressionTest` | F-02：任务抛 RuntimeException / Error 后队列继续；内联 Executor 连续 submit；close 复位；共享池饱和 | 3 条红 |
+| `AsyncConvergenceRegressionTest` | F-01：`CallBodyPolicy.level()` 抛 RuntimeException / Error；工具执行器抛 Error；`RetryPolicy.retryable` 抛异常；终态记录恰好一条；io 模式 onDelta 抛 Error | 5 条红 |
+| `RoundCancelRegressionTest` | F-03：第 2 轮在途取消必须调用底层 abort；每轮句柄互不相同 | 2 条红 |
+
+### 11.2 F-02：回调通道自愈
+
+| 改动 | 位置 |
+| --- | --- |
+| worker 单任务 `catch (Throwable)`，任何退出路径复位 `running` | `SerialCallbackExecutor.drain()` |
+| `submit()` 先置位再 `execute`，拒绝时只撤本次任务并回滚 | `SerialCallbackExecutor.submit()` |
+| `close()` 同步复位 `running` | `SerialCallbackExecutor.close()` |
+| worker 改为「执行一个任务后交回共享池」（F-07） | `SerialCallbackExecutor.scheduleWorker()` |
+| `onDelta` 包装改 `catch (Throwable)` 并直接抢占失败终态 | `LlmGateway.AsyncRun` 构造器 |
+
+**F-07 的实现要点（实测踩坑）**：不能用「是否同一条线程」判断内联 Executor。共享池完全可能把交接任务派给刚让出线程的那位 worker，线程相同但不是内联，误判会让队列永久滞留（`tasksRunInSubmitOrderOnSingleWorker` 曾因此挂起）。改为判断「包装任务是否在 `execute` 调用期间同步执行」：`phase=0` 期间执行 → 内联，包装直接返回、由调用方继续循环；否则异步接棒。
+
+### 11.3 F-01：统一收敛兜底
+
+| 改动 | 位置 |
+| --- | --- |
+| 新增 `safeWhenComplete(source, body, converge)` / `wrap(Throwable)` 原语 | `internal/llm/FutureSupport.java`（新增） |
+| 所有 `whenComplete` 注册点改走原语 | `LlmGateway` 的 `startRound` / `toolFuture` / `RetryRun.attemptFuture` / `result` / `invokeAsync`；`AgentLoop` 的模型轮与工具批次；`AgentSessionLoop` |
+| 兜底路径直接 `result.completeExceptionally` 抢占终态，不走 io 入队（F-15） | `AsyncRun.failNow()` / `convergeUnexpected()` |
+| `record()` 用 `finally` 保证恰好一条记录；正文生成失败降级为空正文（F-08） | `LlmGateway.record()` |
+| `Attempt` 的计数字段与 transcript / completion 改 `volatile` | `LlmGateway.Attempt` |
+| 取消收敛与 future 取消路径整段 `catch (Throwable)` | `cancelledByListener()` / `cancelledByFuture()` |
+
+### 11.4 F-03：每请求 fresh 取消句柄
+
+| 改动 | 位置 |
+| --- | --- |
+| 外层句柄只 `bindAbort` 转发到当前在途轮；不再往外层注册 `onCancel`，消除监听器随轮累积 | `LlmGateway.invokeAsync()` |
+| 每轮 `new LlmCancelHandle` + 注册该轮监听器 + 放进 `LlmRequest` | `LlmGateway.AsyncRun.startRound()` |
+| 同步重试每次尝试 fresh + 外层转发 | `LlmGateway.oneWithRetry()` / `freshAttemptCancel()` |
+| 协程重试每次尝试 fresh，并双向同步取消态 | `LlmCoroutines.oneWithRetry()` / `freshAttemptCancel()` |
+| `cancel()` 用 `try/finally` 保证监听器执行；abort 与监听器异常都兜 `Throwable`（F-16） | `LlmCancelHandle` |
+
+**契约用例同步**：`LlmSingleCallEntryParityTest.explicitCancelHandleIsPassedThroughUnchanged` 与 `LlmCoroutinesParityTest."oneAsync is a pure delegate"` 原先断言「传输层拿到的就是调用方传入的句柄」，这正是 F-03 要改掉的行为。两条用例改为断言「外层句柄与轮次句柄不是同一个，但外层取消能传导到轮次句柄并触发 abort」。
+
+### 11.5 与实施计划的偏离（及理由）
+
+1. **`AgentLoop` / `AgentSessionLoop` 未改句柄所有权**：网关把「每请求 fresh」下沉后，它们传入的 `ctx.getCancel()` 自动成为外层转发器，无需逐层改。全量测试（含 `AgentLoopAsyncHardeningTest`、`AgentIoModeTest`）通过。
+2. **`AgentLoop.callbackExec` 未加异常包装**：它提交的是 `CompletableFuture` 链的内部任务，这些任务自己把异常收敛到 future；额外包装反而可能吞掉应传给 future 的异常。通道停摆已由 `SerialCallbackExecutor` 的 `catch (Throwable)` 兜住。
+3. **F-08 采用「记录时防御性复制」而非给 `Attempt` 加快照字段**：`record()` 内先复制 transcript、正文生成整体降级，改动更小；计数字段加 `volatile` 解决可见性。
+4. **终态记录的 `stopReason` 语义**：记录在回调体前段按当时结局写出，兜底收敛不会回改它。因此 `CallBodyPolicy.level()` 抛异常时记录是调用当时的成功口径，但**恰好一条**这一硬契约成立；`terminalRecordedExactlyOnce` 用例只断言条数。
+5. **`recordTerminal` 与 `failNow` 的幂等**：两者都走 `terminalRecorded` CAS，兜底不会补写第二条。
+
+### 11.6 门禁结果
+
+| 门禁 | 结果 |
+| --- | --- |
+| `mvn -B verify`（JDK 8） | **BUILD SUCCESS**，19 个模块，1074 个用例 |
+| `mvn -B -Dspring-boot.version=2.7.18 verify` | **BUILD SUCCESS** |
+| 公开 API（japicmp） | 随 `verify` 通过，无签名变化；`FutureSupport`、测试类为新增 |
+| 六种 HTTP 传输模块 | 各自测试全绿（含既有取消用例） |
+| JDK 21 虚拟线程模块 | 本机 JDK 8，profile 未激活，**未执行** |
+| `benchmark/qps-benchmark`（io 模式吞吐） | **未执行**；`SerialCallbackExecutor` 改为一任务一提交，建议在有条件时补一次基准 |
+| 六种传输逐一重跑 `secondRoundCancelAbortsInFlightHttp` | **未逐一执行**；新增用例在网关层用 fake transport 精确复现 OkHttp 的「complete 后迟到 unbind」时序 |
+
+### 11.7 仍待办
+
+- 第 3 节 P1 清单（超时归一化、取消 parity、NIO 线程模型、运行时配置事务与缓存）未动。
+- JDK 21 虚拟线程与六传输真机 parity 需在 CI / 对应 JDK 环境补跑。
+- F-07 的吞吐影响需基准确认。
