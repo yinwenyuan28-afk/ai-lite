@@ -138,24 +138,44 @@ public class LlmGatewayGuardTest {
         final CountDownLatch thirdDone = new CountDownLatch(1);
         carrier.submit(() -> first.set(gateway.one(call())));
         carrier.submit(() -> second.set(gateway.one(call())));
+        // 先等前两个请求真的进了传输层，再提交第三个：carrier 是普通线程池，
+        // 提交顺序不保证开始顺序，三个一起提交时「谁在闸门上等」并不确定。
+        awaitRequests(transport, 2);
         carrier.submit(() -> {
             third.set(gateway.one(call()));
             thirdDone.countDown();
         });
-        awaitRequests(transport, 2);
         // 并发=2 已占满：第三个调用在闸门上等待，不产生请求。
         Thread.sleep(150L);
         assertThat(transport.requests).hasSize(2);
         assertThat(thirdDone.getCount()).isEqualTo(1L);
 
         transport.syncGates.get(0).countDown();
-        // 第一个调用归还许可，第三个进入传输层。
+        // 在途请求归还许可，第三个进入传输层。
         awaitRequests(transport, 3);
         transport.syncGates.get(1).countDown();
         transport.syncGates.get(2).countDown();
         assertThat(thirdDone.await(5L, TimeUnit.SECONDS)).isTrue();
         assertThat(third.get().getStopReason()).isEqualTo(LlmStopReason.STOP);
-        assertThat(first.get().getStopReason()).isEqualTo(LlmStopReason.STOP);
+        // 三方的完成顺序同样与提交顺序无关，要等引用被写回再断言。
+        assertThat(awaitResult(first).getStopReason()).isEqualTo(LlmStopReason.STOP);
+        assertThat(awaitResult(second).getStopReason()).isEqualTo(LlmStopReason.STOP);
+    }
+
+    /**
+     * 等某个调用线程把结果写回引用。并发用例里 future 完成不晚于引用赋值，
+     * 但第三方线程往往先于被等待线程结束，直接读引用会读到 null。
+     */
+    private static LlmResult awaitResult(AtomicReference<LlmResult> ref) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5000L;
+        while (System.currentTimeMillis() < deadline) {
+            LlmResult value = ref.get();
+            if (value != null) {
+                return value;
+            }
+            Thread.sleep(20L);
+        }
+        throw new AssertionError("调用未在 5 秒内返回结果");
     }
 
     @Test

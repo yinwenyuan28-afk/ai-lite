@@ -65,12 +65,17 @@ public class SerialCallbackExecutorTest {
             // started 栅栏必须有：worker 是异步唤醒的，取走之前这个任务仍占着队列位，
             // 此时容量 2 只剩 1 个空位，后面的断言会随机器负载随机失败
             //（2026-10-26 CI 在负载较高的 runner 上就因此报 expected true but was false）。
+            //
+            // 阻塞不设超时：带超时的等待会在慢 runner 上提前返回，worker 腾空后
+            // 队列位重新可用，第 4 次 submit 就会返回 true（2026-11-05 CI 的
+            // expected false but was true）。锁存一定在 finally 里放开，
+            // 且 shutdownNow 会中断等待，不存在卡死风险。
             assertThat(serial.submit(new Runnable() {
                 @Override
                 public void run() {
                     started.countDown();
                     try {
-                        block.await(3L, TimeUnit.SECONDS);
+                        block.await();
                     } catch (InterruptedException ignored) {
                         Thread.currentThread().interrupt();
                     }
