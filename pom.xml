@@ -7,7 +7,7 @@
     <!-- groupId 与 GitHub 用户名对应。 -->
     <groupId>io.github.yinwenyuan28-afk</groupId>
     <artifactId>ai-lite-parent</artifactId>
-    <version>0.1.14</version>
+    <version>0.1.15</version>
     <packaging>pom</packaging>
 
     <name>AI Lite</name>
@@ -63,11 +63,11 @@
             每次正式发布后手工前移这一行（随 release 提交一起改）。
             0.1.8 发布时漏了前移，0.1.9 补上；此后每次发版都要跟着走。
 
-            当前停在 0.1.9：0.1.10 的 bundle 已上传到 Central Portal 但还没手动
-            Publish，中央仓库里取不到 0.1.10 的 jar。等 0.1.10 真正发布后再前移，
-            否则 -Pcontract-check 会在离线/镜像未同步时假失败。
+            当前停在 0.1.14：Central 上已核实 0.1.12 / 0.1.13 / 0.1.14 均可下载
+            （0.1.10 与 0.1.11 的 bundle 只上传到 Portal 未 Publish，取不到 jar）。
+            0.1.15 发布后再前移到 0.1.15。
         -->
-        <ai-lite.release.version>0.1.9</ai-lite.release.version>
+        <ai-lite.release.version>0.1.14</ai-lite.release.version>
     </properties>
 
     <modules>

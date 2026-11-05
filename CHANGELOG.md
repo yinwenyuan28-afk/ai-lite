@@ -3,7 +3,7 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
-## [0.1.15] - 未发布
+## [0.1.15] - 2026-11-05
 
 ### 升级必读
 
@@ -73,7 +73,6 @@
 ### 已知限制
 
 - `headers` 里的 `Authorization` 与 `Content-Type` 由库管理，不允许覆盖。非 Bearer 认证方式暂无配置入口。
-- 两级 `extra-body` 之间是顶层按键覆盖（嵌套对象整块替换），而 `extra-body` 与单次调用的 `extraBody` 之间是递归深合并。这个不一致在 0.1.15 之前就存在，本次未改。
 
 ## [0.1.14] - 2026-10-30
 
