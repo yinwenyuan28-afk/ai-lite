@@ -64,7 +64,9 @@ object LlmCoroutines {
                 throw RetrySupport.deadlineFailure(failures)
             }
             try {
-                return gateway.oneAsync(call, cancel).await()
+                // 每次尝试一份独立句柄，外层取消经 abort 槽转发；避免上一轮
+                // 传输的迟到解绑擦掉下一轮的中断动作（F-03）。
+                return gateway.oneAsync(call, freshAttemptCancel(cancel)).await()
             } catch (ex: LlmCallException) {
                 failures.add(ex)
                 if (!policy.shouldRetry(ex) || attempt >= policy.maxAttempts) {
@@ -127,4 +129,17 @@ object LlmCoroutines {
     fun oneAsync(gateway: LlmGateway, call: LlmCall,
                  cancel: LlmCancelHandle? = null): CompletableFuture<LlmResult> =
         gateway.oneAsync(call, cancel)
+
+    private fun freshAttemptCancel(outer: LlmCancelHandle?): LlmCancelHandle? {
+        if (outer == null) {
+            return null
+        }
+        val fresh = LlmCancelHandle()
+        // 外层取消 → 当前尝试的句柄。
+        outer.bindAbort { fresh.cancel() }
+        // 反向传播：Job 取消 / 网关收敛让本次尝试的句柄被取消时，外层句柄也要
+        // 进入取消态，循环开头的 isCancelled 检查才能拦住后续尝试（L2 契约）。
+        fresh.onCancel { outer.cancel() }
+        return fresh
+    }
 }

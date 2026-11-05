@@ -11,6 +11,7 @@ import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
 import io.github.yinwenyuan28.ailite.llm.LlmDeltaSink;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
 import io.github.yinwenyuan28.ailite.llm.LlmMessage;
+import io.github.yinwenyuan28.ailite.internal.llm.FutureSupport;
 import io.github.yinwenyuan28.ailite.llm.LlmResult;
 import io.github.yinwenyuan28.ailite.llm.LlmStopReason;
 import io.github.yinwenyuan28.ailite.llm.LlmTool;
@@ -893,7 +894,8 @@ public final class AgentLoop {
                 throw new LlmCallException("roundAsync 返回了空 future");
             }
             waitingModel = true;
-            future.whenComplete((value, error) -> onRoundDone(value, error));
+            FutureSupport.safeWhenComplete(future,
+                    (value, error) -> onRoundDone(value, error), this::convergeFailure);
         }
 
         /** 模型轮完成回调：只写结果槽并唤醒泵。 */
@@ -919,7 +921,8 @@ public final class AgentLoop {
                 waitingTools = false;
                 throw ex;
             }
-            toolsFuture.whenComplete((ignored, toolError) -> onToolsDone(toolError));
+            FutureSupport.safeWhenComplete(toolsFuture,
+                    (ignored, toolError) -> onToolsDone(toolError), this::convergeFailure);
         }
 
         /** 工具批次完成回调：只写结果槽并唤醒泵。 */

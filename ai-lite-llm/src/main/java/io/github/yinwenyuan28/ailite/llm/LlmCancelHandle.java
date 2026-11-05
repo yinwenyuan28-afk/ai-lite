@@ -35,8 +35,12 @@ public final class LlmCancelHandle {
         if (!cancelled.compareAndSet(false, true)) {
             return;
         }
-        runAbort();
-        runCancelListeners();
+        try {
+            runAbort();
+        } finally {
+            // abort 动作抛异常也不能跳过监听器：网关靠监听器收敛挂起的 future（F-16）。
+            runCancelListeners();
+        }
     }
 
     /**
@@ -79,7 +83,8 @@ public final class LlmCancelHandle {
                 }
                 try {
                     listener.run();
-                } catch (RuntimeException ex) {
+                } catch (Throwable ex) {
+                    // Error 也不能中断后续监听器（含网关的终态收敛器）。
                     log.warn("取消监听器异常，已忽略: {}", ex.toString());
                 }
             }
@@ -96,11 +101,16 @@ public final class LlmCancelHandle {
     private void runAbort() {
         Runnable action = abort;
         if (action != null && aborted.compareAndSet(false, true)) {
-            action.run();
+            try {
+                action.run();
+            } catch (Throwable ex) {
+                // 传输层的中断动作可能抛 Error；不能让它越过 cancel() 的 finally。
+                log.warn("取消 abort 动作异常，已忽略: {}", ex.toString());
+            }
         }
     }
 
-    /** 逐个执行监听器；guarded 包装保证每个恰好一次。 */
+    /** 逐个执行监听器；guarded 包装保证每个恰好一次且互不阻断。 */
     private void runCancelListeners() {
         for (Runnable listener : cancelListeners) {
             listener.run();

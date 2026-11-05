@@ -28,6 +28,7 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeout
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Test
 import java.util.ArrayDeque
 import java.util.Collections
@@ -74,7 +75,14 @@ class LlmCoroutinesParityTest {
 
         assertThat(result.content).isEqualTo("ok")
         assertThat(transport.requests).hasSize(1)
-        assertThat(transport.requests[0].cancel).isSameAs(handle)
+        // 网关把每次真实 HTTP 请求绑定到自己的一次性句柄（F-03），外层只做转发。
+        val roundCancel = transport.requests[0].cancel
+        assertThat(roundCancel).isNotSameAs(handle)
+        val aborted = AtomicBoolean(false)
+        roundCancel.bindAbort { aborted.set(true) }
+        handle.cancel()
+        assertThat(roundCancel.isCancelled).isTrue
+        assertThat(aborted).isTrue
         assertThat(transport.requests[0].messages).hasSize(1)
         assertThat(transport.requests[0].isStream).isFalse()
     }

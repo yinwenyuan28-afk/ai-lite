@@ -19,6 +19,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -89,7 +90,7 @@ public class LlmSingleCallEntryParityTest {
     }
 
     @Test
-    public void explicitCancelHandleIsPassedThroughUnchanged() throws Exception {
+    public void explicitCancelHandleIsForwardedToRoundHandle() throws Exception {
         LlmCancelHandle handle = new LlmCancelHandle();
         ParityTransport syncTransport = new ParityTransport().enqueue(stop("ok"));
         ParityTransport asyncTransport = new ParityTransport().enqueue(stop("ok"));
@@ -97,8 +98,23 @@ public class LlmSingleCallEntryParityTest {
         gateway(syncTransport).one(call(), handle);
         gateway(asyncTransport).oneAsync(call(), handle).get(5, TimeUnit.SECONDS);
 
+        // 同步入口仍把句柄原封不动交给传输层。
         assertThat(syncTransport.requests.get(0).getCancel()).isSameAs(handle);
-        assertThat(asyncTransport.requests.get(0).getCancel()).isSameAs(handle);
+        // 异步入口：外层句柄只做转发，传输层拿到的是本轮的一次性句柄（F-03）。
+        LlmCancelHandle roundHandle = asyncTransport.requests.get(0).getCancel();
+        assertThat(roundHandle).isNotSameAs(handle);
+
+        // 但外层取消必须真的传导到这一轮的句柄，不能只是"看起来取消了"。
+        final AtomicBoolean aborted = new AtomicBoolean();
+        roundHandle.bindAbort(new Runnable() {
+            @Override
+            public void run() {
+                aborted.set(true);
+            }
+        });
+        handle.cancel();
+        assertThat(roundHandle.isCancelled()).isTrue();
+        assertThat(aborted).isTrue();
     }
 
     @Test

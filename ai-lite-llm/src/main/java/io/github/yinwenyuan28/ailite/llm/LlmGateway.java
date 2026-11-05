@@ -5,6 +5,7 @@ import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.guard.ProviderGuard;
 import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.internal.llm.AsyncLlmCallLogger;
+import io.github.yinwenyuan28.ailite.internal.llm.FutureSupport;
 import io.github.yinwenyuan28.ailite.internal.llm.RetryScheduler;
 import io.github.yinwenyuan28.ailite.internal.llm.RetrySupport;
 import io.github.yinwenyuan28.ailite.util.Strings;
@@ -172,8 +173,9 @@ public final class LlmGateway {
     /**
      * 问一次，并按策略重试瞬时错误，同时支持外部取消。
      *
-     * <p>同一个取消句柄贯穿所有尝试；退避等待可被取消打断。取消后不再发起新的
-     * HTTP 请求，返回规范的 {@code ABORTED} 结果。</p>
+     * <p>外层取消句柄只做转发：每次尝试使用一份独立的一次性句柄，避免上一轮
+     * 传输解绑污染下一轮。退避等待可被取消打断；取消后不再发起新的 HTTP 请求，
+     * 返回规范的 {@code ABORTED} 结果。</p>
      *
      * @param call   调用参数
      * @param policy 重试策略
@@ -195,7 +197,7 @@ public final class LlmGateway {
                 throw RetrySupport.deadlineFailure(failures);
             }
             try {
-                return one(call, cancel);
+                return one(call, freshAttemptCancel(cancel));
             } catch (LlmCallException ex) {
                 failures.add(ex);
                 if (!policy.shouldRetry(ex) || attempt >= policy.getMaxAttempts()) {
@@ -714,29 +716,34 @@ public final class LlmGateway {
         if (executeTools && limit <= 0) {
             throw new LlmCallException("最大轮数必须大于 0");
         }
-        // 即使调用方没有显式传取消句柄，也要让 future.cancel 能中断底层 HTTP。
-        final LlmCancelHandle effectiveCancel = cancel == null ? new LlmCancelHandle() : cancel;
+        // 外层句柄只做转发器：每次真实 HTTP 请求用自己的一次性句柄（F-03）。
+        // 不再往外层注册 onCancel 监听器 —— 多轮调用会让监听器随轮次累积。
+        final LlmCancelHandle outerCancel = cancel == null ? new LlmCancelHandle() : cancel;
         // 回调策略 Phase 2：mode=io 且流式时，per-call 串行执行器承接 onDelta 与完成屏障。
         final SerialCallbackExecutor callbackBarrier =
                 (stream && onDelta != null && callbackPolicy.isIo())
                         ? callbackPolicy.newSerialExecutor() : null;
-        AsyncRun run = new AsyncRun(call, bizId, model, transcript, tools, declareTools,
-                executeTools, limit, stream, onDelta, effectiveCancel, callbackBarrier);
-        // AL-H05：非合作 transport 不 bindAbort 时 cancel 无法唤醒挂起的 future；
-        // 取消监听器在取消方线程主动收敛。句柄是 one-shot 生命周期，无需显式解绑。
-        effectiveCancel.onCancel(new Runnable() {
+        final AsyncRun run = new AsyncRun(call, bizId, model, transcript, tools, declareTools,
+                executeTools, limit, stream, onDelta, outerCancel, callbackBarrier);
+        outerCancel.bindAbort(new Runnable() {
             @Override
             public void run() {
+                LlmCancelHandle current = run.inFlightCancel();
+                if (current != null) {
+                    // 只取消"当前在途轮"的句柄：上一轮迟到的 unbind 碰不到它。
+                    current.cancel();
+                }
+                // 轮次间隙（没有在途轮）也要立即收敛，不能只靠传输层配合。
                 run.cancelledByListener();
             }
         });
-        run.result.whenComplete((value, error) -> {
+        FutureSupport.safeWhenComplete(run.result, (value, error) -> {
             if (run.result.isCancelled()) {
                 // future.cancel(true) 不是终态：底层要 abort，调用记录也要留下一条 aborted。
-                effectiveCancel.cancel();
+                outerCancel.cancel();
                 run.cancelledByFuture();
             }
-        });
+        }, failure -> run.result.completeExceptionally(failure));
         run.next();
         return run.result;
     }
@@ -786,12 +793,12 @@ public final class LlmGateway {
                 // 只绑定一次；每次尝试用自己的新句柄，避免覆盖这个代理。
                 outerCancel.bindAbort(this::cancelFromOuter);
             }
-            result.whenComplete((value, error) -> {
+            FutureSupport.safeWhenComplete(result, (value, error) -> {
                 if (result.isCancelled()) {
                     // CompletableFuture 没有 onCancel 回调，只能在这里收口。
                     abandonFromFuture();
                 }
-            });
+            }, failure -> result.completeExceptionally(failure));
             try {
                 startAttempt();
             } catch (RuntimeException ex) {
@@ -823,7 +830,8 @@ public final class LlmGateway {
                     // 先赋值再注册回调：oneAsync 可能同步完成，回调不能看到旧引用。
                     CompletableFuture<LlmResult> attemptFuture = oneAsync(call, attemptCancel);
                     currentAttemptFuture = attemptFuture;
-                    attemptFuture.whenComplete(this::onAttemptComplete);
+                    FutureSupport.safeWhenComplete(attemptFuture, this::onAttemptComplete,
+                            this::convergeFailure);
                 }
             }
             if (deadlineFailure != null) {
@@ -1152,6 +1160,12 @@ public final class LlmGateway {
          */
         private final java.util.concurrent.atomic.AtomicReference<ProviderGuard.Permit> inFlightPermit =
                 new java.util.concurrent.atomic.AtomicReference<ProviderGuard.Permit>();
+        /**
+         * 当前在途轮次的一次性取消句柄（F-03）。外层句柄只转发到它；每轮 startRound
+         * 覆盖一次。保留到 run 结束也不解绑，避免"轮次间隙取消打空"。
+         */
+        private final java.util.concurrent.atomic.AtomicReference<LlmCancelHandle> inFlightCancel =
+                new java.util.concurrent.atomic.AtomicReference<LlmCancelHandle>();
 
         private volatile int completed;
         private LlmCompletion last;
@@ -1184,9 +1198,9 @@ public final class LlmGateway {
                             public void run() {
                                 try {
                                     user.accept(delta);
-                                } catch (RuntimeException ex) {
-                                    // 回调异常按 OVERLOAD 之外的语义收敛：异常完成 + abort 传输。
-                                    failBarrier(new LlmCallException("onDelta 回调失败", ex));
+                                } catch (Throwable ex) {
+                                    // Error 也不能漏；失败终态直接抢占，不排队（F-15）。
+                                    failNow(new LlmCallException("onDelta 回调失败", ex));
                                 }
                             }
                         });
@@ -1198,6 +1212,11 @@ public final class LlmGateway {
             } else {
                 this.onDelta = onDelta;
             }
+        }
+
+        /** 外层转发器取当前在途轮的句柄；可能为 null（尚未发请求或轮次间隙）。 */
+        private LlmCancelHandle inFlightCancel() {
+            return inFlightCancel.get();
         }
 
         /**
@@ -1242,6 +1261,30 @@ public final class LlmGateway {
             }
         }
 
+        /**
+         * 失败终态直接抢占，不经过 io 队列（F-15）：完成屏障的 {@code close()} 会清空
+         * 排在它后面的 {@code failBarrier} 任务，入队式失败收敛可能被吞成"成功"。
+         */
+        private void failNow(Throwable error) {
+            try {
+                recordTerminal(attempt, completed == 0 ? 0 : completed,
+                        LlmStopReason.ERROR, 0, 0L,
+                        brief(error.getMessage(), attempt.model.getApiKey()));
+            } catch (Throwable ignored) {
+                log.warn("终态记录失败，仍继续收敛 future");
+            }
+            abandonInFlightPermit();
+            result.completeExceptionally(error);
+        }
+
+        /**
+         * F-01 统一兜底：{@code whenComplete} 回调体在任何位置抛异常时，
+         * 把异常翻译成一次终态收敛，绝不让 result 永久挂起。
+         */
+        private void convergeUnexpected(LlmCallException failure) {
+            failNow(failure);
+        }
+
         /** 收敛兜底路径归还许可：不采样（传输结局未知/被取消），幂等。 */
         private void abandonInFlightPermit() {
             ProviderGuard.Permit permit = inFlightPermit.getAndSet(null);
@@ -1270,13 +1313,20 @@ public final class LlmGateway {
          * result，调用方不再永久挂起；result 已完成时是 no-op，与正常完成路径无竞态。
          */
         private void cancelledByListener() {
-            if (result.isDone()) {
-                return;
+            try {
+                if (result.isDone()) {
+                    return;
+                }
+                recordTerminal(attempt, completed == 0 ? 0 : completed,
+                        LlmStopReason.ABORTED, 0, 0L, null);
+                completeBarrier(result(attempt, last, LlmStopReason.ABORTED, completed));
+                abandonInFlightPermit();
+            } catch (Throwable t) {
+                // 取消路径本身也不能挂：直接抢占终态，不再依赖完成屏障入队。
+                log.warn("取消收敛异常，直接异常完成: {}", t.toString());
+                abandonInFlightPermit();
+                result.completeExceptionally(FutureSupport.wrap(t));
             }
-            recordTerminal(attempt, completed == 0 ? 0 : completed,
-                    LlmStopReason.ABORTED, 0, 0L, null);
-            completeBarrier(result(attempt, last, LlmStopReason.ABORTED, completed));
-            abandonInFlightPermit();
         }
 
         private void next() {
@@ -1340,8 +1390,23 @@ public final class LlmGateway {
                 completeBarrier(result(attempt, last, LlmStopReason.ABORTED, completed));
                 return;
             }
+            // 每次真实 HTTP 请求一个 fresh 句柄（F-03）：传输层的 bindAbort / 迟到
+            // unbind 都只落在本轮句柄上，碰不到下一轮。监听器随该轮句柄回收。
+            final LlmCancelHandle roundCancel = new LlmCancelHandle();
+            roundCancel.onCancel(new Runnable() {
+                @Override
+                public void run() {
+                    cancelledByListener();
+                }
+            });
+            inFlightCancel.set(roundCancel);
+            if (cancel != null && cancel.isCancelled()) {
+                // 取消恰好落在入口检查与绑定之间：本轮不再发请求，直接收敛。
+                roundCancel.cancel();
+                return;
+            }
             final LlmRequest request = new LlmRequest(model, transcript, declareTools ? tools : null,
-                    stream, onDelta, cancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(),
+                    stream, onDelta, roundCancel, call.getConnectTimeoutMs(), call.getReadTimeoutMs(),
                     call.getExtraBody(), call.getMaxTokens());
             final long started = System.currentTimeMillis();
             CompletableFuture<LlmCompletion> future;
@@ -1368,7 +1433,7 @@ public final class LlmGateway {
                 fail(nullFuture, round, System.currentTimeMillis() - started);
                 return;
             }
-            future.whenComplete((completion, error) -> {
+            FutureSupport.safeWhenComplete(future, (completion, error) -> {
                 // 释放锚点在 isDone 早退判断之前（审查 F1）：先按本轮传输结局采样并
                 // 归还许可，再判断终态——否则"取消先收敛、在途轮次后完成"会漏释放。
                 if (permit != null) {
@@ -1433,7 +1498,7 @@ public final class LlmGateway {
                     fail(new LlmCallException("工具执行器返回了空 future"), round, latency);
                     return;
                 }
-                toolFuture.whenComplete((results, toolError) -> {
+                FutureSupport.safeWhenComplete(toolFuture, (results, toolError) -> {
                     if (result.isDone()) {
                         return;
                     }
@@ -1463,8 +1528,8 @@ public final class LlmGateway {
                         // 工具结果处理异常不能落在回调线程里导致 future 永不完成。
                         fail(new LlmCallException("工具结果处理失败", ex), round, latency);
                     }
-                });
-            });
+                }, this::convergeUnexpected);
+            }, this::convergeUnexpected);
         }
 
         private void fail(Throwable cause, int round, long latency) {
@@ -1486,9 +1551,14 @@ public final class LlmGateway {
          * future 被调用方取消时补一条记录。终态已被取消，不能再 complete 结果。
          */
         private void cancelledByFuture() {
-            recordTerminal(attempt, completed == 0 ? 0 : completed,
-                    LlmStopReason.ABORTED, 0, 0L, null);
-            abandonInFlightPermit();
+            try {
+                recordTerminal(attempt, completed == 0 ? 0 : completed,
+                        LlmStopReason.ABORTED, 0, 0L, null);
+            } catch (Throwable t) {
+                log.warn("取消后的终态记录失败: {}", t.toString());
+            } finally {
+                abandonInFlightPermit();
+            }
         }
 
         /**
@@ -1513,6 +1583,24 @@ public final class LlmGateway {
     private LlmResult invoke(LlmCall call, List<LlmTool> tools, Integer maxRounds, int mode,
                              boolean stream, Consumer<String> onDelta, LlmCancelHandle cancel) {
         return invoke(call, tools, maxRounds, mode, stream, onDelta, cancel, null);
+    }
+
+    /**
+     * 同步重试的每次尝试一份独立句柄；外层取消经 abort 槽转发进来。
+     * 复用同一个句柄会让上一轮传输的迟到解绑擦掉下一轮的中断动作（F-03）。
+     */
+    private static LlmCancelHandle freshAttemptCancel(final LlmCancelHandle outer) {
+        if (outer == null) {
+            return null;
+        }
+        final LlmCancelHandle fresh = new LlmCancelHandle();
+        outer.bindAbort(new Runnable() {
+            @Override
+            public void run() {
+                fresh.cancel();
+            }
+        });
+        return fresh;
     }
 
     /**
@@ -1762,26 +1850,45 @@ public final class LlmGateway {
     private void record(Attempt attempt, int round, LlmStopReason stop, int success,
                         long latencyMs, String error) {
         LlmCallRecord row = new LlmCallRecord();
-        row.setBizId(attempt.bizId);
-        row.setProvider(attempt.model.getProvider());
-        row.setModelId(attempt.model.getModelId());
-        row.setApi(attempt.model.getApi());
-        row.setProfile(attempt.profile);
-        row.setThinkingLevel(attempt.model.getThinkingLevel().wire());
-        row.setRoundNo(Integer.valueOf(round));
-        row.setInputTokens(Integer.valueOf(attempt.input));
-        row.setOutputTokens(Integer.valueOf(attempt.output));
-        row.setTotalTokens(Integer.valueOf(attempt.total));
-        row.setLatencyMs(Long.valueOf(latencyMs));
-        row.setStopReason(stop.wire());
-        row.setSuccess(Integer.valueOf(success));
-        row.setErrorBrief(brief(error, attempt.model.getApiKey()));
-        String level = callBodyPolicy == null ? CallBodyPolicy.NONE : callBodyPolicy.level();
-        if (CallBodyPolicy.store(level, success)) {
-            row.setInputBody(CallBodyText.input(attempt.transcript, attempt.model.getApiKey()));
-            row.setOutputBody(CallBodyText.output(attempt.completion, attempt.model.getApiKey()));
+        try {
+            row.setBizId(attempt.bizId);
+            row.setProvider(attempt.model.getProvider());
+            row.setModelId(attempt.model.getModelId());
+            row.setApi(attempt.model.getApi());
+            row.setProfile(attempt.profile);
+            row.setThinkingLevel(attempt.model.getThinkingLevel().wire());
+            row.setRoundNo(Integer.valueOf(round));
+            row.setInputTokens(Integer.valueOf(attempt.input));
+            row.setOutputTokens(Integer.valueOf(attempt.output));
+            row.setTotalTokens(Integer.valueOf(attempt.total));
+            row.setLatencyMs(Long.valueOf(latencyMs));
+            row.setStopReason(stop.wire());
+            row.setSuccess(Integer.valueOf(success));
+            row.setErrorBrief(brief(error, attempt.model.getApiKey()));
+            String level = callBodyPolicy == null ? CallBodyPolicy.NONE : callBodyPolicy.level();
+            if (CallBodyPolicy.store(level, success)) {
+                try {
+                    // F-08：取消线程读 transcript 时，传输线程可能正在追加消息。
+                    // 记录时做一次防御性复制；正文生成失败只降级为空正文，不影响调用结果。
+                    List<LlmMessage> snapshot;
+                    try {
+                        snapshot = new ArrayList<LlmMessage>(attempt.transcript);
+                    } catch (Throwable copyFailure) {
+                        snapshot = Collections.<LlmMessage>emptyList();
+                    }
+                    row.setInputBody(CallBodyText.input(snapshot, attempt.model.getApiKey()));
+                    row.setOutputBody(CallBodyText.output(
+                            attempt.completion, attempt.model.getApiKey()));
+                } catch (Throwable bodyFailure) {
+                    log.warn("调用正文生成失败，按空正文记录: {}", bodyFailure.toString());
+                    row.setInputBody(null);
+                    row.setOutputBody(null);
+                }
+            }
+        } finally {
+            // 扩展点抛异常也要留下恰好一条终态记录；异常继续冒泡，由 safeWhenComplete 收敛。
+            logger.record(row);
         }
-        logger.record(row);
     }
 
     static String brief(String message, String apiKey) {
@@ -1799,12 +1906,13 @@ public final class LlmGateway {
         private final String bizId;
         private final ResolvedModel model;
         private final String profile;
-        private int input;
-        private int output;
-        private int total;
-        private long latencyMs;
-        private List<LlmMessage> transcript = Collections.emptyList();
-        private LlmCompletion completion;
+        // 传输线程写、取消线程读（F-08）：volatile 保证可见性，单次读写本身是原子的。
+        private volatile int input;
+        private volatile int output;
+        private volatile int total;
+        private volatile long latencyMs;
+        private volatile List<LlmMessage> transcript = Collections.emptyList();
+        private volatile LlmCompletion completion;
 
         private Attempt(String bizId, ResolvedModel model, String profile) {
             this.bizId = bizId;

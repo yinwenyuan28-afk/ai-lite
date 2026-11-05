@@ -75,6 +75,37 @@ public class LlmCancelHandleListenerTest {
     }
 
     @Test
+    public void listenerErrorIsSwallowedAndOthersStillRun() throws Exception {
+        // F-16：监听器抛 Error 时后续监听器（含网关的终态收敛器）仍须执行。
+        LlmCancelHandle handle = new LlmCancelHandle();
+        CountDownLatch second = new CountDownLatch(1);
+        handle.onCancel(() -> {
+            throw new AssertionError("listener error");
+        });
+        handle.onCancel(second::countDown);
+
+        handle.cancel();
+
+        assertThat(second.await(1L, TimeUnit.SECONDS)).isTrue();
+    }
+
+    @Test
+    public void abortFailureDoesNotSkipCancelListeners() {
+        // F-16：abort 动作抛 Error 不能越过 cancel() 的 finally，否则 future 永挂。
+        LlmCancelHandle handle = new LlmCancelHandle();
+        handle.bindAbort(() -> {
+            throw new AssertionError("abort error");
+        });
+        AtomicInteger listener = new AtomicInteger();
+        handle.onCancel(listener::incrementAndGet);
+
+        handle.cancel();
+
+        assertThat(listener.get()).isEqualTo(1);
+        assertThat(handle.isCancelled()).isTrue();
+    }
+
+    @Test
     public void abortBindingStillRunsOnceAfterCancelWithListeners() {
         LlmCancelHandle handle = new LlmCancelHandle();
         AtomicInteger listener = new AtomicInteger();

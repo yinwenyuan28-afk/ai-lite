@@ -33,6 +33,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import io.github.yinwenyuan28.ailite.internal.llm.FutureSupport;
 import io.github.yinwenyuan28.ailite.internal.session.AgentSessionStoreSupport;
 import io.github.yinwenyuan28.ailite.internal.session.ContextBudget;
 import io.github.yinwenyuan28.ailite.internal.session.SessionCompactor;
@@ -297,7 +298,7 @@ public final class AgentSessionLoop {
                         return inner;
                     }
                 }, executor.io());
-        future.whenComplete((value, error) -> {
+        FutureSupport.safeWhenComplete(future, (value, error) -> {
             if (future.isCancelled()) {
                 outerCancelled.set(true);
                 effectiveCancel.cancel();
@@ -308,7 +309,7 @@ public final class AgentSessionLoop {
                     inner.cancel(true);
                 }
             }
-        });
+        }, failure -> future.completeExceptionally(failure));
         return future;
     }
 
