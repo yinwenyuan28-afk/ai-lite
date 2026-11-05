@@ -117,6 +117,26 @@
 
 ---
 
+## 7. 回调执行（流式与 Agent 钩子）
+
+这一组说的是同一件事的四个角色：`onDelta` 是**要执行的任务** → `callback.mode` 决定**在哪条线程执行** → `SerialCallbackExecutor` 是 io 模式下的**排队装置** → 完成屏障保证**结果不早于增量到达**。第 2 节的「回调」是泛指，第 5 节的「per-call 串行执行器」就是本节的 `SerialCallbackExecutor`，第 6 节的「增量（delta）」是 `onDelta` 收到的内容。
+
+| 术语 | 人话 |
+| --- | --- |
+| `onDelta` | 你传给 `oneByStream*` 的 `Consumer<String>`。模型每吐一小段文字就调你一次，参数只有那一小段，不是累积全文；不传就不逐段处理，只看拼好的 `LlmResult` |
+| 回调策略（`CallbackPolicy`） | 决定「用户 `onDelta` 和 Agent 钩子在哪条线程跑」的策略对象，只有 `inline` / `io` 两种 |
+| `callback.mode=inline` | 默认。回调就地跑在触发它的线程上（常是传输线程），零开销；慢回调会卡住共享 I/O 线程 |
+| `callback.mode=io` | 把回调挪到独立的 `ai-lite-callback-*` 线程池。**只对异步入口生效**，同步的 `oneByStream(...)` 恒 inline |
+| 回调池（`ai-lite-callback-*`） | io 模式专用的独立线程池（默认 core 2 / max 8）。不复用 `io()`，免得慢钩子占满工具/日志线程 |
+| 串行回调执行器（`SerialCallbackExecutor`） | io 模式下**每次调用新建一个**的排队装置：一个 FIFO 队列 + 一个 `running` 标志，只向回调池提交一个工人。不是线程池 |
+| 单 in-flight | 「同一时刻最多跑一个任务」的契约。回调因此严格按序、互不并发，用户代码不用加锁 |
+| 完成屏障 | 排在队列末尾、负责 `result.complete(...)` 的那个任务。保证调用方拿到结果时所有 delta 都已回调完 |
+| 回调队列上限 | io 模式下每次调用的队列容量（默认 1024，`ai-lite.callback.queue-capacity`）。满了 `submit()` 返回 false，网关按 OVERLOAD 收敛，不无限吃内存 |
+
+> 一句话记法：**`onDelta` 是活，`callback.mode` 选地方，`SerialCallbackExecutor` 是队伍，完成屏障是收工那一下。**
+
+---
+
 ## 相关文档
 
 - [架构总览](desc-架构总览.md)——全景与分层地图
@@ -124,3 +144,5 @@
 - [上下文治理](desc-上下文治理.md)——投影、预算与压缩的完整规则
 - [用户级线程实现说明](desc-用户级线程.md)——协程/虚拟线程的实现细节
 - [上层调用API使用指南](guide-上层调用API.md)——入门与全层 API 字典
+- [配置参考](ref-配置.md)——`ai-lite.callback.*` 等全部配置字段
+- [HTTP 传输层原理](desc-HTTP传输.md)——流式契约与传输线程模型
