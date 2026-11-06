@@ -110,9 +110,11 @@ public final class LlmGateway {
         this.executor = executor == null ? new DirectExecutorProvider() : executor;
         // 但记录不能跟着内联（F-14）：内联会把 JDBC 落库跑在 transport 的回调线程上
         // （生产环境是 OkHttp dispatcher 线程），一次慢插入阻塞该线程上的其他响应。
-        // 判断依据是「执行器是不是内联的」而不是「有没有传」——手工构造时调用方
-        // 常显式传 DirectExecutorProvider，那同样是内联。Starter 注入的是真实线程池，
-        // 走 else 分支，保持可配置性。
+        //
+        // 判断依据是「执行器是不是内联的」而不是「有没有传执行器」——手工构造时调用方
+        // 常显式传 DirectExecutorProvider，那同样是内联；Starter 配
+        // ai-lite.executor.mode=direct 时也是。只有真实线程池（Starter 默认
+        // mode=platform 等）才走 else 分支，保持记录与业务共用一个可配置的池。
         this.logger = isInline(this.executor)
                 ? new AsyncLlmCallLogger(CallLogExecutors.shared(), store, true)
                 : new AsyncLlmCallLogger(this.executor, store);

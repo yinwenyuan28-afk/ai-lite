@@ -138,6 +138,35 @@ public class CallLoggerThreadingTest {
     }
 
     /**
+     * 执行器传 null（退化为内联）：记录同样不能内联。
+     *
+     * <p>这条和上面显式传 {@code DirectExecutorProvider} 的是两个不同入口，
+     * 原来只覆盖了后者。传 null 等价于「调用方没指定执行器」。</p>
+     */
+    @Test
+    public void nullExecutorRecordsOffCallerThread() throws Exception {
+        ThreadRecordingStore store = new ThreadRecordingStore();
+        // 执行器传 null：构造器内部退化为 DirectExecutorProvider。
+        LlmGateway gateway = new LlmGateway(GatewayTestSupport.resolver("key"),
+                Collections.singletonList(instantTransport()), store,
+                null, new SequentialToolExecutor());
+
+        String callerThread = Thread.currentThread().getName();
+        gateway.oneAsync(LlmCall.profile("biz", "main", MESSAGES))
+                .get(5, TimeUnit.SECONDS);
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (store.rows.get() == 0 && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
+        assertThat(store.rows.get()).isGreaterThanOrEqualTo(1);
+        assertThat(store.threads)
+                .as("执行器传 null 时也不应在调用线程上写记录")
+                .isNotEmpty()
+                .allSatisfy(name -> assertThat(name).isNotEqualTo(callerThread));
+    }
+
+    /**
      * NoopStore 也不该在调用线程上白跑一遍（保持行为一致）。
      */
     @Test

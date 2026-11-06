@@ -27,12 +27,22 @@
 > 配成 `true` 但容器里没有 `StringRedisTemplate` 会**启动失败**——不退回进程内锁，
 > 那样用户以为防住了、实际每个节点各锁各的。
 >
-> **4. 手工构造 `LlmGateway` 时，调用记录不再内联写入。**
-> 以前默认执行器是内联的，`store.insert` 就在 transport 的回调线程（生产环境是
-> OkHttp dispatcher 线程）上跑，一次慢 JDBC 插入会阻塞该线程上的其他响应。
-> 现在内联执行器下记录改走进程级共享池 `ai-lite-call-log-*`（daemon、有界 4096，
-> 满了丢记录并打 WARN）。**如果代码里假设「`one()` 返回时记录已经写入」，需要改成等待。**
-> Starter 装配（注入真实线程池）行为不变。
+> **4. 执行器为内联时，调用记录不再内联写入。**
+>
+> 受影响的是「执行器是 `DirectExecutorProvider`」的所有情况，不只是手工构造：
+>
+> - 手工构造 `LlmGateway` 时执行器传 `null`（默认退化为内联）；
+> - 手工构造时显式传 `DirectExecutorProvider`；
+> - 用 Starter 但配了 `ai-lite.executor.mode=direct`。
+>
+> 以前这几种情况下 `store.insert` 是同步执行的，落库就在 transport 的回调线程
+> （生产环境是 OkHttp dispatcher 线程）上跑，一次慢 JDBC 插入会阻塞该线程上的
+> 其他响应。现在改走进程级共享池 `ai-lite-call-log-*`（daemon、有界 4096，
+> 满了丢记录并打 WARN）。
+>
+> **只有「`one()` 返回后立刻去查那一行记录」的代码需要改**，改成轮询等待。
+> 执行器是真实线程池的场景（Starter 默认 `mode=platform`）**本来就不保证**
+> `one()` 返回时记录已写入，行为与升级前完全一致，不需要改。
 
 ### 修复
 
