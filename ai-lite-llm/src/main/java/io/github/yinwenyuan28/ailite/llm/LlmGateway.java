@@ -1373,6 +1373,10 @@ public final class LlmGateway {
          * done 为 no-op，但 bindAbort 的传输中断仍触发。
          */
         private void failOverload() {
+            // 终态已定：先关掉回调通道，清掉队列里还没执行的 delta（F-04）。
+            // 这几条路径不走 completeBarrier，若不在占住终态前 close，
+            // 排队中的 delta 会在 future 已失败之后继续回调给用户。
+            closeBarrier();
             recordTerminal(attempt, completed == 0 ? 0 : completed,
                     LlmStopReason.ERROR, 0, 0L, "回调队列已满");
             result.completeExceptionally(new LlmCallException("回调队列已满",
@@ -1380,6 +1384,16 @@ public final class LlmGateway {
             cancel.cancel();
             // 不合作传输的 future 可能永不完成，whenComplete 释放锚点等不到。
             abandonInFlightPermit();
+        }
+
+        /**
+         * 关闭完成屏障（若存在）。关闭后 {@link #submit} 一律返回 false，
+         * 队列里的未执行任务同时被清空——这正是「终态之后不再冒字」的实现点。
+         */
+        private void closeBarrier() {
+            if (barrier != null) {
+                barrier.close();
+            }
         }
 
         /**
@@ -1667,6 +1681,10 @@ public final class LlmGateway {
          * future 被调用方取消时补一条记录。终态已被取消，不能再 complete 结果。
          */
         private void cancelledByFuture() {
+            // 取消是终态：关掉回调通道，丢掉还没执行的 delta（F-04）。
+            // 这条路径不经过 completeBarrier，不在这里 close 的话，
+            // 队列里的 delta 会在 future 已取消之后继续回调给用户。
+            closeBarrier();
             try {
                 recordTerminal(attempt, completed == 0 ? 0 : completed,
                         LlmStopReason.ABORTED, 0, 0L, null);
