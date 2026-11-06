@@ -1487,7 +1487,7 @@ public final class AgentLoop {
                 if (!anyAllowed) {
                     return CompletableFuture.completedFuture(null);
                 }
-                return convergeFailFast(futures).thenApply(new java.util.function.Function<Void, Void>() {
+                return convergeFailFast(futures).thenApplyAsync(new java.util.function.Function<Void, Void>() {
                     @Override
                     public Void apply(Void ignored) {
                         for (int i = 0, f = 0; i < size; i++) {
@@ -1499,16 +1499,16 @@ public final class AgentLoop {
                         }
                         return null;
                     }
-                });
+                }, cbExec);
             }
-        }).thenRun(new Runnable() {
+        }).thenRunAsync(new Runnable() {
             @Override
             public void run() {
                 if (!preHolder[0].cancelledHandled) {
                     writeBackParallel(ctx, hooks, calls, preHolder[0], textsHolder[0]);
                 }
             }
-        });
+        }, cbExec);
     }
 
     /**

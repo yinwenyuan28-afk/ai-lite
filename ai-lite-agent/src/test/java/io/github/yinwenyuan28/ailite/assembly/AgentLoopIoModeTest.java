@@ -77,10 +77,49 @@ public class AgentLoopIoModeTest {
         }
     }
 
+    /**
+     * F-06：PARALLEL + io 模式下，钩子与消息写回必须落在回调线程上。
+     *
+     * <p>并行链此前两段用了不带执行器的 {@code thenApply} / {@code thenRun}：
+     * 它们在前一段完成的线程上跑，也就是工具池线程。于是 afterTool 钩子和
+     * 消息写回跑到了 ai-lite-io-* 上，破坏了「用户回调都在回调池且串行」
+     * 这条约定。</p>
+     */
+    @Test
+    public void parallelToolHooksRunOnCallbackThread() throws Exception {
+        ExecutorService callbackPool = namedPool(2);
+        ExecutorService ioPool = Executors.newFixedThreadPool(2, namedFactory("ai-lite-io-"));
+        try {
+            // 一次返回两个工具调用：PARALLEL 模式只在 calls.size() > 1 时生效。
+            ScriptedTransport transport = new ScriptedTransport(true)
+                    .enqueue(completion("", LlmStopReason.TOOL_USE, toolCalls("c1", "c2")))
+                    .enqueue(stop("done"));
+            CapturingLifecycle recorder = new CapturingLifecycle();
+
+            AgentLoop loop = new AgentLoop(gateway(transport), namedProvider(ioPool),
+                    null, AgentLoop.ToolRunMode.PARALLEL, ioPool,
+                    CallbackPolicy.io(callbackPool, 64));
+
+            LlmResult result = loop.runAsync(call(),
+                    Collections.<LlmTool>singletonList(tool(recorder)),
+                    Collections.<AgentLifecycle>singletonList(recorder),
+                    Integer.valueOf(4), null).get(5L, TimeUnit.SECONDS);
+
+            assertThat(result.getContent()).isEqualTo("done");
+            // 并行前的预检查、并行后的写回都必须在回调线程上。
+            assertThat(recorder.beforeToolThread).startsWith("ai-lite-callback-");
+            assertThat(recorder.afterToolThread).startsWith("ai-lite-callback-");
+            // 工具本体仍在载体池（刻意的：工具执行不该占回调线程）。
+            assertThat(recorder.toolThread).startsWith("ai-lite-io-");
+        } finally {
+            callbackPool.shutdownNow();
+            ioPool.shutdownNow();
+        }
+    }
+
     @Test
     public void trampolineStillWorksUnderIoMode() throws Exception {
-        ExecutorService callbackPool = namedPool(2);
-        try {
+        ExecutorService callbackPool = namedPool(2);        try {
             ScriptedTransport transport = new ScriptedTransport(true);
             CapturingLifecycle always = new CapturingLifecycle();
             always.alwaysContinue = true;
