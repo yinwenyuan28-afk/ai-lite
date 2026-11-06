@@ -26,6 +26,13 @@
 > 管理页「加入模型」是「先查再插」，单节点在进程内加锁即可，多节点必须用 Redis 锁。
 > 配成 `true` 但容器里没有 `StringRedisTemplate` 会**启动失败**——不退回进程内锁，
 > 那样用户以为防住了、实际每个节点各锁各的。
+>
+> **4. 手工构造 `LlmGateway` 时，调用记录不再内联写入。**
+> 以前默认执行器是内联的，`store.insert` 就在 transport 的回调线程（生产环境是
+> OkHttp dispatcher 线程）上跑，一次慢 JDBC 插入会阻塞该线程上的其他响应。
+> 现在内联执行器下记录改走进程级共享池 `ai-lite-call-log-*`（daemon、有界 4096，
+> 满了丢记录并打 WARN）。**如果代码里假设「`one()` 返回时记录已经写入」，需要改成等待。**
+> Starter 装配（注入真实线程池）行为不变。
 
 ### 修复
 
@@ -58,6 +65,38 @@
 - `CatalogModel#getReasoningFlag()` 与 `CatalogModel.fromCatalogRow(...)`：
   让「数据库这一列没填」可以被表达出来。
 - 管理页档位接口新增 `writable` 字段。
+- `LlmGateway#shutdown()`：容器关闭时把停在退避里的重试调用收敛成
+  「服务正在关闭」，调用方不必等自己的超时。Starter 装配已写
+  `destroyMethod`，手工构造时可自行调用。
+
+### 异步与取消相关修复
+
+- **载体池拒绝派发时，排队的调用永久挂起**：`ProviderGuard` 交接许可时若载体
+  已满/已关闭，只归还了许可就让 waiter 既没有 `onGranted` 也没有 `onRejected`。
+  现在载体拒绝时在调用线程同步回调 `onRejected`；只捕获
+  `RejectedExecutionException`，不扩大到 `RuntimeException`——否则内联载体下
+  listener 自己抛错会触发「成功 + 拒绝」双回调。
+- **`AgentSessionLoop.resumeAsync` 在 I/O 池满时同步抛异常**：破坏「异步入口
+  一定返回 future」这条契约。JDK 8 实测确认 `thenComposeAsync` /
+  `thenApplyAsync` 的宿主拒绝只让返回的 future 异常完成、不抛，
+  因此只有 `supplyAsync` 一处需要包。
+- **工具循环轮数多时会挂住**：同步完成型 transport 加同步完成型工具执行器下，
+  「模型完成 → 工具完成 → 下一轮」整条链压在同一根栈上。实测不是抛
+  `StackOverflowError`，而是它被回调层吞掉后 future 永久挂起——512KB 栈线程
+  400 轮即挂住。现在推进改为蹦床（`wip` + `pending`），栈深与轮数无关。
+- **终态之后还在冒 delta**：`failOverload()` 与 `cancelledByFuture()` 直接
+  `completeExceptionally`，不经过完成屏障、也不关闭它，队列里未执行的 delta
+  会在调用已经失败之后继续回调给用户。现在两条路径在占住终态前先关闭屏障。
+- **协程入口不认 `Retry-After`**：同步与异步两个 Java 入口都会采用服务端给的
+  等待时间，协程侧只按指数退避，429 下按 1/2/4 秒猛打。现在三者共用
+  `RetrySupport.backoffMs`，同参同值。
+- **`PARALLEL` + io 模式下钩子跑在工具池线程上**：并行链有两段用了不带执行器的
+  `thenApply` / `thenRun`，于是 `afterTool` 钩子与消息写回落到 `ai-lite-io-*`。
+  现在两段都指定回调执行器。
+- **手工构造网关时 JDBC 落库跑在 transport 回调线程上**：执行器默认内联，
+  一次慢插入会阻塞同一线程上的其他响应回调。现在内联执行器仍用于
+  `AgentLoop` 等，但调用记录改走进程级共享池（`ai-lite-call-log-*`，
+  daemon、有界、满了丢记录并记 WARN）。Starter 注入真实线程池时行为不变。
 
 ## [0.1.15] - 2026-11-05
 

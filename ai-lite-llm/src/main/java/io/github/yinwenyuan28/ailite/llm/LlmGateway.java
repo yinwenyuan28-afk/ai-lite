@@ -5,6 +5,7 @@ import io.github.yinwenyuan28.ailite.executor.ExecutorProvider;
 import io.github.yinwenyuan28.ailite.guard.ProviderGuard;
 import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.internal.llm.AsyncLlmCallLogger;
+import io.github.yinwenyuan28.ailite.internal.llm.CallLogExecutors;
 import io.github.yinwenyuan28.ailite.internal.llm.FutureSupport;
 import io.github.yinwenyuan28.ailite.internal.llm.RetryScheduler;
 import io.github.yinwenyuan28.ailite.internal.llm.RetrySupport;
@@ -105,10 +106,31 @@ public final class LlmGateway {
                 }
             }
         }
+        // 未显式注入执行器时退化为内联执行（保持既有语义：AgentLoop 等复用它）。
         this.executor = executor == null ? new DirectExecutorProvider() : executor;
-        this.logger = new AsyncLlmCallLogger(this.executor, store);
+        // 但记录不能跟着内联（F-14）：内联会把 JDBC 落库跑在 transport 的回调线程上
+        // （生产环境是 OkHttp dispatcher 线程），一次慢插入阻塞该线程上的其他响应。
+        // 判断依据是「执行器是不是内联的」而不是「有没有传」——手工构造时调用方
+        // 常显式传 DirectExecutorProvider，那同样是内联。Starter 注入的是真实线程池，
+        // 走 else 分支，保持可配置性。
+        this.logger = isInline(this.executor)
+                ? new AsyncLlmCallLogger(CallLogExecutors.shared(), store, true)
+                : new AsyncLlmCallLogger(this.executor, store);
         this.toolExecutor = toolExecutor == null ? new SequentialToolExecutor() : toolExecutor;
         this.retryScheduler = retryScheduler == null ? RetryScheduler.shared() : retryScheduler;
+    }
+
+    /**
+     * 判断执行器是不是「就在当前线程跑」的实现。
+     *
+     * <p>只认本项目自己的 {@link DirectExecutorProvider}：第三方执行器无法可靠
+     * 判定是否内联，猜错反而会把记录线程搞乱。用户自带执行器时按原样使用。</p>
+     *
+     * @param provider 待判定的执行器
+     * @return true 表示内联执行
+     */
+    private static boolean isInline(ExecutorProvider provider) {
+        return provider instanceof DirectExecutorProvider;
     }
 
     /**
@@ -210,11 +232,9 @@ public final class LlmGateway {
                 if (cancel != null && cancel.isCancelled()) {
                     return one(call, cancel);
                 }
-                // 退避优先采用服务端 Retry-After（限流熔断 §3.3），与异步口径一致。
-                long delay = policy.delayMs(attempt);
-                if (ex.getRetryAfterMs() != null) {
-                    delay = Math.min(ex.getRetryAfterMs().longValue(), policy.getMaxBackoffMs());
-                }
+                // 退避口径统一由 RetrySupport.backoffMs 决定（含 Retry-After），
+                // 与异步、协程两个入口共用同一实现（F-13）。
+                long delay = RetrySupport.backoffMs(policy, ex, attempt);
                 if (deadlineNanos != null) {
                     long now = System.nanoTime();
                     if (RetrySupport.deadlineReached(deadlineNanos, now)) {
@@ -299,10 +319,7 @@ public final class LlmGateway {
                 if (cancel != null && cancel.isCancelled()) {
                     return oneByStream(call, onDelta, cancel);
                 }
-                long delay = policy.delayMs(attempt);
-                if (ex.getRetryAfterMs() != null) {
-                    delay = Math.min(ex.getRetryAfterMs().longValue(), policy.getMaxBackoffMs());
-                }
+                long delay = RetrySupport.backoffMs(policy, ex, attempt);
                 if (deadlineNanos != null) {
                     long now = System.nanoTime();
                     if (RetrySupport.deadlineReached(deadlineNanos, now)) {
@@ -928,14 +945,10 @@ public final class LlmGateway {
                                     failureOut = RetrySupport.deadlineFailure(failures);
                                 }
                             } else {
-                                // 退避优先采用服务端 Retry-After（限流熔断 §3.3）：
-                                // 头值有效时 min(retryAfterMs, maxBackoffMs)，再被
-                                // deadline 收口；无头值保持指数退避。
-                                long backoff = policy.delayMs(attemptsStarted);
-                                if (failure.getRetryAfterMs() != null) {
-                                    backoff = Math.min(failure.getRetryAfterMs().longValue(),
-                                            policy.getMaxBackoffMs());
-                                }
+                                // 退避口径与同步、协程两个入口共用同一个函数（F-13）：
+                                // 服务端 Retry-After 优先，受 maxBackoffMs 约束。
+                                long backoff = RetrySupport.backoffMs(policy, failure,
+                                        attemptsStarted);
                                 // delay 只算一次，监听器与真实调度使用同一个值。
                                 retryDelayMs = RetrySupport.clampDelayMs(
                                         backoff, deadlineNanos, now);
