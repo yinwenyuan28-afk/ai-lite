@@ -365,6 +365,56 @@ public class LlmGatewayGuardTest {
         assertThat(second.get(5L, TimeUnit.SECONDS).getContent()).isEqualTo("second");
     }
 
+    /**
+     * F-05 网关层面的收敛：排队中的调用在交接时被载体池拒绝。
+     *
+     * <p>许可已经转移（inUse 不变），但 onGranted 投递不出去。修复前这个 waiter
+     * 既没有 onGranted 也没有 onRejected，future 永久挂起。修复后必须异常完成，
+     * 且 kind 为 OVERLOAD。</p>
+     */
+    @Test
+    public void queuedCallConvergesWhenDispatcherRejectsHandover() throws Exception {
+        GatedTransport transport = new GatedTransport();
+        // 载体池拒绝：guard 交接时 execute 直接抛 RejectedExecutionException。
+        io.github.yinwenyuan28.ailite.executor.ExecutorProvider rejecting =
+                new io.github.yinwenyuan28.ailite.executor.ExecutorProvider() {
+                    @Override
+                    public java.util.concurrent.Executor io() {
+                        return new java.util.concurrent.Executor() {
+                            @Override
+                            public void execute(Runnable command) {
+                                throw new java.util.concurrent.RejectedExecutionException(
+                                        "carrier pool full");
+                            }
+                        };
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                };
+        LlmGateway gateway = new LlmGateway(GatewayTestSupport.resolver("key"),
+                Collections.singletonList(transport), new NoopLlmCallStore(),
+                rejecting, new SequentialToolExecutor(), scheduler);
+        gateway.setGuards(Collections.singletonMap("test", guard(1, 10_000, 10)));
+
+        CompletableFuture<LlmResult> first = gateway.oneAsync(call());
+        awaitRequests(transport, 1);
+        CompletableFuture<LlmResult> queued = gateway.oneAsync(call());
+        Thread.sleep(100L);
+        assertThat(transport.requests).hasSize(1);
+
+        // 释放许可触发交接 → 载体拒绝 → waiter 被同步收敛。
+        transport.completeFirst(completion("first", LlmStopReason.STOP));
+
+        Throwable cause = assertFailure(queued);
+        assertThat(cause).isInstanceOfSatisfying(LlmCallException.class, ex ->
+                assertThat(ex.getKind()).isEqualTo(LlmCallException.Kind.OVERLOAD));
+        assertThat(first.get(5L, TimeUnit.SECONDS).getContent()).isEqualTo("first");
+        // 排队的那次调用没有发出过请求。
+        assertThat(transport.requests).hasSize(1);
+    }
+
     private static LlmTool tool() {
         return new LlmTool() {
             @Override

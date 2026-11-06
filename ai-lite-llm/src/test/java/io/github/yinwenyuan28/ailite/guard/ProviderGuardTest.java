@@ -91,6 +91,8 @@ public class ProviderGuardTest {
         final AtomicReference<String> grantedThread = new AtomicReference<String>();
         final CountDownLatch granted = new CountDownLatch(1);
         final CountDownLatch rejected = new CountDownLatch(1);
+        /** 拒绝回调次数：用来断言「恰好一次」，重复回调会漏过 latch 断言。 */
+        final AtomicInteger rejections = new AtomicInteger();
 
         @Override
         public void onGranted(ProviderGuard.Permit p) {
@@ -102,7 +104,25 @@ public class ProviderGuardTest {
         @Override
         public void onRejected(LlmCallException reason) {
             rejection.set(reason);
+            rejections.incrementAndGet();
             rejected.countDown();
+        }
+    }
+
+    /**
+     * 拒绝一切任务的载体：模拟线程池已满或已关闭。
+     *
+     * <p>用来验证「载体池拒绝派发」这条路径——许可已经转移给 waiter，
+     * 但回调投递不出去，必须自己给出终态，不能把 waiter 晾在那里。</p>
+     */
+    private static final class RejectingExecutor implements java.util.concurrent.Executor {
+
+        final AtomicInteger attempts = new AtomicInteger();
+
+        @Override
+        public void execute(Runnable command) {
+            attempts.incrementAndGet();
+            throw new java.util.concurrent.RejectedExecutionException("carrier pool full");
         }
     }
 
@@ -581,9 +601,122 @@ public class ProviderGuardTest {
         assertThat(fresh.granted.getCount()).isZero();
     }
 
+    // ------------------------------------------------------------------
+    // F-05：载体池拒绝派发时，排队的人必须收到终态，不能永远没人叫他。
+    // ------------------------------------------------------------------
+
+    @Test
+    public void grantDispatcherRejectionStillCallsOnRejected() throws Exception {
+        // 并发=1：先占住一个许可，再排一个 waiter；释放时许可交接给它，
+        // 但载体池拒绝投递 onGranted——此时必须自己回调 onRejected。
+        ProviderGuard guard = guard(1, 60_000, 10, null, new FakeClock(),
+                new ManualDelayer(), new RecordingMetrics());
+        ProviderGuard.Permit held = guard.acquireSync();
+        RecordingListener queued = new RecordingListener();
+        RejectingExecutor carrier = new RejectingExecutor();
+        guard.acquireAsync(queued, () -> true, carrier);
+        assertThat(queued.granted.getCount()).isEqualTo(1L);
+
+        held.release();
+
+        assertThat(queued.rejected.await(5L, TimeUnit.SECONDS)).isTrue();
+        assertThat(queued.rejections.get()).isEqualTo(1);
+        assertThat(queued.rejection.get().getKind()).isEqualTo(LlmCallException.Kind.OVERLOAD);
+        // 从未拿到许可（onGranted 没执行），因此不该有 permit 泄漏出来。
+        assertThat(queued.permit.get()).isNull();
+    }
+
+    @Test
+    public void grantDispatcherRejectionReturnsPermitToPool() throws Exception {
+        // 交接时许可已经转移（inUse 不变），投递失败若不归还，这个名额就永久丢掉了：
+        // 并发=1 的 guard 之后再也发不出许可。
+        ProviderGuard guard = guard(1, 60_000, 10, null, new FakeClock(),
+                new ManualDelayer(), new RecordingMetrics());
+        ProviderGuard.Permit held = guard.acquireSync();
+        RecordingListener queued = new RecordingListener();
+        guard.acquireAsync(queued, () -> true, new RejectingExecutor());
+        held.release();
+        assertThat(queued.rejected.await(5L, TimeUnit.SECONDS)).isTrue();
+
+        // 名额必须回到池里：后续调用能立即拿到许可（快速路径同步回调）。
+        RecordingListener fresh = new RecordingListener();
+        guard.acquireAsync(fresh, () -> true, Runnable::run);
+        assertThat(fresh.granted.getCount()).isZero();
+        fresh.permit.get().release();
+    }
+
+    @Test
+    public void rejectDispatcherRejectionDoesNotThrowToCaller() {
+        // 拒绝方向同理：队列超时后要回调 onRejected，载体池拒绝时不能把异常
+        // 冒到 release 的调用方（那是别人的传输回调线程）。
+        FakeClock clock = new FakeClock();
+        ManualDelayer delayer = new ManualDelayer();
+        ProviderGuard guard = guard(1, 100, 10, null, clock, delayer,
+                new RecordingMetrics());
+        ProviderGuard.Permit held = guard.acquireSync();
+        RecordingListener queued = new RecordingListener();
+        guard.acquireAsync(queued, () -> true, new RejectingExecutor());
+        clock.advance(100L);
+
+        // 超时任务在 delayer 线程上跑，载体拒绝不应抛出来。
+        delayer.tasks.get(0).run();
+        assertThat(queued.granted.getCount()).isEqualTo(1L);
+        held.release();
+    }
+
+    @Test
+    public void inlineDispatcherListenerExceptionIsNotTreatedAsRejection() {
+        // 内联载体下 listener.onGranted 自己抛错，不能因为 execute 把它抛出来
+        // 就当成「载体拒绝」再补一次 onRejected——那会造成成功+拒绝双回调。
+        final AtomicInteger grantedCalls = new AtomicInteger();
+        final AtomicInteger rejectedCalls = new AtomicInteger();
+        ProviderGuard guard = guard(1, 60_000, 10, null, new FakeClock(),
+                new ManualDelayer(), new RecordingMetrics());
+        ProviderGuard.Permit held = guard.acquireSync();
+        ProviderGuard.AcquireListener boom = new ProviderGuard.AcquireListener() {
+            @Override
+            public void onGranted(ProviderGuard.Permit permit) {
+                grantedCalls.incrementAndGet();
+                permit.release();
+                throw new IllegalStateException("listener 自己炸了");
+            }
+
+            @Override
+            public void onRejected(LlmCallException reason) {
+                rejectedCalls.incrementAndGet();
+            }
+        };
+        guard.acquireAsync(boom, () -> true, Runnable::run);
+
+        // 释放触发交接：listener 抛异常必须冒到 release 调用方（不是载体拒绝）。
+        assertThatThrownBy(held::release).isInstanceOf(IllegalStateException.class);
+        assertThat(grantedCalls.get()).isEqualTo(1);
+        assertThat(rejectedCalls.get()).isZero();
+    }
+
+    @Test
+    public void expireWaiterRejectionAlsoConverges() throws Exception {
+        // 超时路径的载体拒绝同样要给终态（虽然载体已死，至少要尝试一次）。
+        FakeClock clock = new FakeClock();
+        ManualDelayer delayer = new ManualDelayer();
+        ProviderGuard guard = guard(1, 100, 10, null, clock, delayer,
+                new RecordingMetrics());
+        guard.acquireSync();
+        RecordingListener queued = new RecordingListener();
+        RejectingExecutor carrier = new RejectingExecutor();
+        guard.acquireAsync(queued, () -> true, carrier);
+        clock.advance(100L);
+
+        delayer.tasks.get(0).run();
+
+        // 载体拒绝 → 同步兜底回调，终结在 delayer 线程上。
+        assertThat(queued.rejected.await(5L, TimeUnit.SECONDS)).isTrue();
+        assertThat(queued.rejections.get()).isEqualTo(1);
+        assertThat(queued.rejection.get().getKind()).isEqualTo(LlmCallException.Kind.OVERLOAD);
+    }
+
     /** 用最小样本凑出一次 OPEN（1 成功 + 2 失败 = 3 样本 66%）。 */
-    private static void openAtMinimumSamples(ProviderGuard guard) {
-        ProviderGuard.Permit ok = guard.acquireSync();
+    private static void openAtMinimumSamples(ProviderGuard guard) {        ProviderGuard.Permit ok = guard.acquireSync();
         ok.verdict(null);
         ok.release();
         for (int i = 0; i < 2; i++) {

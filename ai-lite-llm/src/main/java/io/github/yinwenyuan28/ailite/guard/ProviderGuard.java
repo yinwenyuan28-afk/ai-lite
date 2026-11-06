@@ -2,6 +2,8 @@ package io.github.yinwenyuan28.ailite.guard;
 
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.RetryPolicy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -35,6 +37,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * release 方的传输回调线程。时钟通过 {@code LongSupplier} 注入，测试可拨动。</p>
  */
 public final class ProviderGuard {
+
+    private static final Logger log = LoggerFactory.getLogger(ProviderGuard.class);
 
     /** 一次模型调用的许可句柄：release 归还并发许可，verdict 采样熔断窗口。 */
     public interface Permit {
@@ -399,6 +403,12 @@ public final class ProviderGuard {
         } catch (RejectedExecutionException ex) {
             // 载体池拒绝：许可立即回流，不能泄漏。
             permit.release();
+            // 名额还了不算完：排队的人还在等一个终态，必须告诉他没排上（F-05）。
+            // 只在载体拒绝时同步兜底，不扩大到 RuntimeException——内联载体下
+            // listener 自己抛的异常会从这里冒出来，那时成功回调已经执行过，
+            // 再补一次 onRejected 就变成双回调。
+            rejectInline(waiter, reject("并发许可已移交，但续跑线程池拒绝",
+                    LlmCallException.Kind.OVERLOAD), ex);
         }
     }
 
@@ -413,7 +423,32 @@ public final class ProviderGuard {
                 }
             });
         } catch (RejectedExecutionException ex) {
-            // 载体池已关闭：应用正在停机，没有安全出口；记日志级别的事件即可。
+            // 载体池已关闭：应用正在停机时这是常态。不能就这么算了——
+            // 至少在调用线程上把结果收敛掉，让 future 有终态（F-05）。
+            rejectInline(waiter, reason, ex);
+        }
+    }
+
+    /**
+     * 载体拒绝投递时的同步兜底：直接在调用线程回调 onRejected。
+     *
+     * <p>可能落在 release 的传输回调线程或 delayer 的定时线程上。回调本身
+     * 不再抛异常——调用方往往不是业务线程，往下抛只会变成无人处理的
+     * 线程级异常。回调和日志都各兜一层。</p>
+     *
+     * @param waiter 排队者
+     * @param reason 拒绝原因
+     * @param cause  载体拒绝的原因，仅用于日志
+     */
+    private void rejectInline(AsyncWaiter waiter, LlmCallException reason, Throwable cause) {
+        log.warn("供应商 {} 续跑线程池拒绝投递，改在调用线程同步收敛: {}",
+                providerId, cause == null ? "unknown" : cause.toString());
+        try {
+            waiter.listener.onRejected(reason);
+        } catch (Throwable callbackFailure) {
+            // listener 自己也可能炸；此时已经没有任何安全出口，只记日志。
+            log.warn("供应商 {} 同步拒绝回调本身失败: {}",
+                    providerId, callbackFailure.toString());
         }
     }
 

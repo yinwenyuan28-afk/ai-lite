@@ -6,6 +6,7 @@ import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
 import io.github.yinwenyuan28.ailite.internal.executor.PlatformExecutorProvider;
 import io.github.yinwenyuan28.ailite.llm.GatewayTestSupport;
 import io.github.yinwenyuan28.ailite.llm.LlmCall;
+import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
 import io.github.yinwenyuan28.ailite.llm.LlmCompletion;
 import io.github.yinwenyuan28.ailite.llm.LlmGateway;
@@ -271,6 +272,83 @@ public class AgentSessionLoopAsyncTest {
         assertThat(result.getSession().getMessages()).hasSize(2);
     }
 
+    // ------------------------------------------------------------------
+    // F-12：「异步入口一定返回 future」——载体池满时必须返回失败 future，
+    // 不能把 RejectedExecutionException 砸到调用线程上。
+    // ------------------------------------------------------------------
+
+    /** 拒绝一切任务的 I/O 执行器，模拟线程池已满或已关闭。 */
+    private static io.github.yinwenyuan28.ailite.executor.ExecutorProvider rejectingExecutor(
+            final java.util.concurrent.atomic.AtomicInteger attempts) {
+        return new io.github.yinwenyuan28.ailite.executor.ExecutorProvider() {
+            @Override
+            public java.util.concurrent.Executor io() {
+                return new java.util.concurrent.Executor() {
+                    @Override
+                    public void execute(Runnable command) {
+                        attempts.incrementAndGet();
+                        throw new java.util.concurrent.RejectedExecutionException("io pool full");
+                    }
+                };
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+    }
+
+    @Test
+    public void resumeAsyncReturnsFailedFutureWhenIoPoolRejects() throws Exception {
+        final java.util.concurrent.atomic.AtomicInteger attempts =
+                new java.util.concurrent.atomic.AtomicInteger();
+        GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport();
+        LlmGateway gateway = new LlmGateway(GatewayTestSupport.resolver("key"),
+                Collections.singletonList(transport), new NoopLlmCallStore(),
+                new DirectExecutorProvider(), new SequentialToolExecutor());
+        final InMemoryAgentSessionStore store = new InMemoryAgentSessionStore(10, 60);
+        AgentSessionLoop sessionLoop = new AgentSessionLoop(new AgentLoop(gateway), store,
+                rejectingExecutor(attempts));
+        sessionLoop.ensureSession("u", "s", "biz");
+
+        // 关键断言：这一行不能抛 RejectedExecutionException。
+        CompletableFuture<AgentSessionLoop.ResumeResult> future = sessionLoop.resumeAsync("u", "s",
+                LlmCall.profile("biz", "main", Collections.singletonList(LlmMessage.user("hi"))),
+                null, null, Integer.valueOf(4), null,
+                Collections.singletonList(AgentSessionMessage.user("hi")));
+
+        assertThat(future).isNotNull();
+        assertThat(attempts.get()).isGreaterThan(0);
+        // 返回值必须是 future，失败体现在 future 里，kind 为 OVERLOAD。
+        Throwable cause = awaitFailure(future);
+        assertThat(cause).isInstanceOfSatisfying(LlmCallException.class, ex ->
+                assertThat(ex.getKind()).isEqualTo(LlmCallException.Kind.OVERLOAD));
+        // 一个请求都没发出去。
+        assertThat(transport.requests()).isEmpty();
+    }
+
+    @Test
+    public void resumeAsyncDoesNotThrowFromCallerThread() {
+        final java.util.concurrent.atomic.AtomicInteger attempts =
+                new java.util.concurrent.atomic.AtomicInteger();
+        GatewayTestSupport.FakeTransport transport = new GatewayTestSupport.FakeTransport();
+        LlmGateway gateway = new LlmGateway(GatewayTestSupport.resolver("key"),
+                Collections.singletonList(transport), new NoopLlmCallStore(),
+                new DirectExecutorProvider(), new SequentialToolExecutor());
+        final InMemoryAgentSessionStore store = new InMemoryAgentSessionStore(10, 60);
+        AgentSessionLoop sessionLoop = new AgentSessionLoop(new AgentLoop(gateway), store,
+                rejectingExecutor(attempts));
+        sessionLoop.ensureSession("u", "s", "biz");
+
+        Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() ->
+                sessionLoop.resumeAsync("u", "s",
+                        LlmCall.profile("biz", "main",
+                                Collections.singletonList(LlmMessage.user("hi"))),
+                        null, null, Integer.valueOf(4), null,
+                        Collections.singletonList(AgentSessionMessage.user("hi"))));
+        assertThat(thrown).isNull();
+    }
+
     @Test
     public void concurrentResumesNeverLoseUpdatesSilently() throws Exception {
         // SL-18 简版：并发 resumeAsync 同一会话——版本乐观锁保证至少一个成功、
@@ -339,8 +417,22 @@ public class AgentSessionLoopAsyncTest {
         assertThat(stored.get().getMessages().size() % 2).isZero(); // user+assistant 成对
     }
 
-    private static AgentSessionLoop sessionLoop(LlmTransport transport) {
-        LlmGateway gateway = new LlmGateway(GatewayTestSupport.resolver("key"),
+    /**
+     * 等 future 异常完成并取出 cause。超时直接判失败，避免用例挂住。
+     *
+     * @param future 待观察的 future
+     * @return future 的失败原因
+     */
+    private static Throwable awaitFailure(CompletableFuture<?> future) throws Exception {
+        try {
+            future.get(5, TimeUnit.SECONDS);
+            throw new AssertionError("应当异常完成");
+        } catch (java.util.concurrent.ExecutionException ex) {
+            return ex.getCause();
+        }
+    }
+
+    private static AgentSessionLoop sessionLoop(LlmTransport transport) {        LlmGateway gateway = new LlmGateway(GatewayTestSupport.resolver("key"),
                 Collections.singletonList(transport), new NoopLlmCallStore(),
                 new DirectExecutorProvider(), new SequentialToolExecutor());
         return new AgentSessionLoop(new AgentLoop(gateway),

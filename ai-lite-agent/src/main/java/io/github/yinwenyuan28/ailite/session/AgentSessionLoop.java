@@ -31,6 +31,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import io.github.yinwenyuan28.ailite.internal.llm.FutureSupport;
@@ -278,8 +279,20 @@ public final class AgentSessionLoop {
         final AtomicReference<CompletableFuture<ResumeResult>> running =
                 new AtomicReference<CompletableFuture<ResumeResult>>();
         final AtomicBoolean outerCancelled = new AtomicBoolean(false);
-        CompletableFuture<Prepared> prepared = CompletableFuture.supplyAsync(
-                () -> prepare(userId, sessionId, call, lifecycles, newUserTurns), executor.io());
+        // 「异步入口一定返回 future」：supplyAsync 在载体池拒绝时是同步抛的
+        // （JDK 8 实测：thenComposeAsync / thenApplyAsync 的宿主拒绝只会让返回的
+        // future 异常完成，不抛；只有 supplyAsync 抛），因此只有这里要包一层。
+        // 不包的话 RejectedExecutionException 会直接砸到业务线程上，调用方拿不到
+        // 任何 future，也就没有统一的错误处理出口（F-12）。
+        final CompletableFuture<Prepared> prepared;
+        try {
+            prepared = CompletableFuture.supplyAsync(
+                    () -> prepare(userId, sessionId, call, lifecycles, newUserTurns), executor.io());
+        } catch (RejectedExecutionException ex) {
+            log.warn("会话恢复任务被拒绝，返回失败 future: {}", ex.toString());
+            return AgentSessionLoop.<ResumeResult>failedFuture(new LlmCallException(
+                    "会话恢复任务被拒绝", ex, LlmCallException.Kind.OVERLOAD));
+        }
         final CompletableFuture<ResumeResult> future =
                 prepared.thenComposeAsync(new java.util.function.Function<Prepared,
                         CompletableFuture<ResumeResult>>() {
@@ -844,5 +857,21 @@ public final class AgentSessionLoop {
             }
             return null;
         }
+    }
+
+    /**
+     * 造一个已异常完成的 future。
+     *
+     * <p>JDK 8 没有 {@code CompletableFuture.failedFuture}；这里与
+     * {@code Workflow.failedFuture} 保持同一形状，保证失败语义一致。</p>
+     *
+     * @param error 失败原因
+     * @param <T>   结果类型
+     * @return 已异常完成的 future
+     */
+    private static <T> CompletableFuture<T> failedFuture(Throwable error) {
+        CompletableFuture<T> future = new CompletableFuture<T>();
+        future.completeExceptionally(error);
+        return future;
     }
 }
