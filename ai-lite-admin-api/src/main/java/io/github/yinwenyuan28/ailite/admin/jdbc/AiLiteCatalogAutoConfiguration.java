@@ -17,7 +17,10 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * 运行时目录。页面开关关闭时仍然注册，避免关掉页面就退回配置文件。
@@ -61,6 +64,7 @@ public class AiLiteCatalogAutoConfiguration {
         public JdbcRuntimeCatalog aiLiteRuntimeCatalog(JdbcTemplate jdbc, AiLiteCatalogProperties properties,
                                                        AiLiteLlmBizProperties bizProperties,
                                                        Environment environment,
+                                                       ObjectProvider<PlatformTransactionManager> transactions,
                                                        org.springframework.context.ApplicationContext context) {
             if (environment.getProperty("ai-lite.prompt.keys[0].key") != null) {
                 log.warn("目录模式以业务 id 作为提示词，忽略 ai-lite.prompt.keys");
@@ -74,8 +78,65 @@ public class AiLiteCatalogAutoConfiguration {
             // 改了名（或自带 PromptStore Bean），就会拿默认表名去探、探不到即启动失败，
             // 而错误消息又指回默认表名，用户完全看不出是自己配的表名没被采纳。
             requirePromptTable(context);
+            ModelKeyLock lock = resolveModelKeyLock(properties, context);
             return new JdbcRuntimeCatalog(jdbc, properties.getProviderTable(), properties.getModelTable(),
-                    properties.getBizTable(), properties.getCacheSeconds());
+                    properties.getBizTable(), properties.getCacheSeconds(),
+                    resolveTransactionManager(transactions), lock);
+        }
+
+        /**
+         * 按部署形态选择目录写锁。
+         *
+         * <p>单节点用进程内锁；多节点必须用 Redis 锁。多节点却拿不到 Redis 时
+         * <b>直接启动失败</b>，不悄悄退回进程内锁——那样用户以为已经防住了重复写入，
+         * 实际每个节点各锁各的，等于没锁。</p>
+         *
+         * @param properties 表名、缓存与部署形态
+         * @param context    应用上下文，用来找 Redis 客户端
+         * @return 写锁
+         */
+        private static ModelKeyLock resolveModelKeyLock(AiLiteCatalogProperties properties,
+                                                        org.springframework.context.ApplicationContext context) {
+            if (!properties.isMultiNode()) {
+                log.info("目录写入使用进程内锁（单节点）。多节点部署请设 ai-lite.catalog.multi-node=true");
+                return new LocalModelKeyLock();
+            }
+            StringRedisTemplate redis = null;
+            try {
+                redis = context.getBean(StringRedisTemplate.class);
+            } catch (org.springframework.beans.BeansException ex) {
+                redis = null;
+            }
+            if (redis == null) {
+                throw new IllegalStateException("ai-lite.catalog.multi-node=true 但容器里没有 "
+                        + "StringRedisTemplate。多节点部署必须引入 spring-data-redis 并配置 Redis，"
+                        + "否则各节点会各自加锁，无法防止重复写入");
+            }
+            log.info("目录写入使用 Redis 锁（多节点），租期 {}ms，等待上限 {}ms",
+                    Long.valueOf(properties.getLockLeaseMillis()),
+                    Long.valueOf(properties.getLockWaitMillis()));
+            return new RedisModelKeyLock(redis, properties.getLockLeaseMillis(),
+                    properties.getLockWaitMillis());
+        }
+
+        /**
+         * 取本应用的事务管理器。
+         *
+         * <p>用 {@code getIfUnique()} 而不是 {@code getIfAvailable()}：容器里有多个事务
+         * 管理器时后者会抛 {@code NoUniqueBeanDefinitionException}，让应用直接起不来。
+         * 这里拿不准就不包事务并打一条 WARN——管理页照常可用，只是失去原子性。</p>
+         *
+         * @param transactions 容器里的事务管理器
+         * @return 事务管理器；无法确定时返回 null
+         */
+        private static PlatformTransactionManager resolveTransactionManager(
+                ObjectProvider<PlatformTransactionManager> transactions) {
+            PlatformTransactionManager unique = transactions.getIfUnique();
+            if (unique == null && transactions.stream().count() > 1) {
+                log.warn("容器里有多个事务管理器，无法确定用哪个，目录读写退回逐条提交。"
+                        + "请给本应用的事务管理器加 @Primary，否则写入失败时配置可能丢失");
+            }
+            return unique;
         }
 
         /**
@@ -111,9 +172,11 @@ public class AiLiteCatalogAutoConfiguration {
         @Bean
         @ConditionalOnMissingBean(CallBodyPolicy.class)
         public CallBodySettings aiLiteCallBodyPolicy(JdbcTemplate jdbc,
-                                                     AiLiteCatalogProperties properties) {
+                                                     AiLiteCatalogProperties properties,
+                                                     ObjectProvider<PlatformTransactionManager> transactions) {
             return new JdbcCallBodyPolicy(jdbc, properties.getSettingTable(),
-                    properties.getSettingCacheSeconds());
+                    properties.getSettingCacheSeconds(),
+                    resolveTransactionManager(transactions));
         }
 
         /**

@@ -5,6 +5,7 @@ import io.github.yinwenyuan28.ailite.catalog.RuntimeCatalog;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.config.ModelResolver;
 import io.github.yinwenyuan28.ailite.http.HttpExecutor;
+import io.github.yinwenyuan28.ailite.llm.CallBodyPolicy;
 import io.github.yinwenyuan28.ailite.llm.LlmTransport;
 import io.github.yinwenyuan28.ailite.admin.jdbc.CallBodySettings;
 import io.github.yinwenyuan28.ailite.prompt.PromptManager;
@@ -61,6 +62,7 @@ public class AiLiteAdminAutoConfiguration {
                                                  JdbcTemplate jdbc, Environment environment,
                                                  ObjectProvider<HttpExecutor> http,
                                                  ObjectProvider<CallBodySettings> bodyPolicy,
+                                                 ObjectProvider<CallBodyPolicy> readOnlyPolicy,
                                                  ObjectProvider<ModelResolver> resolver,
                                                  ObjectProvider<LlmTransport> transports) {
         if (!(catalog instanceof JdbcRuntimeCatalog)) {
@@ -77,8 +79,13 @@ public class AiLiteAdminAutoConfiguration {
         // 这里曾直接 new JdbcCallBodyPolicy(jdbc)，导致自定义表名对管理页无效——
         // 目录装配读的是配置表名、管理页读的是硬编码表名，两边结论不一致。
         CallBodySettings policy = bodyPolicy.getIfAvailable();
-        if (policy == null) {
+        // 用户自带只读策略时，管理页仍要显示网关的真实档位，否则页面说「不记录」、
+        // 实际却在记录。可写实现存在时以它为准，只读来源只用来补「显示」。
+        CallBodyPolicy readOnly = policy == null ? readOnlyPolicy.getIfAvailable() : null;
+        if (policy == null && readOnly == null) {
             log.warn("管理页未取到 CallBodySettings，调用正文档位不可读写");
+        } else if (policy == null) {
+            log.info("调用正文档位由自定义 CallBodyPolicy 提供，管理页只显示、不可改");
         }
         // 「测试调用」尽量走真实协议适配器：拿不到解析器或适配器时退回手写实现，
         // 那种情况下只能测 OpenAI 兼容协议，且请求拼装与业务调用可能不一致。
@@ -96,6 +103,6 @@ public class AiLiteAdminAutoConfiguration {
         return new AdminController(config, (JdbcRuntimeCatalog) catalog, prompts.getIfAvailable(), jdbc,
                 environment.getProperty("ai-lite.store.jdbc.table-name"),
                 environment.getProperty("ai-lite.store.jdbc.body-table-name"),
-                policy, executor, modelResolver, byApi);
+                policy, executor, modelResolver, byApi, readOnly);
     }
 }

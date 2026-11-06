@@ -27,6 +27,33 @@ public class AiLiteCatalogProperties {
     private String bizTable = "AI_LITE_BIZ_BINDING";
     private String settingTable = "AI_LITE_ADMIN_SETTING";
 
+    /**
+     * 是否多节点部署。默认 {@code false}（单节点）。
+     *
+     * <p><b>为什么要显式声明</b>：管理页的「加入模型」是「先查再插」，两个请求同时
+     * 处理同一对 {@code (供应商, 模型)} 时会插出两行。单节点在进程内加锁就能防住；
+     * 多节点必须用 Redis 锁，否则两个节点各锁各的，等于没锁。</p>
+     *
+     * <p>这件事代码没法可靠地自动判断（同机多进程算不算？容器副本算几个？），
+     * 所以要求显式配置。配成 {@code true} 时必须能拿到
+     * {@code StringRedisTemplate}，否则启动失败——不能悄悄退回进程内锁，
+     * 那样用户以为已经防住了，实际没有。</p>
+     */
+    private boolean multiNode = false;
+
+    /**
+     * 多节点模式下 Redis 锁的租期（毫秒）。
+     *
+     * <p>进程崩溃时锁不能永久残留，所以带这个过期时间。要明显长于一次写入
+     * （几条 SQL）的耗时。</p>
+     */
+    private long lockLeaseMillis = 10000L;
+
+    /**
+     * 多节点模式下抢锁的最长等待（毫秒）。超时说明有别的节点长时间占着同一个模型的锁。
+     */
+    private long lockWaitMillis = 10000L;
+
     public int getCacheSeconds() {
         return cacheSeconds;
     }
@@ -79,5 +106,38 @@ public class AiLiteCatalogProperties {
 
     public void setSettingCacheSeconds(int settingCacheSeconds) {
         this.settingCacheSeconds = settingCacheSeconds;
+    }
+
+    /**
+     * @return true 表示多节点部署，目录写入用 Redis 锁
+     */
+    public boolean isMultiNode() {
+        return multiNode;
+    }
+
+    public void setMultiNode(boolean multiNode) {
+        this.multiNode = multiNode;
+    }
+
+    /**
+     * @return Redis 锁租期（毫秒）
+     */
+    public long getLockLeaseMillis() {
+        return lockLeaseMillis;
+    }
+
+    public void setLockLeaseMillis(long lockLeaseMillis) {
+        this.lockLeaseMillis = lockLeaseMillis;
+    }
+
+    /**
+     * @return 抢锁最长等待（毫秒）
+     */
+    public long getLockWaitMillis() {
+        return lockWaitMillis;
+    }
+
+    public void setLockWaitMillis(long lockWaitMillis) {
+        this.lockWaitMillis = lockWaitMillis;
     }
 }

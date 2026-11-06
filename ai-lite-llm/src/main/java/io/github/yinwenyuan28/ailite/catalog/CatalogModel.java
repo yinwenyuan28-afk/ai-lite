@@ -23,6 +23,14 @@ public final class CatalogModel {
     private final String modelId;
     private final boolean ready;
     private final boolean reasoning;
+    /**
+     * 推理开关的原始取值，{@code null} 表示数据库这一列是 NULL（没填）。
+     *
+     * <p>{@link #reasoning} 是 {@code boolean}，表达不了「没填」，而「没填」时应当
+     * 回落到配置文件里的同名模型。老构造器传 {@code boolean} 时这里就是那个值——
+     * {@code false} 表示明确「不支持推理」，不是「没填」。</p>
+     */
+    private final Boolean reasoningFlag;
     private final List<String> inputModes;
     private final Integer contextWindow;
     private final Integer maxTokens;
@@ -83,10 +91,82 @@ public final class CatalogModel {
                         Map<String, Map<String, Object>> samplerParamsByLevel,
                         Map<String, String> modelHeaders,
                         Map<String, Object> extraBody) {
+        // 老构造器传的是 boolean：它代表一个「明确的值」，因此不算「没填」。
+        this(providerId, modelId, ready, inputModes, contextWindow, maxTokens, thinkingFormat,
+                displayName, updatedAtMillis, thinkingLevelMap, samplerParams,
+                samplerParamsByLevel, modelHeaders, extraBody, Boolean.valueOf(reasoning));
+    }
+
+    /**
+     * 目录行专用构造：推理开关可空，用来区分「没填」和「填了 false」。
+     *
+     * <p>JDBC 实现读 {@code REASONING} 列时用这个：列为 NULL 传 {@code null}，
+     * 解析阶段就会回落到配置文件里的同名模型；列有值（0 或 1）时语义与老构造器一致。</p>
+     *
+     * @param providerId           供应商 id
+     * @param modelId              模型 id
+     * @param ready                是否已启用
+     * @param reasoningFlag        是否支持推理；{@code null} 表示数据库没填
+     * @param inputModes           入参类型，可空
+     * @param contextWindow        上下文窗口，可空
+     * @param maxTokens            输出上限，可空
+     * @param thinkingFormat       思考格式，可空
+     * @param displayName          显示名，可空
+     * @param updatedAtMillis      更新时间
+     * @param thinkingLevelMap     思考档映射；null 表示沿用配置文件
+     * @param samplerParams        默认采样参数；null 表示沿用配置文件
+     * @param samplerParamsByLevel 按思考档覆盖的采样参数；null 表示沿用配置文件
+     * @param modelHeaders         模型级请求头；null 表示沿用配置文件
+     * @param extraBody            模型级附加请求体；null 表示沿用配置文件
+     * @return 目录模型
+     */
+    public static CatalogModel fromCatalogRow(String providerId, String modelId, boolean ready,
+                                              Boolean reasoningFlag, List<String> inputModes,
+                                              Integer contextWindow, Integer maxTokens,
+                                              String thinkingFormat, String displayName,
+                                              long updatedAtMillis,
+                                              Map<String, String> thinkingLevelMap,
+                                              Map<String, Object> samplerParams,
+                                              Map<String, Map<String, Object>> samplerParamsByLevel,
+                                              Map<String, String> modelHeaders,
+                                              Map<String, Object> extraBody) {
+        return new CatalogModel(providerId, modelId, ready, inputModes, contextWindow,
+                maxTokens, thinkingFormat, displayName, updatedAtMillis, thinkingLevelMap,
+                samplerParams, samplerParamsByLevel, modelHeaders, extraBody, reasoningFlag);
+    }
+
+    /**
+     * 私有构造：推理开关用可空形式接收，两个公开入口都在这里落到同一处赋值。
+     *
+     * @param providerId           供应商 id
+     * @param modelId              模型 id
+     * @param ready                是否已启用
+     * @param inputModes           入参类型
+     * @param contextWindow        上下文窗口
+     * @param maxTokens            输出上限
+     * @param thinkingFormat       思考格式
+     * @param displayName          显示名
+     * @param updatedAtMillis      更新时间
+     * @param thinkingLevelMap     思考档映射
+     * @param samplerParams        默认采样参数
+     * @param samplerParamsByLevel 分档采样参数
+     * @param modelHeaders         模型级请求头
+     * @param extraBody            模型级附加请求体
+     * @param reasoningFlag        推理开关原始值；{@code null} 表示数据库没填
+     */
+    private CatalogModel(String providerId, String modelId, boolean ready,
+                         List<String> inputModes, Integer contextWindow, Integer maxTokens,
+                         String thinkingFormat, String displayName, long updatedAtMillis,
+                         Map<String, String> thinkingLevelMap,
+                         Map<String, Object> samplerParams,
+                         Map<String, Map<String, Object>> samplerParamsByLevel,
+                         Map<String, String> modelHeaders, Map<String, Object> extraBody,
+                         Boolean reasoningFlag) {
         this.providerId = providerId;
         this.modelId = modelId;
         this.ready = ready;
-        this.reasoning = reasoning;
+        this.reasoningFlag = reasoningFlag;
+        this.reasoning = reasoningFlag != null && reasoningFlag.booleanValue();
         this.inputModes = inputModes == null
                 ? Collections.<String>emptyList() : Collections.unmodifiableList(new ArrayList<String>(inputModes));
         this.contextWindow = contextWindow;
@@ -94,7 +174,6 @@ public final class CatalogModel {
         this.thinkingFormat = thinkingFormat;
         this.displayName = displayName;
         this.updatedAtMillis = updatedAtMillis;
-        // 保持 null 与空 Map 的区别：null 是「没配」，空 Map 是「配了空」。
         this.thinkingLevelMap = thinkingLevelMap == null ? null
                 : Collections.unmodifiableMap(new LinkedHashMap<String, String>(thinkingLevelMap));
         this.samplerParams = samplerParams == null ? null
@@ -140,6 +219,13 @@ public final class CatalogModel {
 
     public boolean isReasoning() {
         return reasoning;
+    }
+
+    /**
+     * @return 推理开关的原始取值；{@code null} 表示数据库这一列没填，解析时沿用配置文件
+     */
+    public Boolean getReasoningFlag() {
+        return reasoningFlag;
     }
 
     public List<String> getInputModes() {

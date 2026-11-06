@@ -17,14 +17,18 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 目录的 JDBC 实现。读路径带短缓存，写入后立刻清掉本机缓存。
  *
- * <p>同一供应商下同一模型 id 不建唯一索引。插入前先查；已经存在则不覆盖。
- * 若并发写入出现两行，读取时取更新时间较新的一行。</p>
+ * <p>同一供应商下同一模型 id 在 0.1.16 起由唯一索引保证只有一行。早期版本没有这道
+ * 约束，并发写入可能插出两行；读取时仍按更新时间取较新的一行，兼容尚未建索引的老库。</p>
  */
 public final class JdbcRuntimeCatalog implements RuntimeCatalog {
+
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(JdbcRuntimeCatalog.class);
 
     static final String MISSING_TABLE_MESSAGE = "目录表不可用，请执行 ai-lite-catalog.sql 建表: ";
 
@@ -35,6 +39,20 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
     private final long cacheMillis;
     private volatile Snapshot snapshot;
     private volatile long expiresAt;
+    /**
+     * 缓存版本号。每次改写或清缓存都 +1。
+     *
+     * <p>读库线程在读取前记下版本，写回缓存前核对：不一致说明这期间有人改过配置
+     * 并清了缓存，手里这份就是旧值，不能写回去——否则旧配置会再存活一个完整的
+     * 缓存周期，表现为「管理页保存成功、刷新还是旧的」。</p>
+     */
+    private final AtomicLong generation = new AtomicLong();
+    /** 写操作事务；null 表示没有事务管理器，逐条提交。 */
+    private final org.springframework.transaction.support.TransactionTemplate writes;
+    /** 三表读取事务；null 表示没有事务管理器，三条查询各自提交。 */
+    private final org.springframework.transaction.support.TransactionTemplate reads;
+    /** 模型写入的互斥锁；单节点为 JVM 锁，多节点为 Redis 锁。 */
+    private final ModelKeyLock modelKeyLock;
 
     /**
      * @param jdbc           JDBC
@@ -45,6 +63,47 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
      */
     public JdbcRuntimeCatalog(JdbcTemplate jdbc, String providerTable, String modelTable,
                               String bizTable, int cacheSeconds) {
+        this(jdbc, providerTable, modelTable, bizTable, cacheSeconds, null);
+    }
+
+    /**
+     * 带事务的构造器。
+     *
+     * <p>传了事务管理器后，写操作（先删后插）与三表读取各自在同一事务里完成：
+     * INSERT 失败会连同 DELETE 一起回滚，不会再出现「配置被删掉了、页面只看到 500」；
+     * 三条查询也能看到同一时刻的库，不会读到「绑定指向已删除模型」这种中间态。</p>
+     *
+     * <p><b>为什么事务管理器可空</b>：拿不到它就退回逐条提交（与升级前一致），
+     * 不能让管理页因为环境缺一个 Bean 就整体不可用。</p>
+     *
+     * @param jdbc          JDBC
+     * @param providerTable 覆盖表
+     * @param modelTable    模型表
+     * @param bizTable      业务绑定表
+     * @param cacheSeconds  缓存秒数；小于等于 0 表示不缓存
+     * @param txManager     事务管理器；{@code null} 表示不包事务
+     */
+    public JdbcRuntimeCatalog(JdbcTemplate jdbc, String providerTable, String modelTable,
+                              String bizTable, int cacheSeconds,
+                              org.springframework.transaction.PlatformTransactionManager txManager) {
+        this(jdbc, providerTable, modelTable, bizTable, cacheSeconds, txManager, null);
+    }
+
+    /**
+     * 带事务与写锁的构造器。
+     *
+     * @param jdbc          JDBC
+     * @param providerTable 覆盖表
+     * @param modelTable    模型表
+     * @param bizTable      业务绑定表
+     * @param cacheSeconds  缓存秒数；小于等于 0 表示不缓存
+     * @param txManager     事务管理器；{@code null} 表示不包事务
+     * @param modelKeyLock  写锁；{@code null} 表示单节点，用进程内锁
+     */
+    public JdbcRuntimeCatalog(JdbcTemplate jdbc, String providerTable, String modelTable,
+                              String bizTable, int cacheSeconds,
+                              org.springframework.transaction.PlatformTransactionManager txManager,
+                              ModelKeyLock modelKeyLock) {
         if (jdbc == null) {
             throw new IllegalArgumentException("JdbcTemplate 不能为空");
         }
@@ -53,6 +112,16 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
         this.modelTable = safeTable(modelTable);
         this.bizTable = safeTable(bizTable);
         this.cacheMillis = cacheSeconds <= 0 ? 0L : cacheSeconds * 1000L;
+        this.modelKeyLock = modelKeyLock == null ? new LocalModelKeyLock() : modelKeyLock;
+        if (txManager == null) {
+            this.writes = null;
+            this.reads = null;
+        } else {
+            this.writes = new org.springframework.transaction.support.TransactionTemplate(txManager);
+            this.reads = new org.springframework.transaction.support.TransactionTemplate(txManager);
+            // 只读事务让数据库有机会跳过写锁，也让「只读」这件事在代码里明确。
+            this.reads.setReadOnly(true);
+        }
         requireTables(jdbc, this.providerTable, this.modelTable, this.bizTable);
         // 放在构造器里而不是自动装配里：直接 new 这个类的调用方也要能读旧库。
         ensureProviderApiColumn(jdbc, this.providerTable);
@@ -209,6 +278,8 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
 
     @Override
     public void invalidate() {
+        // 先推进版本：正在读库的线程据此判断手里这份已经过期。
+        generation.incrementAndGet();
         snapshot = null;
         expiresAt = 0L;
     }
@@ -218,19 +289,66 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
      *
      * @param overlay 覆盖
      */
-    public void saveOverlay(ProviderOverlay overlay) {
+    public void saveOverlay(final ProviderOverlay overlay) {
         if (overlay == null || overlay.getProviderId() == null) {
             throw new IllegalArgumentException("供应商不能为空");
         }
-        jdbc.update("DELETE FROM " + providerTable + " WHERE PROVIDER_ID = ?", overlay.getProviderId());
-        jdbc.update("INSERT INTO " + providerTable
-                        + " (PROVIDER_ID, API, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS,"
-                        + " PROVIDER_HEADERS, PROVIDER_EXTRA_BODY, UPDATE_TIME)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                overlay.getProviderId(), overlay.getApi(), overlay.getBaseUrl(), overlay.getApiKey(),
-                overlay.getConnectTimeoutMs(), overlay.getReadTimeoutMs(),
-                writeJson(overlay.getHeaders()), writeJson(overlay.getExtraBody()), now());
+        // 删旧 + 插新必须同进同退：INSERT 失败时若 DELETE 已提交，这条覆盖就丢了。
+        inWriteTransaction(new Runnable() {
+            @Override
+            public void run() {
+                jdbc.update("DELETE FROM " + providerTable + " WHERE PROVIDER_ID = ?",
+                        overlay.getProviderId());
+                jdbc.update("INSERT INTO " + providerTable
+                                + " (PROVIDER_ID, API, BASE_URL, API_KEY, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS,"
+                                + " PROVIDER_HEADERS, PROVIDER_EXTRA_BODY, UPDATE_TIME)"
+                                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        overlay.getProviderId(), overlay.getApi(), overlay.getBaseUrl(),
+                        overlay.getApiKey(), overlay.getConnectTimeoutMs(),
+                        overlay.getReadTimeoutMs(), writeJson(overlay.getHeaders()),
+                        writeJson(overlay.getExtraBody()), now());
+            }
+        });
         invalidate();
+    }
+
+    /**
+     * 在一个事务里执行写操作；没有事务管理器时直接执行。
+     *
+     * @param task 写操作
+     */
+    private void inWriteTransaction(Runnable task) {
+        if (writes == null) {
+            task.run();
+            return;
+        }
+        writes.execute(new org.springframework.transaction.support.TransactionCallbackWithoutResult() {
+            @Override
+            protected void doInTransactionWithoutResult(
+                    org.springframework.transaction.TransactionStatus status) {
+                task.run();
+            }
+        });
+    }
+
+    /**
+     * 在一个只读事务里读三张表；没有事务管理器时直接执行。
+     *
+     * <p>三条查询各自提交时，可能读到跨时刻的组合：绑定指向刚被删掉的模型、
+     * 覆盖表 DELETE 已提交而 INSERT 还没做。包进一个事务就只有一个时刻的视图。</p>
+     *
+     * @return 快照
+     */
+    private Snapshot readSnapshot() {
+        if (reads == null) {
+            return read();
+        }
+        return reads.execute(new org.springframework.transaction.support.TransactionCallback<Snapshot>() {
+            @Override
+            public Snapshot doInTransaction(org.springframework.transaction.TransactionStatus status) {
+                return read();
+            }
+        });
     }
 
     /**
@@ -277,24 +395,54 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
     /**
      * 增量插入模型。已存在则不改能力参数和就绪状态。
      *
+     * <p>判重靠数据库的唯一索引，不靠「先查再插」：两个请求同时 adopt 同一对键时，
+     * 先查后插都能查不到，于是都插入。现在撞上唯一约束就当作「已存在」返回 false，
+     * 这是并发下的正常结果，不是错误。</p>
+     *
      * @param providerId 供应商 id
      * @param modelId    模型 id
      * @return true 表示新插入
      */
-    public boolean insertModelIfAbsent(String providerId, String modelId) {
+    public boolean insertModelIfAbsent(String providerId, final String modelId) {
         if (findModel(providerId, modelId) != null) {
-            return false;
+            return false;   // 缓存命中，省一次拿锁
         }
+        // 「先查再插」必须原子，否则两个请求都查不到、都插入。
+        // 锁的边界由 modelKeyLock 决定：单节点是 JVM 锁，多节点是 Redis 锁。
+        return modelKeyLock.withLock(providerId, modelId, new java.util.concurrent.Callable<Boolean>() {
+            @Override
+            public Boolean call() {
+                return insertModelIfAbsentInLock(providerId, modelId);
+            }
+        }).booleanValue();
+    }
+
+    /**
+     * 已经持有锁的情况下插入模型。调用方必须保证 providerId + modelId 的锁在自己手上。
+     *
+     * @param providerId 供应商 id
+     * @param modelId    模型 id
+     * @return true 表示新插入
+     */
+    private boolean insertModelIfAbsentInLock(String providerId, String modelId) {
+        // 锁内要重新查：等锁期间别的请求可能已经插进去了。
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM " + modelTable
                         + " WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
                 Integer.class, providerId, modelId);
         if (count != null && count.intValue() > 0) {
+            invalidate();
             return false;
         }
-        jdbc.update("INSERT INTO " + modelTable
-                        + " (MODEL_ROW_ID, PROVIDER_ID, MODEL_ID, READY, DISPLAY_NAME, UPDATE_TIME)"
-                        + " VALUES (?, ?, ?, 0, ?, ?)",
-                UUID.randomUUID().toString(), providerId, modelId, modelId, now());
+        try {
+            jdbc.update("INSERT INTO " + modelTable
+                            + " (MODEL_ROW_ID, PROVIDER_ID, MODEL_ID, READY, DISPLAY_NAME, UPDATE_TIME)"
+                            + " VALUES (?, ?, ?, 0, ?, ?)",
+                    UUID.randomUUID().toString(), providerId, modelId, modelId, now());
+        } catch (org.springframework.dao.DuplicateKeyException ex) {
+            // 库里另有唯一约束（例如用户自己加了索引）拦住了重复行。这是正常结果。
+            invalidate();
+            return false;
+        }
         invalidate();
         return true;
     }
@@ -465,6 +613,9 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
                 || modelId == null || modelId.trim().isEmpty()) {
             throw new IllegalArgumentException("供应商 id 与模型 id 不能为空");
         }
+        if (ready) {
+            requireCapabilities(providerId.trim(), modelId.trim());
+        }
         int updated = jdbc.update("UPDATE " + modelTable
                         + " SET READY = ?, UPDATE_TIME = ? WHERE PROVIDER_ID = ? AND MODEL_ID = ?",
                 ready ? Integer.valueOf(1) : Integer.valueOf(0), now(),
@@ -476,20 +627,67 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
     }
 
     /**
+     * 启用前确认能力参数齐全。
+     *
+     * <p>「已启用但参数全空」是个危险状态：上下文窗口 0 会让预算检查与自动压缩整条
+     * 跳过，入参只剩 text 会让图片被拒，而页面上 READY 显示正常。这些列允许 NULL
+     * （表示沿用配置文件），所以这里只拦「数据库与配置文件都没有」的情况。</p>
+     *
+     * <p>停用不做这个检查，已上线的模型要能随时下线。</p>
+     *
+     * @param providerId 供应商 id
+     * @param modelId    模型 id
+     * @throws IllegalStateException 模型不存在或参数不完整
+     */
+    private void requireCapabilities(String providerId, String modelId) {
+        CatalogModel row = findModel(providerId, modelId);
+        if (row == null) {
+            throw new IllegalStateException("模型不存在: " + modelId);
+        }
+        List<String> missing = new ArrayList<String>();
+        if (row.getContextWindow() == null) {
+            missing.add("CONTEXT_WINDOW");
+        }
+        if (row.getMaxTokens() == null) {
+            missing.add("MAX_TOKENS");
+        }
+        if (row.getInputModes() == null || row.getInputModes().isEmpty()) {
+            missing.add("INPUT_MODES");
+        }
+        if (row.getReasoningFlag() == null) {
+            missing.add("REASONING");
+        }
+        if (row.getThinkingFormat() == null || row.getThinkingFormat().trim().isEmpty()) {
+            missing.add("THINKING_FORMAT");
+        }
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException("模型参数不完整，不能启用: " + modelId
+                    + " 缺 " + missing + "。请先在管理页填写能力参数");
+        }
+    }
+
+    /**
      * 保存业务绑定。模型未就绪时拒绝。
      *
      * @param binding 绑定
      */
-    public void saveBinding(BizBinding binding) {
+    public void saveBinding(final BizBinding binding) {
         CatalogModel model = findModel(binding.getProviderId(), binding.getModelId());
         if (model == null || !model.isReady()) {
             throw new IllegalStateException("模型未就绪，不能绑定业务: " + binding.getModelId());
         }
-        jdbc.update("DELETE FROM " + bizTable + " WHERE BIZ_ID = ?", binding.getBizId());
-        jdbc.update("INSERT INTO " + bizTable
-                        + " (BIZ_ID, PROVIDER_ID, MODEL_ID, THINKING_LEVEL, UPDATE_TIME) VALUES (?, ?, ?, ?, ?)",
-                binding.getBizId(), binding.getProviderId(), binding.getModelId(),
-                binding.getThinkingLevel(), now());
+        // 与 saveOverlay 同理：解绑旧绑定与写入新绑定必须原子。
+        inWriteTransaction(new Runnable() {
+            @Override
+            public void run() {
+                jdbc.update("DELETE FROM " + bizTable + " WHERE BIZ_ID = ?", binding.getBizId());
+                jdbc.update("INSERT INTO " + bizTable
+                                + " (BIZ_ID, PROVIDER_ID, MODEL_ID, THINKING_LEVEL, UPDATE_TIME)"
+                                + " VALUES (?, ?, ?, ?, ?)",
+                        binding.getBizId(), binding.getProviderId(), binding.getModelId(),
+                        binding.getThinkingLevel(), now());
+            }
+        });
         invalidate();
     }
 
@@ -516,10 +714,19 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
             if (cacheMillis > 0L && snapshot != null && System.currentTimeMillis() < expiresAt) {
                 return snapshot;
             }
-            Snapshot loaded = read();
-            snapshot = loaded;
-            expiresAt = cacheMillis <= 0L ? 0L : System.currentTimeMillis() + cacheMillis;
-            return loaded;
+            // 读库可能耗时，期间管理页可能写入并清了缓存。那样这份快照就是旧值，
+            // 写回缓存会让旧配置再存活一整个缓存周期。核对版本，不一致就重读。
+            for (int i = 0; i < 3; i++) {
+                long before = generation.get();
+                Snapshot loaded = readSnapshot();
+                if (generation.get() == before) {
+                    snapshot = loaded;
+                    expiresAt = cacheMillis <= 0L ? 0L : System.currentTimeMillis() + cacheMillis;
+                    return loaded;
+                }
+            }
+            // 连续被写入打断：配置正在被频繁改，缓存本来也没意义，直接用这次读到的值。
+            return readSnapshot();
         }
     }
 
@@ -541,16 +748,21 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
             }
         });
         Map<String, CatalogModel> models = new LinkedHashMap<String, CatalogModel>();
+        // 老库可能还有重复行（索引没建上）。ORDER BY + 严格的 > 让「取哪一行」
+        // 有确定答案，不依赖数据库的返回顺序：先按更新时间新的在前，同一毫秒时
+        // 按 MODEL_ROW_ID 排序，保证每次跑结果一致。
         jdbc.query("SELECT PROVIDER_ID, MODEL_ID, READY, REASONING, INPUT_MODES, CONTEXT_WINDOW,"
                 + " MAX_TOKENS, THINKING_FORMAT, DISPLAY_NAME, UPDATE_TIME,"
                 + " THINKING_LEVEL_MAP, SAMPLER_PARAMS, SAMPLER_PARAMS_BY_LEVEL,"
-                + " MODEL_HEADERS, EXTRA_BODY FROM " + modelTable, new org.springframework.jdbc.core.RowCallbackHandler() {
+                + " MODEL_HEADERS, EXTRA_BODY FROM " + modelTable
+                + " ORDER BY PROVIDER_ID, MODEL_ID, UPDATE_TIME DESC, MODEL_ROW_ID DESC",
+                new org.springframework.jdbc.core.RowCallbackHandler() {
             @Override
             public void processRow(ResultSet rs) throws SQLException {
                 CatalogModel row = toModel(rs);
                 String id = key(row.getProviderId(), row.getModelId());
-                CatalogModel previous = models.get(id);
-                if (previous == null || row.getUpdatedAtMillis() >= previous.getUpdatedAtMillis()) {
+                if (!models.containsKey(id)) {
+                    // 排序已经把最优的那行放在最前，后来的不再覆盖。
                     models.put(id, row);
                 }
             }
@@ -568,13 +780,25 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
         return new Snapshot(providers, models, bindings);
     }
 
+    /**
+     * 结果集转目录行。
+     *
+     * <p>{@code REASONING} 用可空读法：这一列允许 NULL（表示没填），解析时要回落到
+     * 配置文件里的同名模型。早先直接用 {@code getInt(...) == 1}，NULL 与 0 无法区分，
+     * 于是「没填」被当成「不支持推理」。</p>
+     *
+     * @param rs 结果集
+     * @return 目录行
+     * @throws SQLException 读列失败
+     */
     private static CatalogModel toModel(ResultSet rs) throws SQLException {
         Timestamp updated = rs.getTimestamp("UPDATE_TIME");
-        return new CatalogModel(
+        Integer reasoning = integer(rs, "REASONING");
+        return CatalogModel.fromCatalogRow(
                 rs.getString("PROVIDER_ID"),
                 rs.getString("MODEL_ID"),
                 rs.getInt("READY") == 1,
-                rs.getInt("REASONING") == 1,
+                reasoning == null ? null : Boolean.valueOf(reasoning.intValue() == 1),
                 splitModes(rs.getString("INPUT_MODES")),
                 integer(rs, "CONTEXT_WINDOW"),
                 integer(rs, "MAX_TOKENS"),
@@ -613,7 +837,7 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
                     AiLiteJson.mapper().readValue(raw, new TypeReference<LinkedHashMap<String, String>>() {
                     }));
         } catch (Exception ex) {
-            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON: " + ex.getMessage(), ex);
+            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON", ex);
         }
     }
 
@@ -639,7 +863,7 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
                     AiLiteJson.mapper().readValue(raw, new TypeReference<LinkedHashMap<String, Object>>() {
                     }));
         } catch (Exception ex) {
-            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON: " + ex.getMessage(), ex);
+            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON", ex);
         }
     }
 
@@ -666,7 +890,7 @@ public final class JdbcRuntimeCatalog implements RuntimeCatalog {
                             new TypeReference<LinkedHashMap<String, Map<String, Object>>>() {
                             }));
         } catch (Exception ex) {
-            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON: " + ex.getMessage(), ex);
+            throw new IllegalStateException(where + " 的 " + column + " 不是合法 JSON", ex);
         }
     }
 

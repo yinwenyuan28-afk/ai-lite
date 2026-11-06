@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS AI_LITE_MODEL (
     PRIMARY KEY (MODEL_ROW_ID)
 );
 
+-- 模型表不加 (PROVIDER_ID, MODEL_ID) 唯一索引：判重在应用层用锁完成，
+-- 单节点用进程内锁，多节点用 Redis 锁（ai-lite.catalog.multi-node）。
+
 CREATE TABLE IF NOT EXISTS AI_LITE_BIZ_BINDING (
     BIZ_ID          VARCHAR(64)  NOT NULL,
     PROVIDER_ID     VARCHAR(64)  NOT NULL,

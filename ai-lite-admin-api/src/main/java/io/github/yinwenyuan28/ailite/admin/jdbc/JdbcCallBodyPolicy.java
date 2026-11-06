@@ -43,6 +43,16 @@ public final class JdbcCallBodyPolicy implements CallBodySettings {
      */
     private volatile String cachedLevel;
     private volatile long expiresAt;
+    /**
+     * 缓存版本号。每次 {@link #save} 与 {@link #invalidate} 都 +1。
+     *
+     * <p>{@link #level()} 读库前记下版本，写缓存前核对：不一致说明这期间档位被改过，
+     * 手里这份是旧值，写进去会让旧档位再存活一个完整的缓存周期。</p>
+     */
+    private final java.util.concurrent.atomic.AtomicLong generation =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** 写操作事务；null 表示没有事务管理器，逐条提交。 */
+    private final org.springframework.transaction.support.TransactionTemplate writes;
 
     /**
      * 默认表名，供不经过配置的调用方（测试、手工装配）使用。
@@ -67,6 +77,23 @@ public final class JdbcCallBodyPolicy implements CallBodySettings {
      * @param cacheSeconds 档位缓存秒数；小于等于 0 表示每次都读库
      */
     public JdbcCallBodyPolicy(JdbcTemplate jdbc, String table, int cacheSeconds) {
+        this(jdbc, table, cacheSeconds, null);
+    }
+
+    /**
+     * 带事务的构造器。
+     *
+     * <p>{@link #save} 是先 DELETE 再 INSERT，两条语句在自动提交下各自生效。
+     * INSERT 失败时 DELETE 已经落库，档位会退回默认的 none——用户看到保存报错，
+     * 却不知道档位已经被清掉了。传了事务管理器就一起回滚。</p>
+     *
+     * @param jdbc         JDBC
+     * @param table        设置表名，只允许字母、数字和下划线
+     * @param cacheSeconds 档位缓存秒数；小于等于 0 表示每次都读库
+     * @param txManager    事务管理器；{@code null} 表示不包事务
+     */
+    public JdbcCallBodyPolicy(JdbcTemplate jdbc, String table, int cacheSeconds,
+                              org.springframework.transaction.PlatformTransactionManager txManager) {
         if (jdbc == null) {
             throw new IllegalArgumentException("JdbcTemplate 不能为空");
         }
@@ -74,6 +101,8 @@ public final class JdbcCallBodyPolicy implements CallBodySettings {
         // 非法表名属于配置错误，装配期就失败，不要等到第一次读档位才发现。
         this.table = JdbcRuntimeCatalog.safeTable(table);
         this.cacheMillis = cacheSeconds <= 0 ? 0L : cacheSeconds * 1000L;
+        this.writes = txManager == null ? null
+                : new org.springframework.transaction.support.TransactionTemplate(txManager);
     }
 
     /**
@@ -89,8 +118,10 @@ public final class JdbcCallBodyPolicy implements CallBodySettings {
         if (cached != null && System.currentTimeMillis() < expiresAt) {
             return cached;
         }
+        long before = generation.get();
         String value = readLevel();
-        if (cacheMillis > 0L) {
+        // 查库期间有人 save/invalidate 过：不要用旧值覆盖刚写进来的新值。
+        if (cacheMillis > 0L && generation.get() == before) {
             cachedLevel = value;
             expiresAt = System.currentTimeMillis() + cacheMillis;
         }
@@ -135,12 +166,32 @@ public final class JdbcCallBodyPolicy implements CallBodySettings {
             throw new IllegalArgumentException("记录档位只能是 none、failure 或 all");
         }
         JdbcRuntimeCatalog.requireTable(jdbc, table, "ai-lite-catalog.sql");
-        jdbc.update("DELETE FROM " + table + " WHERE SETTING_KEY = ?", KEY);
-        jdbc.update("INSERT INTO " + table + " (SETTING_KEY, SETTING_VALUE, UPDATE_TIME)"
-                + " VALUES (?, ?, ?)", KEY, value, new Timestamp(System.currentTimeMillis()));
+        // 先删后插放进一个事务：INSERT 失败时 DELETE 也要撤回，否则档位被悄悄清成 none。
+        final String finalValue = value;
+        Runnable write = new Runnable() {
+            @Override
+            public void run() {
+                jdbc.update("DELETE FROM " + table + " WHERE SETTING_KEY = ?", KEY);
+                jdbc.update("INSERT INTO " + table + " (SETTING_KEY, SETTING_VALUE, UPDATE_TIME)"
+                        + " VALUES (?, ?, ?)", KEY, finalValue, new Timestamp(System.currentTimeMillis()));
+            }
+        };
+        if (writes == null) {
+            write.run();
+        } else {
+            writes.execute(new org.springframework.transaction.support.TransactionCallbackWithoutResult() {
+                @Override
+                protected void doInTransactionWithoutResult(
+                        org.springframework.transaction.TransactionStatus status) {
+                    write.run();
+                }
+            });
+        }
         // 写入成功后表确实存在，允许下次故障重新告警；同时把缓存直接改成新值，
         // 让本机的档位变更立刻生效，不必等 TTL 过期。
         warned.set(false);
+        // 先推进版本，作废所有正在读库的线程，再写缓存。
+        generation.incrementAndGet();
         if (cacheMillis > 0L) {
             cachedLevel = value;
             expiresAt = System.currentTimeMillis() + cacheMillis;
@@ -151,6 +202,7 @@ public final class JdbcCallBodyPolicy implements CallBodySettings {
      * 清掉本机缓存。多节点部署时可由外部在改完档位后广播触发。
      */
     public void invalidate() {
+        generation.incrementAndGet();
         cachedLevel = null;
         expiresAt = 0L;
     }

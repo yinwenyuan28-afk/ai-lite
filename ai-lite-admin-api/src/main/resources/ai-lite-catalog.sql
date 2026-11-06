@@ -1,4 +1,4 @@
--- AI Lite 运行时目录。只有主键，不建额外唯一索引。
+-- AI Lite 运行时目录。
 -- API_KEY 列是供应商密钥，接口只返回脱敏值，不要写进日志。
 -- 按实际数据库调整 VARCHAR / TIMESTAMP。
 --
@@ -47,6 +47,17 @@ CREATE TABLE AI_LITE_MODEL (
     UPDATE_TIME             TIMESTAMP,
     PRIMARY KEY (MODEL_ROW_ID)
 );
+
+-- 同一供应商下同一模型 id 只允许一行，但这里不加唯一索引：
+-- 加索引需要改表结构，且升级前已有重复行的库要人工清理才能建上。
+-- 判重改在应用层用锁完成（ai-lite.catalog.multi-node 决定是进程内锁还是 Redis 锁），
+-- 见 JdbcRuntimeCatalog#insertModelIfAbsent 与 ModelKeyLock。
+--
+-- 想额外加一道数据库保障的，可以手工建这个索引（先确认没有重复行）：
+--   SELECT PROVIDER_ID, MODEL_ID, COUNT(*) FROM AI_LITE_MODEL
+--    GROUP BY PROVIDER_ID, MODEL_ID HAVING COUNT(*) > 1;
+--   CREATE UNIQUE INDEX UX_AI_LITE_MODEL_PROVIDER_MODEL
+--     ON AI_LITE_MODEL (PROVIDER_ID, MODEL_ID);
 
 CREATE TABLE AI_LITE_BIZ_BINDING (
     BIZ_ID          VARCHAR(64)  NOT NULL,

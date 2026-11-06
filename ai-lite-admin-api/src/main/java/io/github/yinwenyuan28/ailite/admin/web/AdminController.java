@@ -74,6 +74,8 @@ public class AdminController {
     private final String callTable;
     private final String callBodyTable;
     private final CallBodySettings bodyPolicy;
+    /** 只读档位来源：用户自带 {@link CallBodyPolicy} 时管理页靠它显示真实档位。 */
+    private final CallBodyPolicy readOnlyPolicy;
     private final HttpExecutor http;
     /** 模型解析器；为 null 时「测试调用」退回手写实现（只支持 OpenAI 兼容协议）。 */
     private final ModelResolver resolver;
@@ -147,7 +149,7 @@ public class AdminController {
                            JdbcTemplate jdbc, String callTable, String callBodyTable,
                            CallBodySettings bodyPolicy, HttpExecutor http) {
         this(config, catalog, prompts, jdbc, callTable, callBodyTable, bodyPolicy, http,
-                null, null);
+                null, null, null);
     }
 
     /**
@@ -168,6 +170,35 @@ public class AdminController {
                            JdbcTemplate jdbc, String callTable, String callBodyTable,
                            CallBodySettings bodyPolicy, HttpExecutor http,
                            ModelResolver resolver, Map<String, LlmTransport> transports) {
+        this(config, catalog, prompts, jdbc, callTable, callBodyTable, bodyPolicy, http,
+                resolver, transports, null);
+    }
+
+    /**
+     * 完整构造器：额外接收一个只读档位来源。
+     *
+     * <p><b>为什么需要两个来源</b>：用户可能自己声明 {@code CallBodyPolicy}（只读）
+     * 而不声明可写的 {@code CallBodySettings}。此时网关用的是用户的策略，管理页却
+     * 拿不到任何档位，只能显示 none、保存报不可用——页面结论与实际情况相反。
+     * 传入只读来源后，页面能显示真实档位，保存时给出「只能读」的明确原因。</p>
+     *
+     * @param config        配置文件里的供应商与业务 id
+     * @param catalog       运行时目录
+     * @param prompts       提示词管理器，可为 null
+     * @param jdbc          调用记录查询
+     * @param callTable     调用记录表名，未配置时为 null
+     * @param callBodyTable 调用正文表名；null 表示按摘要表名推导
+     * @param bodyPolicy    可写的调用正文档位；null 表示管理页不能改档位
+     * @param http          出站执行器，可为 null
+     * @param resolver      模型解析器，可为 null
+     * @param transports    协议适配器，可为 null
+     * @param readOnlyPolicy 只读档位来源，可为 null；仅当 {@code bodyPolicy} 为 null 时使用
+     */
+    public AdminController(AiLiteConfig config, JdbcRuntimeCatalog catalog, PromptManager prompts,
+                           JdbcTemplate jdbc, String callTable, String callBodyTable,
+                           CallBodySettings bodyPolicy, HttpExecutor http,
+                           ModelResolver resolver, Map<String, LlmTransport> transports,
+                           CallBodyPolicy readOnlyPolicy) {
         this.config = config;
         this.catalog = catalog;
         this.prompts = prompts;
@@ -179,6 +210,7 @@ public class AdminController {
         this.resolver = resolver;
         this.transports = transports == null
                 ? Collections.<String, LlmTransport>emptyMap() : transports;
+        this.readOnlyPolicy = readOnlyPolicy;
     }
 
     /**
@@ -806,24 +838,34 @@ public class AdminController {
     }
 
     /**
-     * @return 当前输入输出记录档位，以及三个可选项
+     * 当前档位与三个可选项。
+     *
+     * <p>{@code writable} 表示管理页能不能改：用户自带只读策略时为 false，
+     * 页面据此禁用下拉框，而不是等他点保存才报错。</p>
+     *
+     * @return 档位、选项与可写标记
      */
     @GetMapping("/ai-lite/admin/api/calls/body-level")
     public Map<String, Object> bodyLevel() {
         Map<String, Object> data = new LinkedHashMap<String, Object>();
-        data.put("level", bodyPolicy == null ? CallBodyPolicy.NONE : bodyPolicy.level());
+        data.put("level", currentBodyLevel());
         data.put("options", bodyLevelOptions());
+        data.put("writable", Boolean.valueOf(bodyPolicy != null));
         return ok(data);
     }
 
     /**
+     * 保存档位。用户只提供只读策略时说明原因，不能笼统报「不可用」。
+     *
      * @param body 含 level：none、failure 或 all
      * @return 保存后的档位
      */
     @PutMapping("/ai-lite/admin/api/calls/body-level")
     public Map<String, Object> saveBodyLevel(@RequestBody(required = false) Map<String, Object> body) {
         if (bodyPolicy == null) {
-            throw new IllegalStateException("调用记录档位不可用");
+            throw new IllegalStateException(readOnlyPolicy != null
+                    ? "档位由自定义 CallBodyPolicy 提供，管理页只能读。要改档位请在实现里处理"
+                    : "调用记录档位不可用");
         }
         bodyPolicy.save(text(body == null ? null : body.get("level")));
         return bodyLevel();
@@ -1376,6 +1418,21 @@ public class AdminController {
         body.put("ok", Boolean.TRUE);
         body.put("data", data);
         return body;
+    }
+
+    /**
+     * 网关实际在用的档位。
+     *
+     * <p>可写实现优先；没有可写实现时退到只读来源——否则用户自带策略的场景下，
+     * 页面显示 none、实际却在记录，比不给页面更难排查。</p>
+     *
+     * @return none、failure 或 all
+     */
+    private String currentBodyLevel() {
+        if (bodyPolicy != null) {
+            return bodyPolicy.level();
+        }
+        return readOnlyPolicy == null ? CallBodyPolicy.NONE : readOnlyPolicy.level();
     }
 
     private static List<Map<String, Object>> thinkingFormatOptions() {

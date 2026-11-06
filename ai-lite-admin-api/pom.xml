@@ -46,6 +46,23 @@
             <artifactId>spring-boot-autoconfigure</artifactId>
             <optional>true</optional>
         </dependency>
+        <!--
+            多节点部署的目录写锁用 Redis SET NX PX。标成 optional：单节点用户不引入
+            Redis 时用不到，装配层按 ai-lite.catalog.multi-node 选择实现。
+        -->
+        <dependency>
+            <groupId>org.springframework.data</groupId>
+            <artifactId>spring-data-redis</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!--
+            Redis 锁的集成测试要一个真实客户端。本机没有 Redis 时测试整类跳过。
+        -->
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+            <scope>test</scope>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.boot</groupId>

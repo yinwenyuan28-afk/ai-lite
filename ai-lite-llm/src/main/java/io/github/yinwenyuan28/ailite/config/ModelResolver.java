@@ -279,9 +279,14 @@ public final class ModelResolver {
     /**
      * 把目录行转成解析用的模型。
      *
-     * <p>七项能力参数只来自数据库（它们决定了模型能不能被业务选中）。后五项是请求的
-     * 固有属性，数据库没有对应表达能力时从配置文件里的同名模型补齐：数据库列是 NULL
-     * 表示没配、沿用配置文件；空 Map 表示明确清空。</p>
+     * <p>解析顺序统一为「数据库 → 配置文件同名模型 → 内置默认」。数据库列是 NULL
+     * 表示这一项没填，要沿用配置文件；空 Map 表示明确清空。</p>
+     *
+     * <p><b>为什么能力参数也要回落</b>：管理页建行时能力参数全是 NULL（见
+     * {@code insertModelIfAbsent}），只要没填就启用，就会得到「已启用、参数全空」的
+     * 模型。早先这里直接把 NULL 落成内置默认值，结果是上下文窗口 0（预算与自动压缩
+     * 整条跳过）、入参只剩 text（图片被拒），而页面显示一切正常。回落之后，
+     * 配置文件里写过的能力参数仍然生效。</p>
      *
      * @param row  目录行
      * @param yaml 配置文件里的同名模型；null 表示配置文件里没有这个模型
@@ -291,18 +296,26 @@ public final class ModelResolver {
         AiLiteConfig.Model model = new AiLiteConfig.Model();
         model.setId(row.getModelId());
         model.setName(row.getDisplayName());
-        model.setReasoning(row.isReasoning());
+        // 推理开关：数据库没填时用配置文件；两边都没有才用内置默认（true）。
+        model.setReasoning(row.getReasoningFlag() != null
+                ? row.getReasoningFlag().booleanValue()
+                : (yaml != null ? yaml.isReasoning() : new AiLiteConfig.Model().isReasoning()));
         if (row.getInputModes() == null || row.getInputModes().isEmpty()) {
-            List<String> text = new ArrayList<String>();
-            text.add("text");
-            model.setInput(text);
+            model.setInput(yaml != null && yaml.getInput() != null && !yaml.getInput().isEmpty()
+                    ? new ArrayList<String>(yaml.getInput()) : singletonText());
         } else {
             model.setInput(new ArrayList<String>(row.getInputModes()));
         }
-        model.setContextWindow(row.getContextWindow());
-        model.setMaxTokens(row.getMaxTokens() == null ? Integer.valueOf(8192) : row.getMaxTokens());
-        model.setThinkingFormat(Strings.isBlank(row.getThinkingFormat())
-                ? "reasoning-effort" : row.getThinkingFormat().trim());
+        model.setContextWindow(row.getContextWindow() != null
+                ? row.getContextWindow()
+                : (yaml != null ? yaml.getContextWindow() : null));
+        model.setMaxTokens(row.getMaxTokens() != null
+                ? row.getMaxTokens()
+                : (yaml != null ? yaml.getMaxTokens() : Integer.valueOf(8192)));
+        model.setThinkingFormat(!Strings.isBlank(row.getThinkingFormat())
+                ? row.getThinkingFormat().trim()
+                : (yaml != null && !Strings.isBlank(yaml.getThinkingFormat())
+                        ? yaml.getThinkingFormat().trim() : "reasoning-effort"));
         model.setThinkingLevelMap(copyOr(row.getThinkingLevelMap(),
                 yaml == null ? null : yaml.getThinkingLevelMap()));
         model.setSamplerParams(copyOr(row.getSamplerParams(),
@@ -314,6 +327,15 @@ public final class ModelResolver {
         model.setExtraBody(copyOr(row.getExtraBody(),
                 yaml == null ? null : yaml.getExtraBody()));
         return model;
+    }
+
+    /**
+     * @return 只含 text 的入参类型列表，避免每个调用点各写一遍
+     */
+    private static List<String> singletonText() {
+        List<String> text = new ArrayList<String>();
+        text.add("text");
+        return text;
     }
 
     /**
