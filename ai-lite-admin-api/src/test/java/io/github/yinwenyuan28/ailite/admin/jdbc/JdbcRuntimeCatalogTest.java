@@ -321,6 +321,12 @@ public class JdbcRuntimeCatalogTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    /**
+     * 老库（或绕过锁直接写库）里已经存在重复行时，读取要取更新时间较新的那一行。
+     *
+     * <p>应用层锁只能拦住走 {@code insertModelIfAbsent} 的写入；直连 SQL 或历史数据
+     * 仍可能有重复行，读路径必须给出确定答案。</p>
+     */
     @Test
     public void newerDuplicateRowWins() {
         jdbc.update("INSERT INTO AI_LITE_MODEL (MODEL_ROW_ID, PROVIDER_ID, MODEL_ID, READY, UPDATE_TIME)"

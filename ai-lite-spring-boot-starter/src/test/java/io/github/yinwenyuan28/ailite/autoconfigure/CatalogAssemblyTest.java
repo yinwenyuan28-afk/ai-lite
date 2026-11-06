@@ -106,6 +106,51 @@ public class CatalogAssemblyTest {
     }
 
     /**
+     * 用户自带只读档位策略时，容器仍能正常启动，且网关拿到的是用户那个。
+     *
+     * <p><b>回归背景</b>：{@code @ConditionalOnMissingBean(CallBodyPolicy.class)} 让
+     * {@code JdbcCallBodyPolicy} 在用户声明同类型 Bean 后不再创建，而管理页注入的是
+     * {@code CallBodySettings}，于是取到 null：页面恒显示 none、保存直接报「不可用」，
+     * 网关实际却在用用户的策略。</p>
+     *
+     * <p><b>为什么不能把条件改成 {@code CallBodySettings}</b>：那样容器里会同时存在
+     * 用户的 {@code CallBodyPolicy} 与 {@code JdbcCallBodyPolicy}，而网关用
+     * {@code getBeanProvider(...).getIfAvailable()} 取，多候选抛
+     * {@code NoUniqueBeanDefinitionException}，应用起不来。这条用例就是守这个陷阱。</p>
+     */
+    @Test
+    public void userSuppliedReadOnlyBodyPolicyDoesNotBreakStartup() {
+        runner.withUserConfiguration(ReadOnlyBodyPolicyConfig.class).run(context -> {
+            assertThat(context).hasNotFailed();
+            // 只有一个 CallBodyPolicy，网关才能用 getIfAvailable 取到。
+            assertThat(context.getBeansOfType(
+                    io.github.yinwenyuan28.ailite.llm.CallBodyPolicy.class)).hasSize(1);
+            assertThat(context.getBean(io.github.yinwenyuan28.ailite.llm.LlmGateway.class))
+                    .isNotNull();
+        });
+    }
+
+    /**
+     * 用户只提供只读档位策略（不带 save 能力）。
+     */
+    @Configuration
+    static class ReadOnlyBodyPolicyConfig {
+
+        /**
+         * @return 用户自定义档位
+         */
+        @Bean
+        public io.github.yinwenyuan28.ailite.llm.CallBodyPolicy userBodyPolicy() {
+            return new io.github.yinwenyuan28.ailite.llm.CallBodyPolicy() {
+                @Override
+                public String level() {
+                    return io.github.yinwenyuan28.ailite.llm.CallBodyPolicy.ALL;
+                }
+            };
+        }
+    }
+
+    /**
      * 换一套 schema 的上下文。
      *
      * @param schema 提供 DataSource 的配置类
