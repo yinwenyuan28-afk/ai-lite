@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Date;
 import java.util.UUID;
+import java.util.concurrent.Executor;
 
 /**
  * 在注入的线程池里写一行摘要日志并落表。
@@ -22,9 +23,48 @@ public final class AsyncLlmCallLogger {
     private final ExecutorProvider executor;
     private final LlmCallStore store;
 
+    /**
+     * 用注入的执行器写记录。
+     *
+     * @param executor 执行器；null 退化为直接执行
+     * @param store    记录存储；null 退化为空实现
+     */
     public AsyncLlmCallLogger(ExecutorProvider executor, LlmCallStore store) {
         this.executor = executor == null ? new DirectExecutorProvider() : executor;
         this.store = store == null ? new NoopLlmCallStore() : store;
+    }
+
+    /**
+     * 用显式执行器写记录。用于「调用方明确不要内联」的场景（F-14）。
+     *
+     * @param executor 记录执行器，不能为 null
+     * @param store    记录存储；null 退化为空实现
+     * @param ignored  仅为区分重载的占位参数，恒传 true
+     */
+    public AsyncLlmCallLogger(Executor executor, LlmCallStore store, boolean ignored) {
+        this(executor == null ? null : new FixedExecutorProvider(executor), store);
+    }
+
+    /**
+     * 把一个 {@link Executor} 包成 {@link ExecutorProvider}，只为复用同一段记录逻辑。
+     */
+    private static final class FixedExecutorProvider implements ExecutorProvider {
+
+        private final Executor delegate;
+
+        private FixedExecutorProvider(Executor delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public Executor io() {
+            return delegate;
+        }
+
+        @Override
+        public void close() {
+            // 执行器由调用方负责关闭。
+        }
     }
 
     /**

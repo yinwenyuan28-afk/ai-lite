@@ -107,7 +107,7 @@ public class AsyncConvergenceRegressionTest {
 
         // 记录按回调体前段当时的结局写出；扩展点异常由兜底收敛 future，
         // 不会再补写第二条。硬契约是「恰好一条、不因异常丢记录」。
-        assertThat(store.rows).hasSize(1);
+        store.awaitRows(1);
     }
 
     @Test
@@ -155,7 +155,7 @@ public class AsyncConvergenceRegressionTest {
                 .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
         assertThat(result.getContent()).isEqualTo("ok");
-        assertThat(store.rows).hasSize(1);
+        store.awaitRows(1);
         assertThat(store.rows.get(0).getInputBody()).isNotNull();
     }
 
@@ -312,6 +312,12 @@ public class AsyncConvergenceRegressionTest {
         };
     }
 
+    /**
+     * 记录用存储。
+     *
+     * <p>行记录在 {@code ai-lite-call-log-*} 池上异步写入（F-14），
+     * 断言条数前要先等它落地。</p>
+     */
     private static final class CountingStore implements LlmCallStore {
         private final List<LlmCallRecord> rows =
                 Collections.synchronizedList(new ArrayList<LlmCallRecord>());
@@ -319,6 +325,24 @@ public class AsyncConvergenceRegressionTest {
         @Override
         public void insert(LlmCallRecord record) {
             rows.add(record);
+        }
+
+        /**
+         * 等到至少 expected 条记录落地。
+         *
+         * @param expected 期望的条数
+         */
+        void awaitRows(int expected) {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (rows.size() < expected && System.nanoTime() < deadline) {
+                try {
+                    Thread.sleep(10L);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            assertThat(rows).hasSize(expected);
         }
     }
 }

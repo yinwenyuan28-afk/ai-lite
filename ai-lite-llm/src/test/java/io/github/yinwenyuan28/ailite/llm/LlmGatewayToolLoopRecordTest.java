@@ -38,8 +38,8 @@ public class LlmGatewayToolLoopRecordTest {
 
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
         assertThat(transport.requests).isEmpty();
-        assertThat(store.records).hasSize(1);
-        assertThat(store.records.get(0).getStopReason())
+        store.awaitRounds(1);
+        assertThat(store.byRound().get(0).getStopReason())
                 .isEqualTo(LlmStopReason.ABORTED.wire());
     }
 
@@ -55,12 +55,12 @@ public class LlmGatewayToolLoopRecordTest {
                 .satisfies(ex -> assertThat(ex.getCause())
                         .isInstanceOf(IllegalStateException.class));
 
-        assertThat(store.records).hasSize(2);
-        assertThat(store.records.get(0).getStopReason())
+        store.awaitRounds(2);
+        assertThat(store.byRound().get(0).getStopReason())
                 .isEqualTo(LlmStopReason.TOOL_USE.wire());
-        assertThat(store.records.get(1).getStopReason())
+        assertThat(store.byRound().get(1).getStopReason())
                 .isEqualTo(LlmStopReason.ERROR.wire());
-        assertThat(store.records.get(1).getSuccess()).isEqualTo(Integer.valueOf(0));
+        assertThat(store.byRound().get(1).getSuccess()).isEqualTo(Integer.valueOf(0));
     }
 
     @Test
@@ -73,7 +73,7 @@ public class LlmGatewayToolLoopRecordTest {
                 .toolLoop(llmCall(), tools(), Integer.valueOf(4));
 
         assertThat(result.getContent()).isEqualTo("done");
-        assertThat(store.records).hasSize(2);
+        store.awaitRounds(2);
         List<LlmMessage> second = transport.requests.get(1).getMessages();
         assertThat(second.get(second.size() - 1).getText()).isEqualTo("");
     }
@@ -90,13 +90,13 @@ public class LlmGatewayToolLoopRecordTest {
         gateway(transport, fixed(Collections.singletonList("ok")), store)
                 .toolLoop(llmCall(), tools(), Integer.valueOf(4));
 
-        assertThat(store.records).hasSize(2);
-        assertThat(store.records.get(0).getStopReason())
+        store.awaitRounds(2);
+        assertThat(store.byRound().get(0).getStopReason())
                 .isEqualTo(LlmStopReason.TOOL_USE.wire());
-        assertThat(store.records.get(0).getTotalTokens()).isEqualTo(Integer.valueOf(3));
-        assertThat(store.records.get(1).getStopReason())
+        assertThat(store.byRound().get(0).getTotalTokens()).isEqualTo(Integer.valueOf(3));
+        assertThat(store.byRound().get(1).getStopReason())
                 .isEqualTo(LlmStopReason.STOP.wire());
-        assertThat(store.records.get(1).getTotalTokens()).isEqualTo(Integer.valueOf(12));
+        assertThat(store.byRound().get(1).getTotalTokens()).isEqualTo(Integer.valueOf(12));
     }
 
     @Test
@@ -109,8 +109,8 @@ public class LlmGatewayToolLoopRecordTest {
                 .toolLoop(llmCall(), tools(), Integer.valueOf(4), cancel);
 
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
-        assertThat(store.records).hasSize(2);
-        assertThat(store.records.get(1).getStopReason())
+        store.awaitRounds(2);
+        assertThat(store.byRound().get(1).getStopReason())
                 .isEqualTo(LlmStopReason.ABORTED.wire());
     }
 
@@ -125,10 +125,10 @@ public class LlmGatewayToolLoopRecordTest {
                 .get(5, TimeUnit.SECONDS);
 
         assertThat(result.getContent()).isEqualTo("done");
-        assertThat(store.records).hasSize(2);
-        assertThat(store.records.get(0).getStopReason())
+        store.awaitRounds(2);
+        assertThat(store.byRound().get(0).getStopReason())
                 .isEqualTo(LlmStopReason.TOOL_USE.wire());
-        assertThat(store.records.get(1).getStopReason())
+        assertThat(store.byRound().get(1).getStopReason())
                 .isEqualTo(LlmStopReason.STOP.wire());
     }
 
@@ -143,8 +143,8 @@ public class LlmGatewayToolLoopRecordTest {
                 .get(5, TimeUnit.SECONDS);
 
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.MAX_ROUNDS);
-        assertThat(store.records).hasSize(2);
-        assertThat(store.records.get(1).getStopReason())
+        store.awaitRounds(2);
+        assertThat(store.byRound().get(1).getStopReason())
                 .isEqualTo(LlmStopReason.MAX_ROUNDS.wire());
     }
 
@@ -165,8 +165,8 @@ public class LlmGatewayToolLoopRecordTest {
             assertThat(ex.getCause().getMessage()).contains("工具执行失败");
         }
 
-        assertThat(store.records).hasSize(2);
-        assertThat(store.records.get(1).getStopReason())
+        store.awaitRounds(2);
+        assertThat(store.byRound().get(1).getStopReason())
                 .isEqualTo(LlmStopReason.ERROR.wire());
     }
 
@@ -183,8 +183,8 @@ public class LlmGatewayToolLoopRecordTest {
                 .get(5, TimeUnit.SECONDS);
 
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
-        assertThat(store.records).hasSize(2);
-        assertThat(store.records.get(1).getStopReason())
+        store.awaitRounds(2);
+        assertThat(store.byRound().get(1).getStopReason())
                 .isEqualTo(LlmStopReason.ABORTED.wire());
     }
 
@@ -355,6 +355,13 @@ public class LlmGatewayToolLoopRecordTest {
         }
     }
 
+    /**
+     * 记录用存储。
+     *
+     * <p>行记录在 {@code ai-lite-call-log-*} 池上异步写入（F-14），写入顺序
+     * 不等于轮次顺序——池里有多个线程。断言「每轮一条、结局对得上」时用
+     * {@link #awaitRounds(int)} 加 {@link #byRound()}，不要依赖物理写入顺序。</p>
+     */
     private static final class RecordingStore implements LlmCallStore {
 
         final List<LlmCallRecord> records =
@@ -363,6 +370,40 @@ public class LlmGatewayToolLoopRecordTest {
         @Override
         public void insert(LlmCallRecord record) {
             records.add(record);
+        }
+
+        /**
+         * 等到至少 expected 条记录落地。
+         *
+         * @param expected 期望的条数
+         */
+        void awaitRounds(int expected) {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (records.size() < expected && System.nanoTime() < deadline) {
+                try {
+                    Thread.sleep(10L);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            assertThat(records).hasSize(expected);
+        }
+
+        /**
+         * @return 按轮号升序排好的记录副本
+         */
+        List<LlmCallRecord> byRound() {
+            List<LlmCallRecord> copy = new ArrayList<LlmCallRecord>(records);
+            Collections.sort(copy, new java.util.Comparator<LlmCallRecord>() {
+                @Override
+                public int compare(LlmCallRecord a, LlmCallRecord b) {
+                    Integer left = a.getRoundNo() == null ? Integer.valueOf(0) : a.getRoundNo();
+                    Integer right = b.getRoundNo() == null ? Integer.valueOf(0) : b.getRoundNo();
+                    return left.compareTo(right);
+                }
+            });
+            return copy;
         }
     }
 }

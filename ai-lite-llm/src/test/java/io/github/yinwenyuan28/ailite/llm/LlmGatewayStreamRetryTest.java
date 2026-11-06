@@ -189,10 +189,10 @@ public class LlmGatewayStreamRetryTest {
         gateway(transport, store)
                 .oneByStreamWithRetry(call(), collect(new ArrayList<String>()), fastPolicy(3));
 
-        assertThat(store.records).hasSize(2);
-        assertThat(store.records.get(0).getStopReason())
+        store.awaitRows(2);
+        assertThat(store.byRound().get(0).getStopReason())
                 .isEqualTo(LlmStopReason.ERROR.wire());
-        assertThat(store.records.get(1).getStopReason())
+        assertThat(store.byRound().get(1).getStopReason())
                 .isEqualTo(LlmStopReason.STOP.wire());
     }
 
@@ -473,6 +473,13 @@ public class LlmGatewayStreamRetryTest {
         }
     }
 
+    /**
+     * 收集调用记录。
+     *
+     * <p>行记录在 {@code ai-lite-call-log-*} 池上异步写入（F-14），池里有多个
+     * 线程，因此写入顺序不等于轮次顺序：断言前先 {@link #awaitRows(int)}，
+     * 需要按轮次比对时用 {@link #byRound()}。</p>
+     */
     private static final class RecordingStore implements LlmCallStore {
         final List<LlmCallRecord> records =
                 Collections.synchronizedList(new ArrayList<LlmCallRecord>());
@@ -480,6 +487,40 @@ public class LlmGatewayStreamRetryTest {
         @Override
         public void insert(LlmCallRecord record) {
             records.add(record);
+        }
+
+        /**
+         * 等到至少 expected 条记录落地。
+         *
+         * @param expected 期望的条数
+         */
+        void awaitRows(int expected) {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (records.size() < expected && System.nanoTime() < deadline) {
+                try {
+                    Thread.sleep(10L);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            assertThat(records).hasSize(expected);
+        }
+
+        /**
+         * @return 按轮号升序排好的记录副本
+         */
+        List<LlmCallRecord> byRound() {
+            List<LlmCallRecord> copy = new ArrayList<LlmCallRecord>(records);
+            Collections.sort(copy, new java.util.Comparator<LlmCallRecord>() {
+                @Override
+                public int compare(LlmCallRecord a, LlmCallRecord b) {
+                    Integer left = a.getRoundNo() == null ? Integer.valueOf(0) : a.getRoundNo();
+                    Integer right = b.getRoundNo() == null ? Integer.valueOf(0) : b.getRoundNo();
+                    return left.compareTo(right);
+                }
+            });
+            return copy;
         }
     }
 }

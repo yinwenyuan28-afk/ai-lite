@@ -502,7 +502,8 @@ public class LlmGatewayAdversarialTest {
                 LlmCall.explicit("biz", "test", "m", null, HELLO)))
                 .isInstanceOf(LlmCallException.class);
 
-        assertThat(store.records).hasSize(1);
+        // 记录在 ai-lite-call-log-* 池上异步写入，先等它落地。
+        store.awaitRows(1);
         LlmCallRecord row = store.records.get(0);
         assertThat(row.getErrorBrief()).doesNotContain(secret);
         assertThat(row.getErrorBrief()).contains("***");
@@ -536,7 +537,9 @@ public class LlmGatewayAdversarialTest {
                 LlmCall.explicit("biz", "test", "m", null, HELLO)))
                 .isInstanceOf(LlmCallException.class);
 
-        LlmCallRecord row = store.records.get(0);
+        LlmCallRecord row;
+        store.awaitRows(1);
+        row = store.records.get(0);
         assertThat(row.getErrorBrief()).hasSize(200);
         assertThat(row.getErrorBrief()).doesNotContain("\n").doesNotContain("\r");
     }
@@ -692,14 +695,37 @@ public class LlmGatewayAdversarialTest {
     }
 
     /**
-     * 同步记录调用记录，便于断言脱敏和截断。
+     * 记录用存储。
+     *
+     * <p>行记录默认在 {@code ai-lite-call-log-*} 池上异步写入（F-14：不让
+     * JDBC 落库跑在 transport 回调线程上），因此断言前要
+     * {@link #awaitRows(int)}，不能假设 {@code one()} 返回时行已经出现。</p>
      */
     static final class RecordingStore implements LlmCallStore {
-        final List<LlmCallRecord> records = new ArrayList<LlmCallRecord>();
+        final List<LlmCallRecord> records =
+                java.util.Collections.synchronizedList(new ArrayList<LlmCallRecord>());
 
         @Override
         public void insert(LlmCallRecord record) {
             records.add(record);
+        }
+
+        /**
+         * 等到至少 expected 条记录落地。
+         *
+         * @param expected 期望的最少条数
+         */
+        void awaitRows(int expected) {
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (records.size() < expected && System.nanoTime() < deadline) {
+                try {
+                    Thread.sleep(10L);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            assertThat(records).hasSize(expected);
         }
     }
 }

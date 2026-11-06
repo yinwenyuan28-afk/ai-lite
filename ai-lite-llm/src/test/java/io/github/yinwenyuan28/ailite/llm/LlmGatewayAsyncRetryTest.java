@@ -60,6 +60,7 @@ public class LlmGatewayAsyncRetryTest {
 
         assertThat(result.getContent()).isEqualTo("ok");
         assertThat(transport.attempts.get()).isEqualTo(1);
+        store.awaitRows(1);
         assertThat(store.records).hasSize(1);
         awaitQueueEmpty();
     }
@@ -77,6 +78,7 @@ public class LlmGatewayAsyncRetryTest {
         assertThat(transport.threads).hasSize(2);
         assertThat(transport.threads.get(0)).doesNotStartWith(RetryScheduler.THREAD_PREFIX);
         assertThat(transport.threads.get(1)).startsWith(RetryScheduler.THREAD_PREFIX);
+        store.awaitRows(2);
         assertThat(store.records).hasSize(2);
     }
 
@@ -89,6 +91,7 @@ public class LlmGatewayAsyncRetryTest {
 
         assertThat(failure.getKind()).isEqualTo(LlmCallException.Kind.HTTP);
         assertThat(transport.attempts.get()).isEqualTo(1);
+        store.awaitRows(1);
         assertThat(store.records).hasSize(1);
         awaitQueueEmpty();
     }
@@ -177,6 +180,7 @@ public class LlmGatewayAsyncRetryTest {
         assertThat(transport.attempts.get()).isEqualTo(3);
         assertThat(failure.getStatusCode()).isEqualTo(Integer.valueOf(502));
         assertThat(failure.getSuppressed()).hasSize(2);
+        store.awaitRows(3);
         assertThat(store.records).hasSize(3);
     }
 
@@ -188,6 +192,7 @@ public class LlmGatewayAsyncRetryTest {
 
         await(gateway.oneWithRetryAsync(call(), policy(3)));
 
+        store.awaitRows(3);
         assertThat(store.records).hasSize(3);
         assertThat(store.records.get(0).getStopReason())
                 .isEqualTo(LlmStopReason.ERROR.wire());
@@ -351,6 +356,7 @@ public class LlmGatewayAsyncRetryTest {
 
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
         assertThat(transport.attempts.get()).isEqualTo(0);
+        store.awaitRows(1);
         assertThat(store.records).hasSize(1);
     }
 
@@ -367,6 +373,7 @@ public class LlmGatewayAsyncRetryTest {
 
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
         assertThat(transport.attempts.get()).isEqualTo(0);
+        store.awaitRows(1);
         assertThat(store.records).hasSize(1);
         awaitQueueEmpty();
     }
@@ -384,6 +391,7 @@ public class LlmGatewayAsyncRetryTest {
         LlmResult result = await(future);
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
         assertThat(transport.attempts.get()).isEqualTo(1);
+        store.awaitRows(1);
         assertThat(store.records).hasSize(1);
         awaitQueueEmpty();
     }
@@ -404,6 +412,7 @@ public class LlmGatewayAsyncRetryTest {
         LlmResult result = await(future);
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
         assertThat(transport.attempts.get()).isEqualTo(1);
+        store.awaitRows(1);
         assertThat(store.records).hasSize(1);
         awaitQueueEmpty();
     }
@@ -455,6 +464,7 @@ public class LlmGatewayAsyncRetryTest {
 
         LlmResult result = await(future);
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
+        store.awaitRows(1);
         assertThat(store.records).hasSize(1);
     }
 
@@ -509,6 +519,8 @@ public class LlmGatewayAsyncRetryTest {
             LlmResult result = await(future);
             assertThat(result.getStopReason()).isEqualTo(LlmStopReason.ABORTED);
             assertThat(transport.attempts.get()).isBetween(1, 2);
+            // 记录异步写入：先等至少一条落地，再断言上限。
+            store.awaitRows(1);
             assertThat(store.records.size()).isBetween(1, 2);
             awaitQueueEmpty();
         }
@@ -935,6 +947,26 @@ public class LlmGatewayAsyncRetryTest {
         @Override
         public void insert(LlmCallRecord record) {
             records.add(record);
+        }
+
+        /**
+         * 等到至少 expected 条记录落地。
+         *
+         * <p>行记录在 {@code ai-lite-call-log-*} 池上异步写入（F-14），
+         * 直接读 {@code records} 可能读到还没写进来的那一条。</p>
+         *
+         * @param expected 期望的最少条数
+         */
+        void awaitRows(int expected) {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (records.size() < expected && System.nanoTime() < deadline) {
+                try {
+                    Thread.sleep(10L);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
     }
 }
