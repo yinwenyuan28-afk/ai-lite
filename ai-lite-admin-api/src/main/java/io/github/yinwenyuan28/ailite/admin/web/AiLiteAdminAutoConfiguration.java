@@ -18,6 +18,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
@@ -45,6 +46,25 @@ public class AiLiteAdminAutoConfiguration {
     private static final Logger log = LoggerFactory.getLogger(AiLiteAdminAutoConfiguration.class);
 
     /**
+     * 装配上下文：用来按需取「用户自带的只读档位策略」。
+     *
+     * <p>刻意用字段 + setter 而不是 {@code @Bean} 方法参数——那个方法签名
+     * 已经随 0.1.14 发布（9 个参数），多一个参数就是二进制不兼容，
+     * 老版本编译的用户自定义配置会直接失效（japicmp 判 METHOD_REMOVED）。</p>
+     */
+    private ApplicationContext context;
+
+    /**
+     * 由容器注入装配上下文。
+     *
+     * @param context 当前应用上下文
+     */
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setContext(ApplicationContext context) {
+        this.context = context;
+    }
+
+    /**
      * @param config      配置文件里的供应商与业务 id
      * @param catalog     运行时目录；必须是 JDBC 实现
      * @param prompts     提示词管理器，没有则业务接口的提示词操作会说明原因
@@ -62,7 +82,6 @@ public class AiLiteAdminAutoConfiguration {
                                                  JdbcTemplate jdbc, Environment environment,
                                                  ObjectProvider<HttpExecutor> http,
                                                  ObjectProvider<CallBodySettings> bodyPolicy,
-                                                 ObjectProvider<CallBodyPolicy> readOnlyPolicy,
                                                  ObjectProvider<ModelResolver> resolver,
                                                  ObjectProvider<LlmTransport> transports) {
         if (!(catalog instanceof JdbcRuntimeCatalog)) {
@@ -81,7 +100,11 @@ public class AiLiteAdminAutoConfiguration {
         CallBodySettings policy = bodyPolicy.getIfAvailable();
         // 用户自带只读策略时，管理页仍要显示网关的真实档位，否则页面说「不记录」、
         // 实际却在记录。可写实现存在时以它为准，只读来源只用来补「显示」。
-        CallBodyPolicy readOnly = policy == null ? readOnlyPolicy.getIfAvailable() : null;
+        // 从上下文按需取：它不能作为方法参数，否则会破坏已发布的方法签名。
+        CallBodyPolicy readOnly = null;
+        if (policy == null && context != null) {
+            readOnly = context.getBeanProvider(CallBodyPolicy.class).getIfAvailable();
+        }
         if (policy == null && readOnly == null) {
             log.warn("管理页未取到 CallBodySettings，调用正文档位不可读写");
         } else if (policy == null) {
