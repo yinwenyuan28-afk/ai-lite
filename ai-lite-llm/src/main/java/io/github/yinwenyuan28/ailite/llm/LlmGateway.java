@@ -59,6 +59,10 @@ public final class LlmGateway {
      */
     private volatile Map<String, ProviderGuard> guards = Collections.emptyMap();
 
+    /** 正停在退避里的重试调用；容器关闭时逐个收敛，见 {@link #shutdown()}。 */
+    private final Set<RetryRun> inFlightRetries =
+            java.util.concurrent.ConcurrentHashMap.<RetryRun>newKeySet();
+
     private CallBodyPolicy callBodyPolicy;
 
     /**
@@ -543,6 +547,30 @@ public final class LlmGateway {
     }
 
     /**
+     * 容器关闭时收敛在途重试，让调用方拿到「服务正在关闭」而不是静默等到自己的超时（F-11）。
+     *
+     * <p>只处理<b>正停在退避里</b>的调用：它们已经有确定的失败原因，只是还在等
+     * 定时器。正在传输中的那一轮不在这里收——它自己的 whenComplete 会给出结论，
+     * 硬插一手反而会和网关的终态记录竞态。</p>
+     *
+     * <p>幂等：重复调用只对仍登记的调用生效，已收敛的调用已在退出时注销。
+     * 不关闭 {@code retryScheduler}——它的生命周期归容器（{@code destroyMethod}），
+     * 手工构造场景则归进程级共享实例，网关无权替别人关。</p>
+     */
+    public void shutdown() {
+        LlmCallException closing = new LlmCallException("服务正在关闭，在途重试已终止",
+                null, LlmCallException.Kind.TRANSPORT);
+        for (RetryRun run : inFlightRetries) {
+            try {
+                run.convergeShutdown(closing);
+            } catch (Throwable ex) {
+                // 单个调用的收敛失败不能阻断其余调用：停机路径必须走完。
+                log.warn("停机收敛单个重试调用失败: {}", ex.toString());
+            }
+        }
+    }
+
+    /**
      * 非阻塞问一次，并允许外部取消底层请求。
      *
      * @param call   调用参数
@@ -955,15 +983,41 @@ public final class LlmGateway {
             }
 
             boolean cancelNow = false;
+            boolean registered = false;
             synchronized (this) {
                 if (terminal.get() || cancelRequested || result.isCancelled()) {
                     cancelNow = true;
                 } else {
                     scheduledRetry = scheduled;
+                    registered = true;
                 }
             }
             if (cancelNow) {
                 scheduled.cancel(false);
+                return;
+            }
+            if (registered) {
+                // 登记「正停在退避里」：容器关闭时要能找到它并给一个终态（F-11）。
+                inFlightRetries.add(this);
+            }
+        }
+
+        /**
+         * 停机收敛：把停在退避里的调用异常完成，并撤掉那一代定时任务。
+         *
+         * <p>与 {@link #convergeFailure} 的区别只是先注销登记；{@code claimTerminalLocked}
+         * 本身会取消 {@code scheduledRetry}，因此不需要额外处理。</p>
+         *
+         * @param closing 关闭原因，透传给调用方
+         */
+        private void convergeShutdown(LlmCallException closing) {
+            inFlightRetries.remove(this);
+            boolean won;
+            synchronized (this) {
+                won = claimTerminalLocked();
+            }
+            if (won) {
+                result.completeExceptionally(closing);
             }
         }
 
@@ -972,6 +1026,8 @@ public final class LlmGateway {
          */
         private void runScheduledAttempt(long delayMs, LlmCallException failedError,
                                          int failedAttempt) {
+            // 退避已结束：不论接下来成功、失败还是再退避，都不再属于「正停在退避里」。
+            inFlightRetries.remove(this);
             LlmCallException failureOut = null;
             synchronized (this) {
                 scheduledRetry = null;
@@ -1054,6 +1110,8 @@ public final class LlmGateway {
                 attemptCancel = currentAttemptCancel;
                 currentAttemptFuture = null;
                 currentAttemptCancel = null;
+                // 这条路径不走 claimTerminalLocked，登记要自己摘。
+                inFlightRetries.remove(this);
                 unbindOuter();
             }
 
@@ -1092,6 +1150,8 @@ public final class LlmGateway {
             }
             currentAttemptFuture = null;
             currentAttemptCancel = null;
+            // 终态已定：从停机登记表摘掉，避免容器关闭时重复收敛已结束的调用。
+            inFlightRetries.remove(this);
             unbindOuter();
             return true;
         }

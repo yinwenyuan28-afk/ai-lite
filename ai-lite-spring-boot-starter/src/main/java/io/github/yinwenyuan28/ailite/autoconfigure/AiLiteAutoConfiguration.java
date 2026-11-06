@@ -256,7 +256,15 @@ public class AiLiteAutoConfiguration implements BeanFactoryAware {
         return guards;
     }
 
-    @Bean
+    /**
+     * 网关。{@code destroyMethod="shutdown"} 让容器关闭时先把停在退避里的调用
+     * 收敛成「服务正在关闭」，再交给调度器自己的 {@code shutdownNow}（F-11）。
+     *
+     * <p>顺序由依赖关系保证：网关依赖 {@code aiLiteRetryScheduler}，Spring 按依赖
+     * 反向销毁，网关先于调度器。{@code GatewayShutdownAssemblyTest} 把这个前提
+     * 断言下来了，装配方式一旦改动导致顺序反转，那边会先红。</p>
+     */
+    @Bean(destroyMethod = "shutdown")
     @ConditionalOnMissingBean
     public LlmGateway aiLiteGateway(ModelResolver resolver, List<LlmTransport> transports,
                                     LlmCallStore store, ExecutorProvider executor,
