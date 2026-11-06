@@ -1170,6 +1170,20 @@ public final class LlmGateway {
         private volatile int completed;
         private LlmCompletion last;
 
+        /**
+         * 蹦床计数（F-09）。同步完成型 transport + 同步完成型 ToolExecutor 下，
+         * 两层 {@code whenComplete} 都是内联执行的，「模型完成 → 工具完成 →
+         * 下一轮」会整条压在同一根栈上，每轮两层。轮数上千时
+         * {@code StackOverflowError} 会被回调层吞掉，future 永久挂起。
+         *
+         * <p>计数为 0 的那一方负责循环执行「待推进」动作，其余请求只登记一次
+         * 就返回——栈深因此恒定，与轮数无关。范式同 {@code Workflow.advance}。</p>
+         */
+        private final java.util.concurrent.atomic.AtomicInteger wip =
+                new java.util.concurrent.atomic.AtomicInteger();
+        /** 待推进的动作；同一时刻只需要保留最后一个（每轮至多推进一次）。 */
+        private volatile Runnable pending;
+
         private AsyncRun(LlmCall call, String bizId, ResolvedModel model, List<LlmMessage> transcript,
                          List<LlmTool> tools, boolean declareTools, boolean executeTools, int limit,
                          boolean stream, Consumer<String> onDelta, LlmCancelHandle cancel,
@@ -1329,11 +1343,51 @@ public final class LlmGateway {
             }
         }
 
+        /**
+         * 登记一次「推进下一轮」，由当前正在跑的那层循环真正执行（F-09 蹦床）。
+         *
+         * <p>同步链路下 {@code next()} 会一路内联下去：本轮请求、回调、工具、
+         * 再下一轮请求……不经过这里就会无限压栈。改成只登记动作、由已经在
+         * 循环里的人执行，栈深与轮数无关。</p>
+         *
+         * <p>只保留一个待推进动作：每轮结束时至多请求「再推进一次」
+         * （{@code next()} 自身不会再请求下一次），因此不会丢计数。</p>
+         */
+        private void signalNext() {
+            pending = new Runnable() {
+                @Override
+                public void run() {
+                    next();
+                }
+            };
+            if (wip.getAndIncrement() != 0) {
+                // 已经有人在跑循环，他会取走刚登记的动作。
+                return;
+            }
+            int missed = 1;
+            try {
+                for (;;) {
+                    Runnable task = pending;
+                    pending = null;
+                    if (task != null) {
+                        task.run();
+                    }
+                    missed = wip.addAndGet(-missed);
+                    if (missed == 0) {
+                        return;
+                    }
+                }
+            } catch (Throwable ex) {
+                // 推进循环本身抛错时不能把异常丢进无人读取的栈帧：
+                // 收敛成一次失败终态，保证调用方的 future 一定会结束。
+                convergeUnexpected(FutureSupport.wrap(ex));
+            }
+        }
+
         private void next() {
             if (result.isDone()) {
                 return;
-            }
-            if (cancel != null && cancel.isCancelled()) {
+            }            if (cancel != null && cancel.isCancelled()) {
                 recordTerminal(attempt, completed == 0 ? 0 : completed,
                         LlmStopReason.ABORTED, 0, 0L, null);
                 completeBarrier(result(attempt, last, LlmStopReason.ABORTED, completed));
@@ -1523,7 +1577,9 @@ public final class LlmGateway {
                                     LlmStopReason.ABORTED, completed));
                             return;
                         }
-                        next();
+                        // 工具结果已写回 transcript：登记推进下一轮，由蹦床循环执行，
+                        // 不在这里直接递归 next()（F-09）。
+                        signalNext();
                     } catch (RuntimeException ex) {
                         // 工具结果处理异常不能落在回调线程里导致 future 永不完成。
                         fail(new LlmCallException("工具结果处理失败", ex), round, latency);
