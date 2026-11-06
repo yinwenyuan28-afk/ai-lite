@@ -154,6 +154,9 @@ ai-lite:
     model-table: AI_LITE_MODEL
     biz-table: AI_LITE_BIZ_BINDING
     setting-table: AI_LITE_ADMIN_SETTING
+    multi-node: false              # 多节点部署必须设为 true，否则用进程内锁
+    lock-lease-millis: 10000       # 仅多节点：Redis 锁租期
+    lock-wait-millis: 10000        # 仅多节点：抢锁最长等待
   llm:
     biz-ids: [demo-chat]           # 新业务只加这里；编码规则同提示词 key
     providers:
@@ -174,6 +177,9 @@ ai-lite:
 | `catalog.model-table` | `AI_LITE_MODEL` | 从 `GET {baseUrl}/models` 增量同步，或手工添加 |
 | `catalog.biz-table` | `AI_LITE_BIZ_BINDING` | 一个业务 id 对应一个供应商、模型和思考档 |
 | `catalog.setting-table` | `AI_LITE_ADMIN_SETTING` | 管理端运行时开关表，目前只存 call-body 档位 |
+| `catalog.multi-node` | `false` | 是否多节点部署。**必须显式配置**：管理页「加入模型」是「先查再插」，单节点用进程内锁即可，多节点必须用 Redis 锁，否则两个节点各锁各的、等于没锁。配成 `true` 却没有 `StringRedisTemplate` 时**启动失败** |
+| `catalog.lock-lease-millis` | `10000` | 仅多节点：Redis 锁租期。进程崩溃时锁不能永久残留，所以要明显长于一次写入的耗时 |
+| `catalog.lock-wait-millis` | `10000` | 仅多节点：抢锁最长等待。超时说明有别的节点长时间占着同一个模型的锁，会报错并指出是哪个模型 |
 
 **目录四张表全部可以改名**，用于和既有库的命名规范对齐（例如统一加业务前缀）。
 表名只允许字母、数字和下划线，其他字符在装配期直接抛 `IllegalArgumentException`。
@@ -191,6 +197,13 @@ CREATE TABLE MY_ADMIN_SETTING (
 > **`setting-table` 配错时的表现**：读档位不会让应用启动失败（这是可选功能），
 > 但会按"不记录"处理并打一条带表名的 WARN；在管理页保存档位则直接报错并指出
 > 实际使用的表名。这样"表没建"和"档位就是 none"不至于混为一谈。
+
+> **为什么要显式配 `multi-node`**：部署形态代码猜不出来——同机多进程、容器多副本
+> 都算多节点，但看上去都是"一个应用"。配错的代价是重复写入悄悄发生：两个节点同时
+> 「加入模型」会插出两行，之后保存能力参数时 `UPDATE ... WHERE PROVIDER_ID=? AND
+> MODEL_ID=?` 一次改掉全部重复行，而读取只认其中一行，表现为"保存成功、刷新又变回去"。
+> 多节点用 Redis 锁时的 key 形如 `ai-lite:catalog:lock:<provider>:<model>`，
+> 排查时可以按这个前缀去看有没有残留锁。 
 
 建表脚本是 `ai-lite-admin-api/src/main/resources/ai-lite-catalog.sql`。提示词仍用 `ai-lite-prompt.sql`，调用日志仍用 `ai-lite-llm-call.sql`。
 

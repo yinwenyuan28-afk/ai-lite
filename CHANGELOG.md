@@ -3,6 +3,62 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 版本策略与发布清单见 [docs/ref-发布.md](docs/ref-发布.md)。
 
+## [0.1.16] - 未发布
+
+### 升级必读
+
+> **1. 能力参数为空的模型不能再被启用。**
+> `setReady(true)` 现在要求 `CONTEXT_WINDOW`、`MAX_TOKENS`、`INPUT_MODES`、`REASONING`、
+> `THINKING_FORMAT` 五列都不为空，否则报错并列出缺哪几列。停用不做这个检查。
+> 升级前用这条 SQL 自查，有结果就先在管理页补参数：
+>
+> ```sql
+> SELECT PROVIDER_ID, MODEL_ID FROM AI_LITE_MODEL
+> WHERE READY = 1 AND (CONTEXT_WINDOW IS NULL OR MAX_TOKENS IS NULL
+>   OR INPUT_MODES IS NULL OR REASONING IS NULL OR THINKING_FORMAT IS NULL);
+> ```
+>
+> **2. 目录模式下，数据库为空的能力参数会回落到配置文件。**
+> 以前数据库列为 `NULL` 时直接用内置默认值（窗口 0、入参只有 text），完全不看 YAML。
+> 现在按「数据库 → 配置文件同名模型 → 内置默认」回落。已填了值的行行为不变。
+>
+> **3. 多节点部署必须设 `ai-lite.catalog.multi-node=true`。**
+> 管理页「加入模型」是「先查再插」，单节点在进程内加锁即可，多节点必须用 Redis 锁。
+> 配成 `true` 但容器里没有 `StringRedisTemplate` 会**启动失败**——不退回进程内锁，
+> 那样用户以为防住了、实际每个节点各锁各的。
+
+### 修复
+
+- **管理页保存配置后，本机最长还要再等一个缓存周期才生效**：清缓存的同时，正在读库的
+  线程会把旧快照写回并重置有效期。现在两个类都加了缓存版本号，读库期间发生的写入会让
+  这次写回作废。极端交错下某次调用仍可能拿到保存前的档位，但缓存本身不再停留旧值。
+- **配置被删除，页面却只看到 500**：`saveOverlay` / `saveBinding` / 档位保存都是先删后插，
+  两条语句各自提交，INSERT 失败时 DELETE 已经生效。现在有事务管理器时包进同一事务；
+  拿不到就退回逐条提交并打 WARN。
+- **两个请求同时「加入模型」会插出两行**：之后保存能力参数时
+  `UPDATE ... WHERE PROVIDER_ID=? AND MODEL_ID=?` 会一次改掉全部重复行，
+  而读取只认其中一行，表现为「保存成功、刷新又变回去」。现在写入路径加锁：
+  单节点用进程内锁，多节点用 Redis 锁（`SET NX PX`，Lua 比对持有者后释放）。
+  没有加唯一索引，因此不需要改表结构，也不用清理存量重复行。
+- **三表读取可能拿到跨时刻的组合**：绑定指向刚被删掉的模型、覆盖表删了还没插。
+  现在有事务管理器时三条查询包进同一只读事务。
+- **JSON 列损坏时把列内容回显到响应里**：Jackson 的解析错误消息会带出错位置的源文本，
+  而这些列存的是请求头与附加请求体，可能含自定义鉴权头。现在消息只保留表名、行标识、
+  列名，原文只进日志。
+- **用户自带 `CallBodyPolicy` 时管理页档位恒显示 none、保存报「不可用」**：而网关实际
+  用的是用户的策略。现在管理页读真实档位并返回 `writable` 标记，保存时说明「只能读」。
+  没有改 `@ConditionalOnMissingBean` 的条件类型——那样会让容器里出现两个
+  `CallBodyPolicy`，网关用 `getIfAvailable()` 取时抛异常、应用起不来。
+
+### 新增
+
+- `ModelKeyLock`：目录写入互斥的扩展点。默认实现 `LocalModelKeyLock`（进程内）。
+- `RedisModelKeyLock`：多节点实现，`spring-data-redis` 为可选依赖。
+- 配置项 `ai-lite.catalog.multi-node`、`lock-lease-millis`、`lock-wait-millis`。
+- `CatalogModel#getReasoningFlag()` 与 `CatalogModel.fromCatalogRow(...)`：
+  让「数据库这一列没填」可以被表达出来。
+- 管理页档位接口新增 `writable` 字段。
+
 ## [0.1.15] - 2026-11-05
 
 ### 升级必读

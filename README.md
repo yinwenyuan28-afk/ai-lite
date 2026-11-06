@@ -297,6 +297,7 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [拆分最小依赖（方案 B'）](docs/plan/015-拆分最小依赖ai-lite-llm.md)：让单次调用加一个 HTTP 客户端不必拖入整套编排代码。
 - [基础能力代码审查](docs/plan/017-基础能力代码审查.md)：单次调用、运行时配置、异步与 NIO 的一次只读审查，含 20 条缺陷的定位与修复方向。
 - [修复异步调用挂起与取消失效](docs/plan/018-修复异步调用挂起与取消失效.md)：上篇审查里三条 P0 的修复实施记录。
+- [修复运行时配置与目录缺陷](docs/plan/019-修复运行时配置与目录缺陷.md)：上篇审查第 3.3 节 8 条缺陷的逐条核实与修复计划，含缓存失效竞态、目录读写事务、模型表唯一索引、能力参数回落。
 - [测试索引](docs/testing/测试索引.md)：按主题索引全部对抗性测试设计；另有[异步重试测试用例](docs/testing/异步重试测试用例.md)（oneWithRetryAsync 的 55 条验收清单）与[网关](docs/testing/网关异步对抗性测试设计.md)、[AgentLoop](docs/testing/AgentLoop异步对抗性测试设计.md)、[SessionLoop](docs/testing/SessionLoop异步对抗性测试设计.md)三篇对抗性测试设计。
 
 **基准**

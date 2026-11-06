@@ -49,8 +49,8 @@ AI Lite 的配置分两半，界线是**「改了要不要重启」**。
 
 几个容易忽略的落库细节：
 
-- **`AI_LITE_MODEL` 没有唯一索引。** 同一个 `PROVIDER_ID + MODEL_ID` 理论上可能出现两行（并发插入），读取时取 `UPDATE_TIME` 更新的那一行。判重靠插入前先 `SELECT COUNT(*)`。
-- **就绪与能力参数是两件事。** 保存能力参数不会把 `READY` 置 1，启用只由单独的 ready 接口改变。这样"参数填了但供应商还没开通"不会误把模型放给业务。
+- **`AI_LITE_MODEL` 没有唯一索引，判重靠应用层加锁。** 「加入模型」是「先查再插」，两个请求同时处理同一对 `PROVIDER_ID + MODEL_ID` 时会插出两行。单节点在进程内加锁即可；多节点必须设 `ai-lite.catalog.multi-node=true` 改用 Redis 锁，否则两个节点各锁各的、等于没锁。锁只拦得住走管理页的写入，直连 SQL 或历史数据仍可能有重复行，读取时取 `UPDATE_TIME` 更新的那一行（同一毫秒再按 `MODEL_ROW_ID` 排序，结果确定）。
+- **就绪与能力参数是两件事，但启用要求参数齐全。** 保存能力参数不会把 `READY` 置 1，启用只由单独的 ready 接口改变。这样"参数填了但供应商还没开通"不会误把模型放给业务。反过来，参数为空的模型也不能被启用——否则会出现「已启用、窗口 0、只收文本」的模型，上下文预算与自动压缩整条跳过，而页面上看不出来。停用不做这个检查。
 - **停用不解除绑定。** `READY=0` 时绑定行仍然存在，下一次调用会在解析阶段报「模型未就绪」。这是刻意的，避免业务在无人察觉时失去模型。
 - **旧库会自动补 `API` 列。** 0.1.14 之前 `AI_LITE_PROVIDER_OVERLAY` 没有 `API`，`JdbcRuntimeCatalog` 构造时会检测并执行 `ALTER TABLE ... ADD COLUMN API VARCHAR(64)`；补不上才报错并给出 SQL。
 - **`AI_LITE_ADMIN_SETTING` 是键值表。** 新增开关加一行即可，不用改表结构。
@@ -174,7 +174,7 @@ gateway.one(LlmCall.biz("demo-chat", prompt.getMessages()));
 
 以下几条会在排查时误导人，值得先知道。
 
-**目录模式会丢掉 YAML 里的模型级参数。** 详见第 9.1 节——这一条的后果比"少几个字段"更重，会让请求体真的变样。
+**目录模式下哪些字段来自数据库、哪些回落到 YAML。** 详见第 9.1 节——规则是「数据库有值用数据库，`NULL` 沿用 YAML，两边都没有才用内置默认」。
 
 **没有绑定就不回退默认配置档。** 目录模式下，业务没有绑定时报「业务未配置模型」，不会退到 `default-profile`。
 
@@ -190,119 +190,46 @@ gateway.one(LlmCall.biz("demo-chat", prompt.getMessages()));
 
 **业务 id 同时是提示词 key。** 目录模式下 `ai-lite.llm.biz-ids` 里的每个 id 必须符合提示词 key 的编码规则（小写字母、数字、短横线，最长 64），否则启动直接失败。一个业务只有一份提示词。
 
-### 9.1 目录模式丢掉模型级参数
+### 9.1 目录模式下哪些字段来自数据库，哪些回落到 YAML
 
-这一条单独展开，因为它的后果是**发出去的请求体不一样**，而不是"某个设置被忽略"。
+这一节单独展开，因为它决定「管理页改了一项、请求体到底变不变」。
 
-**丢的是哪五个字段。** `AiLiteConfig.Model` 有十一个字段，目录模式里只有六个能对上数据库列：
+**规则一句话**：数据库列有值就用数据库，`NULL` 表示这一项没填、沿用 YAML 里的同名模型，
+两边都没有才用内置默认。
 
-| YAML 字段                            | 数据库有没有对应列         | 目录模式下是否保留 |
-| ---------------------------------- | ----------------- | --------- |
-| `id`                               | `MODEL_ID`        | 保留        |
-| `name`                             | `DISPLAY_NAME`    | 保留        |
-| `reasoning`                        | `REASONING`       | 保留        |
-| `input`                            | `INPUT_MODES`     | 保留        |
-| `context-window`                   | `CONTEXT_WINDOW`  | 保留        |
-| `max-tokens`                       | `MAX_TOKENS`      | 保留        |
-| `thinking-format`                  | `THINKING_FORMAT` | 保留        |
-| `thinking-level-map`               | **没有**            | **丢失**    |
-| `sampler-params`                   | **没有**            | **丢失**    |
-| `sampler-params-by-thinking-level` | **没有**            | **丢失**    |
-| `headers`                          | **没有**            | **丢失**    |
-| `extra-body`                       | **没有**            | **丢失**    |
+| YAML 字段                            | 数据库列              | 数据库为 NULL 时 |
+| ---------------------------------- | ----------------- | ---------- |
+| `id`                               | `MODEL_ID`        | 必须有值       |
+| `name`                             | `DISPLAY_NAME`    | 用模型 id     |
+| `reasoning`                        | `REASONING`       | 回落 YAML    |
+| `input`                            | `INPUT_MODES`     | 回落 YAML    |
+| `context-window`                   | `CONTEXT_WINDOW`  | 回落 YAML    |
+| `max-tokens`                       | `MAX_TOKENS`      | 回落 YAML    |
+| `thinking-format`                  | `THINKING_FORMAT` | 回落 YAML    |
+| `thinking-level-map`               | `THINKING_LEVEL_MAP` | 回落 YAML |
+| `sampler-params`                   | `SAMPLER_PARAMS`  | 回落 YAML    |
+| `sampler-params-by-thinking-level` | `SAMPLER_PARAMS_BY_LEVEL` | 回落 YAML |
+| `headers`                          | `MODEL_HEADERS`   | 回落 YAML    |
+| `extra-body`                       | `EXTRA_BODY`      | 回落 YAML    |
 
-供应商级的 `headers` 和 `extra-body` 不受影响——`applyOverlay` 会把它们从 YAML 复制到新的供应商对象上。
+空 Map 与 `NULL` 是两件事：`NULL` 表示没配（沿用 YAML），`{}` 表示明确清空
+（即使 YAML 里有也不用了）。
 
-**在哪一步丢的。** `ModelResolver.resolveBiz` 拿到数据库行后调 `toConfigModel(row)`（`ModelResolver.java:237`）现造一个 `AiLiteConfig.Model`，那个方法的代码只有七行 `set`：
+**为什么能力参数也要回落。** 管理页「加入模型」建的行，所有能力参数都是 `NULL`。
+如果只从数据库取，就会出现「已启用、上下文窗口 0、入参只剩 text」的模型：
+上下文预算与自动压缩整条跳过，图片消息被拒，而页面上一切正常。回落之后 YAML 里
+写过的能力参数仍然生效。
 
-```java
-model.setId(row.getModelId());
-model.setName(row.getDisplayName());
-model.setReasoning(row.isReasoning());
-model.setInput(...);              // inputModes
-model.setContextWindow(row.getContextWindow());
-model.setMaxTokens(...);
-model.setThinkingFormat(...);
-```
+**为什么还要拦「参数不全的启用」。** 回落只在 YAML 里有同名模型时有用。YAML 里
+没有、数据库里也没填，就只剩内置默认值（窗口 0、只收文本）——这仍然是坏的。
+所以 `setReady(true)` 现在要求五项能力参数齐全，缺了就报错并列出缺哪几列。
+停用不做这个检查，已有模型要能随时下线。
 
-其余五个字段保持 `new AiLiteConfig.Model()` 的默认值：空 Map。不是"没读出来"，是从来没往对象里放。
-
-**后果一：思考档不再按模型支持范围钳制。**
-
-`resolve()` 里有一行 `LlmThinking.clamp(requested, m.isReasoning(), m.getThinkingLevelMap())`（`ModelResolver.java:261`）。`thinking-level-map` 为空时，`clamp` 走"没有映射表"分支（`LlmThinking.java:29`），只把 `xhigh` / `max` 降到 `high`，其余档位原样放行——它不再知道这个模型到底支持哪些档。
-
-举个具体例子。假设某个模型在 YAML 里声明只支持 `low` 和 `high`：
-
-```yaml
-thinking-level-map:
-  low: low
-  high: high
-```
-
-业务请求 `medium` 时：
-
-| 路径                                     | 实际下发的思考档         |
-| -------------------------------------- | ---------------- |
-| 走 YAML（`LlmCall.explicit` / `profile`） | `low`（向下钳到最近支持档） |
-| 走目录（`LlmCall.biz`）                     | `medium`（原样放行）   |
-
-这对不支持 `medium` 的供应商就是一次非法参数，可能报 400，也可能被供应商悄悄当成别的档处理。
-
-**后果二：采样参数与模型级请求头消失。**
-
-`sampler-params` 会合并进请求体（`OpenAiCompletionsTransport.java:144` 的 `TransportSupport.merge(body, model.getSamplerParams())`），`sampler-params-by-thinking-level` 按生效档位再叠一层（`ModelResolver.java:273`）。目录模式下这两个都是空 Map，请求体里就没有 `temperature`、`top_p` 这些字段，模型回落到供应商的默认值。
-
-`headers` 和 `extra-body` 同理：模型级的自定义请求头没了，模型级的附加请求体字段也没了。
-
-**实测对比。** 同一份 YAML、同一个模型，只切换解析路径，用捕获式 `HttpExecutor` 抓到的请求体：
-
-走目录（`LlmCall.biz`）：
-
-```
-请求头: {Content-Type=..., Authorization=Bearer k}
-请求体: {"model":"m","max_tokens":4000,"stream":false,
-        "messages":[{"role":"user","content":"你好"}],
-        "thinking":{"type":"enabled"},"reasoning_effort":"medium"}
-```
-
-走 YAML（`LlmCall.explicit`）：
-
-```
-请求头: {Content-Type=..., X-Model=model-level, Authorization=Bearer k}
-请求体: {"model":"m","max_tokens":1024,"stream":false,
-        "messages":[{"role":"user","content":"你好"}],
-        "temperature":0.55,"top_p":0.9,
-        "thinking":{"type":"enabled"},"reasoning_effort":"medium",
-        "vendor_field":"model-level"}
-```
-
-差三样：`X-Model` 头、`temperature`/`top_p`、`vendor_field`。`max_tokens` 也不同，但那是因为数据库里配的 4000 和 YAML 里的 1024 本来就不同，属于预期行为。
-
-**怎么判断自己的模型有没有受影响。** 看 YAML 里模型级有没有写这五个字段：
-
-```yaml
-ai-lite:
-  llm:
-    providers:
-      my-provider:
-        models:
-          - id: my-model
-            thinking-level-map: { ... }     # ← 有就受影响
-            sampler-params: { ... }          # ← 有就受影响
-            sampler-params-by-thinking-level: { ... }
-            headers: { ... }
-            extra-body: { ... }
-```
-
-一个都没写的话，切到目录模式行为不变。写了的话会静默降级——没有报错，只是请求体里少了东西。
-
-**避开的办法。** 目前有三个，都不算理想：
-
-1. **保持用 `LlmCall.explicit` 或 `profile` 调用**，让这些模型走 YAML 路径。代价是同时失去管理页的热改能力（绑定、就绪、地址覆盖都不生效）。
-2. **在供应商级补上同样的配置。** 供应商级的 `headers` 和 `extra-body` 会被复制。但如果多个模型需要不同的采样参数，这个方法不可行——供应商级只能有一套。
-3. **自己在 `RuntimeCatalog` 外面包一层。** 实现 `RuntimeCatalog` 接口，把 `findModel` 的结果和最原始的 YAML 模型配置合并。代码量不大（一个装饰器类），但要自己保证两边数据一致。
-
-要根治需要改代码：给 `AI_LITE_MODEL` 加列并在 `toConfigModel` 里读出来，或者让 `resolveBiz` 在数据库行存在时从 `provider.getModels()` 里按 id 找到对应模型、只覆盖数据库里有的那几项。后者改动小，但会让"配置有两份，谁优先"的规则变得更绕。目前都没有实现。
+**避开的办法（如果确实需要每个模型一套参数）**：
+1. 直接写 YAML，用 `LlmCall.explicit` 或 `profile` 调用。代价是失去管理页的热改能力。
+2. 用管理页的模型级请求参数（`THINKING_LEVEL_MAP`、`SAMPLER_PARAMS`、
+   `SAMPLER_PARAMS_BY_LEVEL`、`MODEL_HEADERS`、`EXTRA_BODY` 五列），这些都能在页面上编辑。
+3. 供应商级只放所有模型都一样的部分，模型级放差异。
 
 ## 10. 排查顺序
 
