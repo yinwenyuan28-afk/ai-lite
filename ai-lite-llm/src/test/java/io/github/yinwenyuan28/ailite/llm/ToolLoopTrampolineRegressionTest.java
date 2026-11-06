@@ -222,13 +222,39 @@ public class ToolLoopTrampolineRegressionTest {
         gateway.toolLoopAsync(call(), Collections.singletonList(echoTool()), rounds)
                 .get(30L, TimeUnit.SECONDS);
 
-        // 前 rounds-1 轮各一条 TOOL_USE，最后一轮一条 STOP，顺序与轮号都对得上。
+        // 记录在 ai-lite-call-log-* 池上异步写入，等它们全部落地再断言。
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (store.records.size() < rounds && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
+
+        // 前 rounds-1 轮各一条 TOOL_USE，最后一轮一条 STOP。
         // 记录里存的是 wire 值（toolUse / stop），不是枚举名。
         assertThat(store.records).hasSize(rounds);
-        for (int i = 0; i < rounds - 1; i++) {
-            assertThat(store.records.get(i)).isEqualTo("toolUse#" + (i + 1));
+        // 记录池有两个线程，写入顺序不等于轮次顺序：按轮号排序后再校验内容。
+        // （只断言"每轮恰好一条、结局对得上"，不断言物理写入顺序。）
+        List<Integer> roundNos = new ArrayList<Integer>();
+        for (String record : store.records) {
+            roundNos.add(Integer.valueOf(record.substring(record.indexOf('#') + 1)));
         }
-        assertThat(store.records.get(rounds - 1)).isEqualTo("stop#" + rounds);
+        java.util.Collections.sort(roundNos);
+        for (int i = 0; i < rounds; i++) {
+            assertThat(roundNos.get(i))
+                    .as("第 %d 轮的轮号应连续出现", i + 1)
+                    .isEqualTo(i + 1);
+        }
+        // 结局：除最后一轮外都是 toolUse，最后一轮是 stop。
+        int toolUse = 0;
+        int stop = 0;
+        for (String record : store.records) {
+            if (record.startsWith("toolUse#")) {
+                toolUse++;
+            } else if (record.startsWith("stop#")) {
+                stop++;
+            }
+        }
+        assertThat(toolUse).as("前 %d 轮各一条 toolUse", rounds - 1).isEqualTo(rounds - 1);
+        assertThat(stop).as("最后一轮一条 stop").isEqualTo(1);
     }
 
     /**
@@ -294,6 +320,11 @@ public class ToolLoopTrampolineRegressionTest {
         assertThat(result.getStopReason()).isEqualTo(LlmStopReason.STOP);
         // 每轮恰好一次请求、一条记录——出现两轮并发推进就会翻倍。
         assertThat(transport.calls.get()).isEqualTo(rounds);
+        // 记录异步写入：等它们全部落地再断言条数。
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (store.records.size() < rounds && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
         assertThat(store.records).hasSize(rounds);
     }
 
