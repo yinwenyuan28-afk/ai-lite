@@ -3,6 +3,7 @@ package io.github.yinwenyuan28.ailite.internal.llm;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
+import io.github.yinwenyuan28.ailite.llm.RetryPolicy;
 
 /**
  * 重试流程的纯函数工具。同步、协程和异步三个入口共用同一套 deadline、
@@ -93,6 +94,33 @@ public final class RetrySupport {
             }
         }
         return last;
+    }
+
+    /**
+     * 按统一口径算出这次退避该等多久（F-13）。
+     *
+     * <p>三个入口（同步、异步 {@code RetryRun}、协程 {@code LlmCoroutines}）
+     * 都调这一个函数，避免规则各写一遍后逐渐漂移——协程入口此前就漏了
+     * {@code Retry-After}，429 下按 1/2/4 秒猛打。</p>
+     *
+     * <p>口径：服务端给了 {@code Retry-After} 就用 {@code min(头值, maxBackoffMs)}，
+     * 否则用策略算出的指数退避。这里不做 deadline 裁剪——那是
+     * {@link #clampDelayMs} 的事，分开才好单独测。</p>
+     *
+     * @param policy  重试策略
+     * @param failure 本次失败；{@code null} 表示没有失败信息（按无头值处理）
+     * @param attempt 已完成的尝试次数（1 表示第一次尝试刚失败）
+     * @return 退避毫秒数，未做 deadline 裁剪
+     */
+    public static long backoffMs(RetryPolicy policy, LlmCallException failure, int attempt) {
+        long delay = policy.delayMs(attempt);
+        Long retryAfter = failure == null ? null : failure.getRetryAfterMs();
+        if (retryAfter != null) {
+            // 服务端明确要求的等待优先，但仍受策略上限约束，避免一个离谱的头值
+            // 把调用挂死。
+            delay = Math.min(retryAfter.longValue(), policy.getMaxBackoffMs());
+        }
+        return Math.max(0L, delay);
     }
 
     /**

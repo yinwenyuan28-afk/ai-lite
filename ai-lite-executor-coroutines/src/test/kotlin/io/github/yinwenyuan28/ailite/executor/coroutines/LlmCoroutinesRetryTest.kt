@@ -283,6 +283,76 @@ class LlmCoroutinesRetryTest {
             DirectExecutorProvider(), SequentialToolExecutor())
     }
 
+    /**
+     * F-13：协程入口必须认 Retry-After，不能只按指数退避猛打。
+     *
+     * <p>429 带 {@code Retry-After: 5s}，策略的指数退避是 1ms。改前协程侧只看
+     * {@code policy.delayMs}，会用 1ms 立刻重发；改后应与两个 Java 入口一致，
+     * 取 {@code min(retryAfterMs, maxBackoffMs)}。</p>
+     */
+    @Test
+    fun `retryAfterIsHonoured`() {
+        runBlocking {
+            // 头值 500ms、指数退避 1ms、上限 60000ms：若头值被采用，实际等待应远大于 1ms。
+            // 用 500ms 而不是 5s，既能把两者区分开，又不用让用例真的等 5 秒。
+            val retryAfterMs = 500L
+            val transport = transport().fail(
+                LlmCallException("rate limited", null, LlmCallException.Kind.HTTP,
+                    429, retryAfterMs)
+            ).success("ok")
+            val observedDelays = mutableListOf<Long>()
+            val policy = RetryPolicy.builder()
+                .maxAttempts(3)
+                .initialBackoffMs(1L)
+                .maxBackoffMs(60000L)
+                .jitter(false)
+                .listener { _, delayMs, _ -> observedDelays.add(delayMs) }
+                .build()
+
+            val startedAt = System.nanoTime()
+            val result = LlmCoroutines.oneWithRetry(gateway(transport), call(), policy)
+            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
+
+            assertThat(result.content).isEqualTo("ok")
+            assertThat(observedDelays).hasSize(1)
+            assertThat(observedDelays[0])
+                .describedAs("应采用服务端的 Retry-After，而不是指数退避的 1ms")
+                .isEqualTo(retryAfterMs)
+            // 真的等了：若实现仍用 1ms，耗时不可能到 500ms 量级。
+            assertThat(elapsedMs)
+                .describedAs("实际等待时长应与 Retry-After 一致")
+                .isGreaterThanOrEqualTo(400L)
+        }
+    }
+
+    /**
+     * F-13：Retry-After 超过策略上限时被压到上限，避免一个离谱的头值把调用挂死。
+     */
+    @Test
+    fun `retryAfterIsCappedByMaxBackoff`() {
+        runBlocking {
+            val transport = transport().fail(
+                LlmCallException("rate limited", null, LlmCallException.Kind.HTTP,
+                    429, 999_999L)
+            ).success("ok")
+            val observedDelays = mutableListOf<Long>()
+            val policy = RetryPolicy.builder()
+                .maxAttempts(3)
+                .initialBackoffMs(1L)
+                .maxBackoffMs(50L)
+                .jitter(false)
+                .listener { _, delayMs, _ -> observedDelays.add(delayMs) }
+                .build()
+
+            LlmCoroutines.oneWithRetry(gateway(transport), call(), policy)
+
+            assertThat(observedDelays).hasSize(1)
+            assertThat(observedDelays[0])
+                .describedAs("头值应被 maxBackoffMs 压平")
+                .isEqualTo(50L)
+        }
+    }
+
     private fun call(): LlmCall =
         LlmCall.profile("biz", "main", listOf(LlmMessage.user("hi")))
 

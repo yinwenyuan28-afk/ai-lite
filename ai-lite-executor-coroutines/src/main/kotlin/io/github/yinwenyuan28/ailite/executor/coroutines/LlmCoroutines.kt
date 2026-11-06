@@ -75,7 +75,10 @@ object LlmCoroutines {
                 if (cancel?.isCancelled == true) {
                     return gateway.oneAsync(call, cancel).await()
                 }
-                var wait = policy.delayMs(attempt)
+                // 退避口径与同步、异步两个 Java 入口共用 RetrySupport.backoffMs（F-13）：
+                // 服务端 Retry-After 优先，受 maxBackoffMs 约束。此前这里只按
+                // policy.delayMs 指数退避，429 下会按 1/2/4 秒猛打。
+                var wait = RetrySupport.backoffMs(policy, ex, attempt)
                 if (deadlineNanos != null) {
                     val now = System.nanoTime()
                     if (RetrySupport.deadlineReached(deadlineNanos, now)) {
