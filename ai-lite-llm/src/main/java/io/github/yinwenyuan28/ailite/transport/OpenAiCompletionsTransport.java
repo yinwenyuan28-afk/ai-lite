@@ -90,12 +90,12 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
         }
 
         final State state = new State();
-        final StringBuilder raw = new StringBuilder();
+        final RawFallback raw = new RawFallback();
         final TransportSupport.SseCollector sse = new TransportSupport.SseCollector();
         return async.executeStreamingAsync(httpRequest, new StreamListener() {
             @Override
             public void onLine(String line) {
-                raw.append(line).append('\n');
+                raw.accept(line);
                 String payload = sse.accept(line);
                 if (payload != null) {
                     handleEvent(payload, state, request);
@@ -112,8 +112,8 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
             if (tail != null) {
                 handleEvent(tail, state, request);
             }
-            if (!state.sawData && raw.length() > 0) {
-                return parseBlocking(raw.toString());
+            if (!state.sawData && raw.hasContent()) {
+                return parseBlocking(raw.text());
             }
             return state.result();
         });
@@ -340,13 +340,13 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
 
     private LlmCompletion streaming(final LlmRequest request, HttpRequest httpRequest) {
         final State state = new State();
-        final StringBuilder raw = new StringBuilder();
+        final RawFallback raw = new RawFallback();
         final TransportSupport.SseCollector sse = new TransportSupport.SseCollector();
         try {
             http.executeStreaming(httpRequest, new StreamListener() {
                 @Override
                 public void onLine(String line) throws IOException {
-                    raw.append(line).append('\n');
+                    raw.accept(line);
                     String payload = sse.accept(line);
                     if (payload != null) {
                         handleEvent(payload, state, request);
@@ -357,8 +357,8 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
             if (tail != null) {
                 handleEvent(tail, state, request);
             }
-            if (!state.sawData && raw.length() > 0) {
-                return parseBlocking(raw.toString());
+            if (!state.sawData && raw.hasContent()) {
+                return parseBlocking(raw.text());
             }
             return state.result();
         } catch (LlmCallException ex) {
@@ -463,6 +463,102 @@ public final class OpenAiCompletionsTransport implements LlmTransport {
 
     private static String blankToNull(String text) {
         return Strings.isBlank(text) ? null : text;
+    }
+
+    /**
+     * 「假流式」兜底的原文累积器（F-14 内存修复）。
+     *
+     * <p><b>解决什么问题</b>：有些供应商你传 {@code stream:true}，它却回一整段普通
+     * JSON 而不是 SSE。为了兼容这种情况，原来把收到的每一行都无条件 append 进一个
+     * {@code StringBuilder}，末尾如果发现一个 SSE 事件都没解析出来
+     * （{@code !state.sawData}），就把这段原文当成整段 JSON 再解析一次。</p>
+     *
+     * <p>问题在于：正常流式响应下这段累积**从来不会被读取**（{@code sawData} 必然为
+     * true），却实打实占了一份和响应体等长的内存。实测一个 4MB 的回复会因此多要
+     * 约 22MB 堆（JDK 8 里 {@code char} 占 2 字节，且累积期间新旧缓冲区并存），
+     * 并发上来就是几百 MB。</p>
+     *
+     * <p><b>怎么省</b>：判定挪到第一个有内容的行。真 SSE 的行一定以 {@code data:} 开头；
+     * 假流式（整段 JSON）的首个有内容行是 {@code {} 之类的结构字符。判定一次即可，
+     * 之后不再改变：</p>
+     * <ul>
+     *   <li>首行是 SSE 语法 → 判定为真流式 → 本对象<b>永远不启动累积</b>，正常路径零开销；</li>
+     *   <li>首行不是 SSE 语法 → 判定为假流式 → <b>从这一行起</b>累积，末尾交给
+     *       {@code parseBlocking}。</li>
+     * </ul>
+     *
+     * <p>空行不参与判定——SSE 允许在事件之间插入空行，真实响应也可能以空行开头。
+     * 只跳过空白，不因为「第一行是空的」就误判成假流式。</p>
+     *
+     * <p><b>为什么不直接删掉</b>：假流式供应商确实存在，删了这类调用会全部失败。
+     * 这里是把「一直抄」改成「按需抄」，兼容性不变。</p>
+     *
+     * <p>每个流一个实例，不做并发保护；回调线程串行调用即可。</p>
+     */
+    private static final class RawFallback {
+
+        private final StringBuilder text = new StringBuilder();
+        /** 是否已判定响应形态；null 表示还没遇到有内容的行。 */
+        private Boolean sse;
+
+        /**
+         * 收一行。只在判定为假流式之后才累积。
+         *
+         * @param line 原始行，可为 null
+         */
+        void accept(String line) {
+            if (line == null) {
+                return;
+            }
+            if (sse == null) {
+                if (line.trim().isEmpty()) {
+                    // 空行不用于判定：SSE 允许事件间空行，响应也可能以空行开头。
+                    return;
+                }
+                sse = Boolean.valueOf(isSseLine(line));
+                if (sse.booleanValue()) {
+                    // 真流式：不启动累积，后续行直接返回。
+                    return;
+                }
+            }
+            if (sse.booleanValue()) {
+                return;
+            }
+            text.append(line).append('\n');
+        }
+
+        /**
+         * @return true 表示已经累积了内容，可以尝试当成整段 JSON 解析
+         */
+        boolean hasContent() {
+            return text.length() > 0;
+        }
+
+        /**
+         * @return 累积的原文；没有内容时为空串
+         */
+        String text() {
+            return text.toString();
+        }
+
+        /**
+         * 判断一行是否属于 SSE 语法。
+         *
+         * <p>三处来源都要认：{@code data:}（数据）、{@code event:} / {@code id:} /
+         * {@code retry:}（SSE 的其他字段）、{@code :} 开头（注释行）。
+         * 只要首行是其中任一，就说明服务端确实在按 SSE 分帧，不需要原文兜底。</p>
+         *
+         * @param line 已确认非空的行
+         * @return true 表示这一行是 SSE 语法
+         */
+        private static boolean isSseLine(String line) {
+            String value = line.trim();
+            return value.startsWith("data:")
+                    || value.startsWith("event:")
+                    || value.startsWith("id:")
+                    || value.startsWith("retry:")
+                    || value.startsWith(":");
+        }
     }
 
     private static final class ToolBuf {
