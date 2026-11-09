@@ -4,12 +4,12 @@
 
 它模拟一次固定延迟的 LLM 调用，比较三种执行方式：
 
-| 变体 | 说明 |
-| --- | --- |
-| `platform-pool-8` | 8 个平台线程 + 阻塞 `gateway.one()` |
-| `platform-pool-1000` | 1000 个平台线程 + 阻塞调用，用线程数换并发 |
-| `coroutines-8` | 8 个协程载体线程 + `LlmCoroutines.one()`，等待发生在挂起点 |
-| `java-async` | 纯 Java `gateway.oneAsync()` + `CompletableFuture`，不使用协程 |
+| 变体                   | 说明                                                      |
+| -------------------- | ------------------------------------------------------- |
+| `platform-pool-8`    | 8 个平台线程 + 阻塞 `gateway.one()`                            |
+| `platform-pool-1000` | 1000 个平台线程 + 阻塞调用，用线程数换并发                               |
+| `coroutines-8`       | 8 个协程载体线程 + `LlmCoroutines.one()`，等待发生在挂起点              |
+| `java-async`         | 纯 Java `gateway.oneAsync()` + `CompletableFuture`，不使用协程 |
 
 模拟延迟由独立调度器完成，等待期间不占业务侧线程——这和真实 LLM 调用的主要形态一致。
 
@@ -34,12 +34,12 @@ mvn -B compile exec:java -Dexec.args="3000 50 8"
 
 环境：Windows 10、JDK 8u292、8 核；`calls=3000`、`latency=50ms`、`carriers=8`。
 
-| 变体 | 墙钟(ms) | QPS | 峰值线程数 |
-| --- | ---: | ---: | ---: |
-| `platform-pool-8` | 23313.1 | 128.7 | 28 |
-| `platform-pool-1000` | 195.2 | 15372.7 | 1017 |
-| `coroutines-8` | 87.6 | 34257.3 | 26 |
-| `java-async` | 72.1 | 41594.0 | 18 |
+| 变体                   | 墙钟(ms)  | QPS     | 峰值线程数 |
+| -------------------- | -------:| -------:| -----:|
+| `platform-pool-8`    | 23313.1 | 128.7   | 28    |
+| `platform-pool-1000` | 195.2   | 15372.7 | 1017  |
+| `coroutines-8`       | 87.6    | 34257.3 | 26    |
+| `java-async`         | 72.1    | 41594.0 | 18    |
 
 解读：
 
