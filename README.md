@@ -300,10 +300,25 @@ Java 侧也可以把 `ai-lite.executor.mode` 设为 `coroutines`，由 Starter �
 - [修复运行时配置与目录缺陷](docs/plan/019-修复运行时配置与目录缺陷.md)：上篇审查第 3.3 节 8 条缺陷的逐条核实与修复计划，含缓存失效竞态、目录读写事务、模型表唯一索引、能力参数回落。
 - [测试索引](docs/testing/测试索引.md)：按主题索引全部对抗性测试设计；另有[异步重试测试用例](docs/testing/异步重试测试用例.md)（oneWithRetryAsync 的 55 条验收清单）与[网关](docs/testing/网关异步对抗性测试设计.md)、[AgentLoop](docs/testing/AgentLoop异步对抗性测试设计.md)、[SessionLoop](docs/testing/SessionLoop异步对抗性测试设计.md)三篇对抗性测试设计。
 
-**基准**
+**基准与测试工具**
 
 - [QPS 基准](benchmark/qps-benchmark/README.md)：平台线程池 vs Java 异步 vs Kotlin 协程。
 - [HTTP 传输并发基准](benchmark/http-transport-benchmark/README.md)：六种 HTTP 传输在 100/500/1000 并发下的吞吐、延迟与线程数。
+- [本机假模型服务与栈/内存探针](benchmark/fake-llm-server/README.md)：不连真实供应商就能压测。启动一个假模型服务（支持 Chat Completions / Responses / Anthropic 三种协议、SSE、429 带 `Retry-After`、中途断开、深嵌套 JSON），再用真实 `LlmGateway` + `JettyHttpExecutor` 打它，测堆峰值、线程数与最小堆需求。
+
+  ```bash
+  # 终端 1：启动假服务（默认 18181 端口）
+  mvn -o -f benchmark/fake-llm-server/pom.xml compile exec:java -Dexec.args="--port=18181"
+
+  # 终端 2：跑各项探针
+  mvn -o -f benchmark/fake-llm-server/pom.xml exec:java \
+      -Dexec.mainClass=io.github.yinwenyuan28.ailite.benchmark.fake.MemoryProbeMain \
+      -Dexec.args="--rounds=200 --concurrency=32"
+  ```
+
+  四个探针：`MemoryProbeMain`（多场景堆/线程）、`HeapCeilingProbeMain`（单个响应需要多少堆）、`StackDepthProbeMain`（JSON 嵌套深度上限）、`CancelHandleRetentionProbeMain`（取消句柄是否拖住对象）。故障注入开关写在请求体里，形如 `bench-hold=30`、`bench-chunks=20`，完整清单见该目录 README。
+
+  这套工具支撑的分析结论见 [栈与内存风险实测报告](docs/plan/022-栈与内存风险实测报告.md)。
 
 ## 构建
 

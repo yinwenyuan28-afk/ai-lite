@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>io.github.yinwenyuan28-afk</groupId>
+    <artifactId>ai-lite-fake-llm-server</artifactId>
+    <version>0.1.15</version>
+    <packaging>jar</packaging>
+
+    <name>AI Lite Fake LLM Server</name>
+    <description>本机假模型服务，用来验证 JDK 8 + Jetty 传输下的内存与栈风险，不连真实供应商。</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <exec.mainClass>io.github.yinwenyuan28.ailite.benchmark.fake.FakeLlmMain</exec.mainClass>
+        <!-- 与 ai-lite-http-jetty 共用 Boot BOM 里的 Jetty 版本；这里显式固定，
+             因为本模块不继承父 pom，拿不到 BOM 管理。 -->
+        <jetty.version>9.4.22.v20191022</jetty.version>
+        <servlet-api.version>3.1.0</servlet-api.version>
+    </properties>
+
+    <dependencies>
+        <!-- 服务端：Jetty。高并发下 keep-alive 比 JDK HttpServer 稳定，
+             benchmark/http-transport-benchmark 已记录过 JDK HttpServer 主动断连的问题。 -->
+        <dependency>
+            <groupId>org.eclipse.jetty</groupId>
+            <artifactId>jetty-server</artifactId>
+            <version>${jetty.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>javax.servlet</groupId>
+            <artifactId>javax.servlet-api</artifactId>
+            <version>${servlet-api.version}</version>
+        </dependency>
+
+        <!-- 探针侧：真实网关 + 真实 Jetty 传输，用来复现生产调用形态。
+             这两个依赖是可选的 —— 只启动假服务（FakeLlmMain）时不会加载它们；
+             跑内存探针（MemoryProbeMain）才需要。 -->
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-llm</artifactId>
+            <version>0.1.15</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yinwenyuan28-afk</groupId>
+            <artifactId>ai-lite-http-jetty</artifactId>
+            <version>0.1.15</version>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.1.0</version>
+                <configuration>
+                    <mainClass>${exec.mainClass}</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
