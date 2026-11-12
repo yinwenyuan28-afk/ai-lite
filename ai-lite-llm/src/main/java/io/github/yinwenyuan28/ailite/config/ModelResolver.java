@@ -580,7 +580,7 @@ public final class ModelResolver {
      * 回游标位（失败标记已保证游标指向第一个）。resolve 不推进游标。
      */
     private String pickKey(String providerId, List<String> keys) {
-        KeyRotation rotation = rotationFor(providerId, keys.size());
+        KeyRotation rotation = rotationFor(providerId, keys);
         long now = System.currentTimeMillis();
         int start = Math.min(rotation.cursor.get(), keys.size() - 1);
         for (int i = 0; i < keys.size(); i++) {
@@ -618,7 +618,7 @@ public final class ModelResolver {
         if (keys.isEmpty()) {
             return;
         }
-        KeyRotation rotation = rotationFor(providerId, keys.size());
+        KeyRotation rotation = rotationFor(providerId, keys);
         int matched = -1;
         for (int i = 0; i < keys.size(); i++) {
             if (apiKeyValue.equals(keys.get(i))) {
@@ -645,33 +645,45 @@ public final class ModelResolver {
         }
     }
 
-    /** 取（或建）该 provider 的轮换状态；配置条数变化时重建（热更新兜底）。 */
-    private KeyRotation rotationFor(String providerId, int size) {
-        KeyRotation existing = rotations.get(providerId);
-        if (existing != null && existing.size == size) {
-            return existing;
-        }
-        KeyRotation created = new KeyRotation(size);
-        KeyRotation winner = rotations.putIfAbsent(providerId, created);
-        if (winner != null && winner.size == size) {
-            return winner;
-        }
-        rotations.put(providerId, created);
-        return created;
+    /**
+     * 取（或建）该 provider 的轮换状态；配置条数或内容变化时重建（热更新兜底）。
+     *
+     * <p>用一次 {@code compute} 完成「判定 + 重建 + 装入」，而不是
+     * get / putIfAbsent / put 三段：热更新改变 {@code api-keys} 时，多个线程可能
+     * 同时判定「需要重建」，最后写入者会覆盖别人刚建好的实例，先返回者则在没人
+     * 持有的孤儿实例上写冷却与游标，429 之后冷却就丢了（F-29）。</p>
+     *
+     * <p>同时按内容（而不只是条数）判定：条数不变但 key 顺序或取值变了时，旧索引
+     * 的冷却会落到新 key 上，同样要重建。</p>
+     */
+    private KeyRotation rotationFor(String providerId, List<String> keys) {
+        return rotations.compute(providerId, (id, existing) ->
+                existing != null && existing.matches(keys) ? existing : new KeyRotation(keys));
     }
 
     /** 多 key 轮换状态：游标 + 每 key 冷却到期时间戳（0 = 未冷却）。 */
     private static final class KeyRotation {
         private final int size;
+        /** 建这个实例时的 key 快照；内容或顺序变化即视为需要重建。 */
+        private final List<String> keys;
         private final AtomicInteger cursor = new AtomicInteger(0);
         private final AtomicLong[] cooldownUntil;
 
-        private KeyRotation(int size) {
-            this.size = Math.max(1, size);
+        private KeyRotation(List<String> keys) {
+            this.keys = new ArrayList<String>(keys);
+            this.size = Math.max(1, this.keys.size());
             this.cooldownUntil = new AtomicLong[this.size];
             for (int i = 0; i < this.size; i++) {
                 this.cooldownUntil[i] = new AtomicLong(0L);
             }
+        }
+
+        /**
+         * @param current 当前配置里的 key 列表
+         * @return true 表示条数与内容都未变，可以复用本实例
+         */
+        private boolean matches(List<String> current) {
+            return current != null && keys.equals(current);
         }
     }
 

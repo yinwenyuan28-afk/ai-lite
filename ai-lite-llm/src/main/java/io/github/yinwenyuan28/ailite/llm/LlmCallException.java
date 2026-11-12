@@ -36,6 +36,14 @@ public class LlmCallException extends RuntimeException {
     private final Integer statusCode;
     private final Long retryAfterMs;
 
+    /**
+     * {@code Retry-After} 换算上限：24 小时。
+     *
+     * <p>既挡住 {@code seconds * 1000} 的溢出，也挡住「供应商写 999999999 秒」这种
+     * 病态长退避——按上限等待即可，不必把异常值原样传下去。</p>
+     */
+    public static final long MAX_RETRY_AFTER_MS = 24L * 60L * 60L * 1000L;
+
     public LlmCallException(String message) {
         this(message, null, Kind.UNKNOWN, null);
     }
@@ -138,8 +146,15 @@ public class LlmCallException extends RuntimeException {
     /**
      * 解析 {@code Retry-After} 头：仅接受正整数秒；HTTP 日期形式与非数字/≤0 一律忽略。
      *
+     * <p>结果钳在 {@link #MAX_RETRY_AFTER_MS}（24 小时）以内。{@code seconds * 1000}
+     * 没有检查会溢出：{@code Retry-After: 9223372036854775807} 回绕成 -1000，再被
+     * {@code RetrySupport.backoffMs} 的 {@code Math.max(0L, delay)} 钳成 0，本该等很久
+     * 的 429 变成立刻重打，持续打爆供应商限流。超过上限时按上限处理而不是返回 null：
+     * 返回 null 表示「服务端没给指令」会退回秒级指数退避，与供应商「很久以后再来」
+     * 的意图相反。</p>
+     *
      * @param headerValue 响应头原始值，可为 null
-     * @return 毫秒数；无有效头值为 null
+     * @return 毫秒数，范围 (0, 24h]；无有效头值为 null
      */
     public static Long retryAfterMillis(String headerValue) {
         if (headerValue == null) {
@@ -158,6 +173,12 @@ public class LlmCallException extends RuntimeException {
         if (seconds <= 0L) {
             return null;
         }
-        return Long.valueOf(seconds * 1000L);
+        long millis;
+        try {
+            millis = Math.multiplyExact(seconds, 1000L);
+        } catch (ArithmeticException ex) {
+            return Long.valueOf(MAX_RETRY_AFTER_MS);
+        }
+        return Long.valueOf(Math.min(millis, MAX_RETRY_AFTER_MS));
     }
 }

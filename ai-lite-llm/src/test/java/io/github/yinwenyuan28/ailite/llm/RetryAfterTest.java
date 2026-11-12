@@ -1,6 +1,7 @@
 package io.github.yinwenyuan28.ailite.llm;
 
 import io.github.yinwenyuan28.ailite.internal.executor.DirectExecutorProvider;
+import io.github.yinwenyuan28.ailite.internal.llm.RetrySupport;
 import org.junit.Test;
 
 import java.util.Collections;
@@ -46,8 +47,7 @@ public class RetryAfterTest {
     }
 
     @Test
-    public void httpErrorFactoryOnlyParses429And503() {
-        LlmCallException rateLimited = LlmCallException.httpError("r", 429, "7");
+    public void httpErrorFactoryOnlyParses429And503() {        LlmCallException rateLimited = LlmCallException.httpError("r", 429, "7");
         assertThat(rateLimited.getRetryAfterMs()).isEqualTo(Long.valueOf(7000L));
         assertThat(rateLimited.getKind()).isEqualTo(LlmCallException.Kind.HTTP);
 
@@ -61,6 +61,42 @@ public class RetryAfterTest {
         // 无头值恒为 null。
         LlmCallException noHeader = LlmCallException.httpError("n", 429, null);
         assertThat(noHeader.getRetryAfterMs()).isNull();
+    }
+
+    @Test
+    public void clampsOverflowingSecondsInsteadOfWrappingToZero() {
+        // F-30：Long.MAX_VALUE 秒 * 1000 回绕成负值，曾被钳成 0 → 429 立刻重打。
+        assertThat(LlmCallException.retryAfterMillis(String.valueOf(Long.MAX_VALUE)))
+                .isEqualTo(Long.valueOf(LlmCallException.MAX_RETRY_AFTER_MS));
+        // 刚好越过乘法安全边界（Long.MAX_VALUE / 1000）也要钳住。
+        long justOver = Long.MAX_VALUE / 1000L + 1L;
+        assertThat(LlmCallException.retryAfterMillis(String.valueOf(justOver)))
+                .isEqualTo(Long.valueOf(LlmCallException.MAX_RETRY_AFTER_MS));
+    }
+
+    @Test
+    public void clampsPathologicallyLongButNonOverflowingSeconds() {
+        // 天数级退避不可用：按 24 小时上限处理，而不是原样传下去。
+        assertThat(LlmCallException.retryAfterMillis("999999999"))
+                .isEqualTo(Long.valueOf(LlmCallException.MAX_RETRY_AFTER_MS));
+        assertThat(LlmCallException.retryAfterMillis(String.valueOf(24L * 60L * 60L)))
+                .isEqualTo(Long.valueOf(LlmCallException.MAX_RETRY_AFTER_MS));
+        // 上限以内原样保留。
+        assertThat(LlmCallException.retryAfterMillis("3600")).isEqualTo(Long.valueOf(3_600_000L));
+    }
+
+    @Test
+    public void overflowingRetryAfterBacksOffToCapNotZero() {
+        // 端到端：溢出值经 backoffMs 后应为 24h 上限（受 maxBackoffMs 再收敛），
+        // 不能是 0——否则 429 循环会以最高频率重打。
+        LlmCallException failure = LlmCallException.httpError("rate limited", 429,
+                String.valueOf(Long.MAX_VALUE));
+        RetryPolicy policy = RetryPolicy.builder()
+                .maxAttempts(3).initialBackoffMs(10L).multiplier(2.0D)
+                .maxBackoffMs(LlmCallException.MAX_RETRY_AFTER_MS).jitter(false).build();
+
+        assertThat(RetrySupport.backoffMs(policy, failure, 1))
+                .isEqualTo(LlmCallException.MAX_RETRY_AFTER_MS);
     }
 
     // ------------------------------------------------------------------

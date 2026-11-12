@@ -158,6 +158,54 @@ public class ModelResolverKeyRotationTest {
     }
 
     // ------------------------------------------------------------------
+    // F-29：轮换状态重建必须是原子的，且要认内容变化
+    // ------------------------------------------------------------------
+
+    @Test
+    public void concurrentFailureMarksLandOnTheVisibleRotation() throws Exception {
+        // 16 个线程同时标记同一个 key：重建与标记并发时，冷却必须落在
+        // 最终可见的那份轮换状态上，而不是被覆盖掉的孤儿实例。
+        final AiLiteConfig.Llm llm = config("k1", "k2", "k3");
+        final ModelResolver resolver = resolver(llm, 60_000L);
+        final java.util.concurrent.CountDownLatch start =
+                new java.util.concurrent.CountDownLatch(1);
+        final List<Thread> threads = new ArrayList<Thread>();
+        for (int i = 0; i < 16; i++) {
+            Thread thread = new Thread(() -> {
+                try {
+                    start.await();
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                resolver.markKeyFailure("test", "k1");
+            });
+            thread.start();
+            threads.add(thread);
+        }
+        start.countDown();
+        for (Thread thread : threads) {
+            thread.join(5000L);
+        }
+
+        // 标记之后游标必须离开 0（k1 已冷却），说明冷却写在了可见实例上。
+        assertThat(resolveKey(resolver)).isNotEqualTo("k1");
+    }
+
+    @Test
+    public void keyContentChangeRebuildsRotationEvenWhenSizeMatches() {
+        // 条数不变、内容变了：旧索引的冷却不能落到新 key 上。
+        AiLiteConfig.Llm llm = config("k1", "k2");
+        ModelResolver resolver = resolver(llm, 60_000L);
+        resolver.markKeyFailure("test", "k1");
+        assertThat(resolveKey(resolver)).isEqualTo("k2");
+
+        // 换成等长的全新 key 池：应当重建，冷却清零，回到第一个。
+        llm.getProviders().get("test").setApiKeys(Arrays.asList("k3", "k4"));
+        assertThat(resolveKey(resolver)).isEqualTo("k3");
+    }
+
+    // ------------------------------------------------------------------
     // 网关集成：429 失败标记 → 下次 attempt 拿到新 key
     // ------------------------------------------------------------------
 
