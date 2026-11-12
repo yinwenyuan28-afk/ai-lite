@@ -75,9 +75,66 @@
   `id:` / `retry:` / `:` 开头，是则判定为真流式、全程不累积；否则从该行起累积、
   末尾交给原解析路径。假流式供应商的兼容行为不变。
   实测：4MB 流式响应的最小堆需求从 43–58MB 降到 32–43MB。
+- **`timeout=0` 在六种传输里表示四种不同的事**：OkHttp / Jdk8 / Ktor 是无限等待，
+  Jetty 取 10 秒连接超时，WebClient 退回 Netty 默认。供应商静默挂起时，部分实现
+  会永久占住连接。现在统一在 `internal.http.Timeouts` 归一：**`≤0` 一律取框架默认**
+  （连接 10 秒、读取 120 秒）。需要无限等待请显式配一个很大的正数，不要传 0。
+- **WebClient 的非流式响应在「200 头已回、body 停发」时永久挂起**：原来只给
+  `exchange()`（到响应头那一段）包了 timeout，`bodyToMono` 与 `errorBody` 都没有，
+  同步 `future.get()` 也没有上界。现在三处都加了读超时，同步入口另加上界兜底。
+- **WebClient 取消后仍会继续交付同一块里的后续行**：取消路径只 `dispose()` 没有置
+  `done`，且 `bindAbort` 是在 `subscribe` **之后**才注册——同步完成的流里，第一行
+  回调中取消时 abort 还没绑上。现在先绑 abort 再订阅，`onNext` 也直接查取消标志。
+- **Jdk8 的 `future.cancel(true)` 只改 future 状态，底层连接继续跑**：
+  `supplyAsync(() -> execute(request))` 把 future 与 `HttpURLConnection` 割裂，
+  `disconnect()` 永不调用。现在用 `InFlight` 载体持有在途连接，取消时断开。
+- **Jdk8 与 OkHttp 在 `close()` 之后仍能提交，拒绝时同步抛异常**：异步入口的契约是
+  「返回 future」，抛 `RejectedExecutionException` 给调用方属于破坏契约。现在两实现
+  都补了 `closed` 标志，异步入口返回失败 future（`Kind.CONFIG`）。
+- **`OkHttpExecutor(OkHttpClient)` 会在 `close()` 时关掉用户的 dispatcher 与连接池**：
+  单参构造器原先硬编码 `ownsDispatcher=true`，与自己 Javadoc 的要求相反。现在改为
+  `false`，需要「一并关闭」请用两参构造器显式传 `true`。
+- **流式请求没有统一禁用压缩**：只有 Jetty 与 Jdk8 设了 `Accept-Encoding: identity`；
+  OkHttp 的 `transparentGzip` 会自动加 gzip 并在解压后交付，破坏「字节到达即逐行」的
+  语义。现在六种实现的流式路径统一设置该头。
+- **同步流式路径的读行没有长度上限**：Jetty / OkHttp / Jdk8 用
+  `BufferedReader.readLine()` / `readUtf8Line()`，一条不换行的超长响应就能把堆撑爆；
+  且三者的行切分规则各不相同。现在统一改用 `internal.http.BoundedLineReader`
+  （1MB 上限 + 统一 CR/LF/CRLF 规则 + 剥 UTF-8 BOM）。
+- **成功响应体的读取无界**：Jetty 的 `append(content, body, 0)` 会一直往内存里攒，
+  OkHttp 的 `body.string()` 是全量读入后才截 300 字符做摘要。现在成功体上限 8MB
+  （超限按 `Kind.PARSE` 处理），错误体按 64KB 截断但**不失败**——错误体只用来凑
+  异常摘要，读不下不该把「服务端返回了 500」变成「响应损坏」。
+  Jetty 的同步 `execute` / `executeRaw` 原先用 `ContentResponse`，它在返回前就已把
+  body 全量读进内存，事后再截断没有意义；现改为字节流按上限读。
+- **Jetty 把客户端级 idle 超时整个关掉了**：`client.setIdleTimeout(0)` 让「请求级
+  超时配 0」变成完全无超时。现在恢复 Jetty 默认值作连接空闲兜底，请求级
+  `idleTimeout` 无条件设置。
+- **`executeRaw` 会跟随 3xx 重定向**：管理台试跑看到的是最终 2xx 而不是原始 3xx，
+  违反「原样返回」契约。Jdk8 已修（`setInstanceFollowRedirects(false)`），实测
+  **OkHttp 也跟随**，一并加 `followRedirects(false)` / `followSslRedirects(false)`。
+- **WebClient 流式读取在取消/超时时泄漏 `DataBuffer`**：`concatMap` 预取队列里还没
+  投递给 mapper 的缓冲区不走 `finally` 释放。现在流式 body 与 `errorBody` 都加了
+  `doOnDiscard(DataBuffer.class, DataBufferUtils::release)`。
+- **Ktor 同步入口的取消完全无效**：`execute` / `executeStreaming` 用 `runBlocking`
+  但没有把 Job 绑到取消句柄，`cancel()` 只能改标志位。现在绑定 Job，并补
+  `CancellationException → LlmCallException(CANCELLED)` 的转换。
+- **`Retry-After` 秒数接近 `Long.MAX_VALUE` 时溢出，429 立刻重打**：
+  `seconds * 1000L` 回绕成 -1000，再被 `Math.max(0L, delay)` 钳成 0，本该长时间
+  等待的限流应答变成 0ms 重试。现在用 `Math.multiplyExact` 并把结果钳在 24 小时
+  以内；超过上限按上限处理而不是忽略头值（忽略会退回秒级指数退避）。
+- **热更新改变 `api-keys` 时密钥冷却会丢**：`rotationFor` 是 get / putIfAbsent / put
+  三段，热更新期间多个线程可能同时判定需要重建，最后写入者覆盖别人刚建好的实例，
+  先返回者在孤儿实例上写冷却与游标。现在用一次 `compute` 原子完成判定与装入，并按
+  key 内容（不只是条数）判定重建，顺带修掉「条数不变但内容变了、旧索引冷却落到新
+  key 上」。
 
 ### 新增
 
+- `internal.http.Timeouts`：把「非正值表示未配置」归一成框架默认超时（10s / 120s），
+  六种传输共用。
+- `internal.http.BoundedLineReader`：有上限的 UTF-8 逐行读取，统一行切分规则并剥 BOM。
+- `LlmCallException.MAX_RETRY_AFTER_MS`：`Retry-After` 的 24 小时换算上限。
 - `ModelKeyLock`：目录写入互斥的扩展点。默认实现 `LocalModelKeyLock`（进程内）。
 - `RedisModelKeyLock`：多节点实现，`spring-data-redis` 为可选依赖。
 - 配置项 `ai-lite.catalog.multi-node`、`lock-lease-millis`、`lock-wait-millis`。

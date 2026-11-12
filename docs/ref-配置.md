@@ -70,8 +70,12 @@ providers:
 | `api-keys` | 多 key 轮换池；配置后优先于 `api-key`/`api-key-env`。429/401 失败时把当前 key 冷却一段时间并换下一把（换 key 的指针只在失败时推进；全部 key 都在冷却中就先用第一把，冷却到期自动恢复） |
 | `headers` | 追加到每个请求的 header |
 | `extra-body` | 深合并进请求体，用于厂商私有字段 |
-| `connect-timeout-ms` | 连接超时 |
-| `read-timeout-ms` | 读取超时，流式按两次数据之间计算 |
+| `connect-timeout-ms` | 连接超时。默认 10000；**配 0 或负数按默认值处理**，不表示无限等待 |
+| `read-timeout-ms` | 读取超时，流式按两次数据之间计算。默认 120000；**配 0 或负数按默认值处理**，不表示无限等待。需要更长的等待请显式配一个很大的正数 |
+
+> 超时语义在六种传输（`okhttp` / `okhttp-virtual` / `jetty` / `webclient` / `ktor-cio` / `jdk8`）里是同一套，由 `internal.http.Timeouts` 归一。2026-11-11 之前 `0` 的含义在不同实现里不一致（OkHttp/Jdk8/Ktor 无限等待、Jetty 取 10 秒、WebClient 退回 Netty 默认），换传输就等于换超时语义；详见 [HTTP 传输层原理](desc-HTTP传输.md) §2.1。
+
+> WebClient 传输的非流式响应体聚合上限由 Reactor 的 `maxInMemorySize` 控制（默认 256KB），本库未覆盖该值。其余五种传输的**非流式成功体上限是 8MB**（超出按响应损坏报错），单行上限 1MB。
 
 ### 2.2 模型
 
