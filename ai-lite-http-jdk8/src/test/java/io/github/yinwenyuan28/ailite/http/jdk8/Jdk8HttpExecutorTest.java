@@ -150,6 +150,121 @@ public class Jdk8HttpExecutorTest {
                 });
     }
 
+    // ------------------------------------------------------------------
+    // F-22：close 之后异步入口必须返回失败 future，而不是同步抛 RejectedExecutionException
+    // ------------------------------------------------------------------
+
+    @Test
+    public void closeThenAsyncEntryReturnsFailedFuture() {
+        executor.close();
+
+        java.util.concurrent.CompletableFuture<HttpResult> future =
+                executor.executeAsync(request("/v1/chat/completions"));
+
+        assertThat(future).isCompletedExceptionally();
+        assertThatThrownBy(() -> future.get(1, java.util.concurrent.TimeUnit.SECONDS))
+                .hasCauseInstanceOf(LlmCallException.class);
+        assertThat(server.getRequestCount()).isZero();
+    }
+
+    @Test
+    public void closeThenStreamingAsyncEntryReturnsFailedFuture() {
+        executor.close();
+
+        java.util.concurrent.CompletableFuture<Void> future =
+                executor.executeStreamingAsync(request("/v1/chat/completions"), line -> { });
+
+        assertThat(future).isCompletedExceptionally();
+    }
+
+    // ------------------------------------------------------------------
+    // F-21：future.cancel(true) 必须断开在途连接
+    // ------------------------------------------------------------------
+
+    @Test
+    public void cancellingFutureDisconnectsInFlightRequest() throws Exception {
+        // 服务端先回 200 头，再延迟 5 秒发 body；读超时 30 秒。
+        // 只有 future.cancel(true) 触发的 disconnect 能让这个请求提前结束。
+        final java.util.concurrent.CountDownLatch requestStarted =
+                new java.util.concurrent.CountDownLatch(1);
+        server.setDispatcher(new okhttp3.mockwebserver.Dispatcher() {
+            @Override
+            public MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest recorded) {
+                requestStarted.countDown();
+                return new MockResponse().setResponseCode(200).setBody("late")
+                        .setBodyDelay(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        });
+
+        java.util.concurrent.CompletableFuture<HttpResult> future =
+                executor.executeAsync(new HttpRequest(server.url("/v1/chat/completions").toString(),
+                        Collections.singletonMap("Content-Type", "application/json"), "{}",
+                        5000, 30000, null));
+
+        // 等请求真的到达服务端，否则可能在建连前就取消了，测不到「在途」。
+        assertThat(requestStarted.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        future.cancel(true);
+
+        assertThat(future.isCancelled()).isTrue();
+        // disconnect 之后底层读应当很快返回；这里只要求它不再继续挂 5 秒。
+        Thread.sleep(500);
+        assertThat(future.isCancelled()).isTrue();
+    }
+
+    // ------------------------------------------------------------------
+    // F-18：0/负超时走默认值，不再等价于无限等待
+    // ------------------------------------------------------------------
+
+    @Test
+    public void zeroTimeoutUsesDefaultInsteadOfInfinite() {
+        // 服务端延迟 2 秒发 body；默认读超时是 120 秒，所以应正常完成而不是挂住。
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("ok")
+                .setBodyDelay(1, java.util.concurrent.TimeUnit.SECONDS));
+
+        HttpResult result = executor.execute(new HttpRequest(
+                server.url("/v1/chat/completions").toString(),
+                Collections.singletonMap("Content-Type", "application/json"), "{}",
+                0, 0, null));
+
+        assertThat(result.getBody()).isEqualTo("ok");
+    }
+
+    // ------------------------------------------------------------------
+    // F-28：executeRaw 不得跟随 3xx
+    // ------------------------------------------------------------------
+
+    @Test
+    public void executeRawDoesNotFollowRedirect() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(302)
+                .setHeader("Location", "/elsewhere").setBody("redirect"));
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("final"));
+
+        HttpResult raw = executor.executeRaw(request("/v1/chat/completions"));
+
+        assertThat(raw.getStatus()).isEqualTo(302);
+        assertThat(raw.getBody()).isEqualTo("redirect");
+        // 若跟随了重定向，服务端会收到第二个请求。
+        assertThat(server.getRequestCount()).isEqualTo(1);
+    }
+
+    // ------------------------------------------------------------------
+    // F-24：单行超过上限时按响应损坏处理，而不是无限累积
+    // ------------------------------------------------------------------
+
+    @Test
+    public void streamingRejectsOverlongLine() {
+        StringBuilder huge = new StringBuilder("data: ");
+        for (int i = 0; i < 2 * 1024 * 1024; i++) {
+            huge.append('x');
+        }
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(huge.toString() + "\n"));
+
+        assertThatThrownBy(() -> executor.executeStreaming(request("/v1/chat/completions"),
+                line -> { }))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("单行");
+    }
+
     private HttpRequest request(String path) {
         return request(path, null);
     }

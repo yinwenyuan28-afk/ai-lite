@@ -7,6 +7,8 @@ import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
 import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
+import io.github.yinwenyuan28.ailite.internal.http.BoundedLineReader;
+import io.github.yinwenyuan28.ailite.internal.http.Timeouts;
 import io.github.yinwenyuan28.ailite.internal.http.Utf8LineBuffer;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
@@ -21,12 +23,10 @@ import org.eclipse.jetty.http.HttpMethod;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
@@ -61,8 +61,9 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
     private static final Charset UTF_8 = Charset.forName("UTF-8");
     private static final int MAX_LINE_BYTES = 1024 * 1024;
     private static final int MAX_ERROR_BYTES = 64 * 1024;
+    /** 非流式成功响应体上限：超出按响应损坏处理，避免打爆堆。 */
+    private static final int MAX_SUCCESS_BYTES = 8 * 1024 * 1024;
     private static final int MAX_CLIENTS = 16;
-    private static final long DEFAULT_CONNECT_TIMEOUT_MS = 10000L;
     private static final String CONTENT_TYPE = "application/json; charset=utf-8";
 
     private final AiLiteConfig.Http config;
@@ -88,22 +89,45 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
         return new JettyHttpExecutor(config);
     }
 
+    /**
+     * 同步非流式执行。
+     *
+     * <p>不用 {@code Request.send()}：它返回的 {@link ContentResponse} 已经把整个
+     * 响应体读进内存，超长响应在那之前就撑爆了堆，事后再截断没有意义。改为
+     * 用 {@link InputStreamResponseListener} 拿到字节流后按上限读取。</p>
+     */
     @Override
     public HttpResult execute(HttpRequest request) {
         ensureOpen();
         checkCancelled(request.getCancel());
         Request jettyRequest = newRequest(request, false);
+        InputStreamResponseListener responseListener = new InputStreamResponseListener();
         try {
-            ContentResponse response = jettyRequest.send();
-            return toResult(response.getStatus(),
-                    new String(response.getContent(), UTF_8), response.getHeaders().get("Retry-After"));
+            jettyRequest.send(responseListener);
+            Response response = responseListener.get(headerTimeout(request), TimeUnit.MILLISECONDS);
+            InputStream input = responseListener.getInputStream();
+            try {
+                int status = response.getStatus();
+                if (!isSuccessful(status)) {
+                    throw httpError(status, readBounded(input, MAX_ERROR_BYTES),
+                            response.getHeaders().get("Retry-After"));
+                }
+                return new HttpResult(status, readComplete(input, MAX_SUCCESS_BYTES));
+            } finally {
+                closeQuietly(input);
+            }
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
+            abortQuietly(jettyRequest, ex);
             throw failure(ex, request.getCancel());
         } catch (TimeoutException ex) {
+            abortQuietly(jettyRequest, ex);
             throw failure(ex, request.getCancel());
         } catch (ExecutionException ex) {
             throw failure(ex.getCause(), request.getCancel());
+        } catch (IOException ex) {
+            abortQuietly(jettyRequest, ex);
+            throw failure(ex, request.getCancel());
         } catch (LlmCallException ex) {
             throw ex;
         } finally {
@@ -122,18 +146,30 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
         ensureOpen();
         checkCancelled(request.getCancel());
         Request jettyRequest = newRequest(request, false);
+        InputStreamResponseListener responseListener = new InputStreamResponseListener();
         try {
-            ContentResponse response = jettyRequest.send();
-            // 与 execute 的唯一区别：不把非 2xx 转成异常。
-            return new HttpResult(response.getStatus(),
-                    new String(response.getContent(), UTF_8));
+            jettyRequest.send(responseListener);
+            Response response = responseListener.get(headerTimeout(request), TimeUnit.MILLISECONDS);
+            InputStream input = responseListener.getInputStream();
+            try {
+                // 与 execute 的唯一区别：不把非 2xx 转成异常。
+                return new HttpResult(response.getStatus(),
+                        readBounded(input, MAX_SUCCESS_BYTES));
+            } finally {
+                closeQuietly(input);
+            }
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
+            abortQuietly(jettyRequest, ex);
             throw failure(ex, request.getCancel());
         } catch (TimeoutException ex) {
+            abortQuietly(jettyRequest, ex);
             throw failure(ex, request.getCancel());
         } catch (ExecutionException ex) {
             throw failure(ex.getCause(), request.getCancel());
+        } catch (IOException ex) {
+            abortQuietly(jettyRequest, ex);
+            throw failure(ex, request.getCancel());
         } catch (LlmCallException ex) {
             throw ex;
         } finally {
@@ -157,9 +193,10 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
                             readBounded(input, MAX_ERROR_BYTES),
                             response.getHeaders().get("Retry-After"));
                 }
-                BufferedReader reader = new BufferedReader(new InputStreamReader(input, UTF_8));
+                // 同步路径同样要有行上限：BufferedReader.readLine() 能无限累积一行。
+                BoundedLineReader reader = new BoundedLineReader(input, MAX_LINE_BYTES);
                 String line;
-                while ((line = reader.readLine()) != null) {
+                while ((line = reader.next()) != null) {
                     checkCancelled(request.getCancel());
                     listener.onLine(line);
                 }
@@ -202,6 +239,7 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
         final AtomicReference<String> retryAfter = new AtomicReference<String>();
         final ByteArrayOutputStream body = new ByteArrayOutputStream();
         final AtomicBoolean done = new AtomicBoolean(false);
+        final AtomicBoolean overflow = new AtomicBoolean(false);
         jettyRequest.send(new Response.Listener.Adapter() {
             @Override
             public void onBegin(Response response) {
@@ -216,7 +254,13 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
             @Override
             public void onContent(Response response, ByteBuffer content) {
                 if (isSuccessful(response.getStatus())) {
-                    append(content, body, 0);
+                    // 成功体也有上限：limit<=0 时 append 会一直往 ByteArrayOutputStream
+                    // 里攒，一条大响应就能打爆堆。
+                    if (body.size() >= MAX_SUCCESS_BYTES) {
+                        overflow.set(true);
+                        return;
+                    }
+                    append(content, body, MAX_SUCCESS_BYTES);
                 } else {
                     append(content, body, MAX_ERROR_BYTES);
                 }
@@ -236,6 +280,12 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
                 String text = new String(body.toByteArray(), UTF_8);
                 if (!isSuccessful(code)) {
                     future.completeExceptionally(httpError(code, text, retryAfter.get()));
+                    return;
+                }
+                if (overflow.get()) {
+                    future.completeExceptionally(new LlmCallException(
+                            "响应体超过 " + MAX_SUCCESS_BYTES + " 字节", null,
+                            LlmCallException.Kind.PARSE));
                     return;
                 }
                 future.complete(new HttpResult(code, text));
@@ -285,11 +335,19 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
                 if (failed.get()) {
                     return;
                 }
+                // 取消后不再交付任何行（含同一 chunk 里剩下的）。只判 failed 不够：
+                // 取消走的是 abort 路径，onContent 可能还会被投递若干次。
+                if (isCancelled(request.getCancel())) {
+                    failed.set(true);
+                    future.completeExceptionally(cancelled(null));
+                    jettyRequest.abort(new CancellationException("调用已取消"));
+                    return;
+                }
                 byte[] bytes = new byte[content.remaining()];
                 content.get(bytes);
                 try {
                     for (String line : lines.accept(bytes)) {
-                        if (failed.get()) {
+                        if (failed.get() || isCancelled(request.getCancel())) {
                             return;
                         }
                         listener.onLine(line);
@@ -358,9 +416,9 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
             // Jetty 9.4 的三参构造器顺序是 (contentType, content, charset)。
             jettyRequest.content(new StringContentProvider(CONTENT_TYPE, request.getBody(), UTF_8));
         }
-        if (request.getReadTimeoutMs() > 0) {
-            jettyRequest.idleTimeout(request.getReadTimeoutMs(), TimeUnit.MILLISECONDS);
-        }
+        // 读空闲无条件设置：Jetty 的 request.idleTimeout 只管「这个请求多久没数据」，
+        // 不设置就等于无限等；只有 >0 才设会让 readTimeout=0 变成永久挂起。
+        jettyRequest.idleTimeout(Timeouts.read(request), TimeUnit.MILLISECONDS);
         for (Map.Entry<String, String> header : request.getHeaders().entrySet()) {
             // Request.header 是追加语义，会与 Jetty 默认头重复；这里改用覆盖。
             jettyRequest.getHeaders().put(header.getKey(), header.getValue());
@@ -377,8 +435,7 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
      * 按 connect timeout 取客户端；同一超时组合共享 selector 和连接池。
      */
     private HttpClient client(HttpRequest request) {
-        int timeout = request.getConnectTimeoutMs() > 0
-                ? request.getConnectTimeoutMs() : (int) DEFAULT_CONNECT_TIMEOUT_MS;
+        int timeout = Timeouts.connect(request);
         Integer key = Integer.valueOf(timeout);
         HttpClient existing = clients.get(key);
         if (existing != null) {
@@ -411,7 +468,8 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
         HttpClient client = new HttpClient(new SslContextFactory.Client());
         client.setConnectTimeout(connectTimeoutMs);
         client.setFollowRedirects(false);
-        client.setIdleTimeout(0);
+        // 不主动关掉客户端级 idle 超时：留 Jetty 默认值作为「连接空闲回收」的兜底。
+        // 请求级 idleTimeout 已在 newRequest 里无条件设置，主超时仍然是它。
         Integer maxConnections = config.getJetty().getMaxConnectionsPerDestination();
         if (maxConnections != null) {
             if (maxConnections.intValue() <= 0) {
@@ -514,6 +572,10 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
         }
     }
 
+    private static boolean isCancelled(LlmCancelHandle cancel) {
+        return cancel != null && cancel.isCancelled();
+    }
+
     private static void bind(final Request request, LlmCancelHandle cancel) {
         if (cancel == null) {
             return;
@@ -555,13 +617,6 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
         byte[] bytes = new byte[allowed];
         content.get(bytes, 0, allowed);
         out.write(bytes, 0, allowed);
-    }
-
-    private static HttpResult toResult(int status, String body, String retryAfterHeader) {
-        if (!isSuccessful(status)) {
-            throw httpError(status, body, retryAfterHeader);
-        }
-        return new HttpResult(status, body);
     }
 
     private static boolean isSuccessful(int status) {
@@ -610,10 +665,15 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
     }
 
     private static long headerTimeout(HttpRequest request) {
-        return request.getReadTimeoutMs() > 0
-                ? request.getReadTimeoutMs() : Long.MAX_VALUE;
+        // 归一后恒为正，不再返回 Long.MAX_VALUE——避免 get(timeout, MILLISECONDS)
+        // 在超大值上做纳秒换算时溢出。
+        return Timeouts.read(request);
     }
 
+    /**
+     * 只读前 {@code limit} 字节，超出部分丢弃。错误体只用来凑异常摘要，
+     * 读不下不该把「服务端返回了 500」变成「响应损坏」。
+     */
     private static String readBounded(InputStream input, int limit) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[4096];
@@ -622,6 +682,25 @@ public final class JettyHttpExecutor implements AsyncHttpExecutor, RawHttpExecut
             int read = input.read(buffer, 0, max);
             if (read < 0) {
                 break;
+            }
+            out.write(buffer, 0, read);
+        }
+        return new String(out.toByteArray(), UTF_8);
+    }
+
+    /**
+     * 读完整响应体，超过 {@code limit} 则按响应损坏处理。
+     *
+     * <p>用于成功体：截断后的 JSON 既不能解析也不能交回调用方，只能报错。</p>
+     */
+    private static String readComplete(InputStream input, int limit) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int read;
+        while ((read = input.read(buffer)) >= 0) {
+            if (out.size() + read > limit) {
+                throw new LlmCallException("响应体超过 " + limit + " 字节", null,
+                        LlmCallException.Kind.PARSE);
             }
             out.write(buffer, 0, read);
         }

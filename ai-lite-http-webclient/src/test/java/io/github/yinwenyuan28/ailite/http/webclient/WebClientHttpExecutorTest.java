@@ -3,6 +3,7 @@ package io.github.yinwenyuan28.ailite.http.webclient;
 import io.github.yinwenyuan28.ailite.config.AiLiteConfig;
 import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
+import io.github.yinwenyuan28.ailite.http.StreamListener;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
 import okhttp3.mockwebserver.MockResponse;
@@ -190,6 +191,76 @@ public class WebClientHttpExecutorTest {
         assertThatThrownBy(() -> executor.execute(request("/v1/chat", null)))
                 .isInstanceOfSatisfying(LlmCallException.class, ex ->
                         assertThat(ex.getKind()).isEqualTo(LlmCallException.Kind.CONFIG));
+    }
+
+    @Test
+    public void closeThenAsyncEntryReturnsFailedFuture() {
+        executor.close();
+
+        CompletableFuture<HttpResult> future = executor.executeAsync(request("/v1/chat", null));
+
+        assertThat(future).isCompletedExceptionally();
+    }
+
+    // ------------------------------------------------------------------
+    // F-19：200 头已回、body 停发时非流式路径必须超时，而不是永久挂起
+    // ------------------------------------------------------------------
+
+    @Test
+    public void nonStreamingBodyStallTimesOut() {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("late")
+                .setBodyDelay(3, TimeUnit.SECONDS));
+
+        HttpRequest request = new HttpRequest(server.url("/v1/chat").toString(),
+                Collections.<String, String>emptyMap(), "{\"x\":1}", 3000, 200, null);
+
+        assertThatThrownBy(() -> executor.execute(request))
+                .isInstanceOf(LlmCallException.class)
+                .satisfies(ex -> assertThat(((LlmCallException) ex).getKind())
+                        .isEqualTo(LlmCallException.Kind.TRANSPORT));
+    }
+
+    // ------------------------------------------------------------------
+    // F-23：流式请求发送 identity
+    // ------------------------------------------------------------------
+
+    @Test
+    public void streamingRequestSendsIdentityEncoding() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("data: a\n\n"));
+
+        executor.executeStreaming(request("/v1/chat", null), new StreamListener() {
+            @Override
+            public void onLine(String line) { }
+        });
+
+        okhttp3.mockwebserver.RecordedRequest recorded = server.takeRequest(5, TimeUnit.SECONDS);
+        assertThat(recorded).isNotNull();
+        assertThat(recorded.getHeader("Accept-Encoding")).isEqualTo("identity");
+    }
+
+    // ------------------------------------------------------------------
+    // F-20：取消后不再交付同一 chunk 内剩余的行
+    // ------------------------------------------------------------------
+
+    @Test
+    public void cancelDuringStreamingStopsFurtherLinesInSameChunk() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: a\ndata: b\ndata: c\n"));
+
+        final LlmCancelHandle cancel = new LlmCancelHandle();
+        final List<String> lines = Collections.synchronizedList(new ArrayList<String>());
+        final CompletableFuture<Void> future = executor.executeStreamingAsync(
+                request("/v1/chat", cancel), new StreamListener() {
+                    @Override
+                    public void onLine(String line) {
+                        lines.add(line);
+                        cancel.cancel();
+                    }
+                });
+
+        awaitFailure(future);
+        assertThat(lines).containsExactly("data: a");
     }
 
     private HttpRequest request(String path, LlmCancelHandle cancel) {

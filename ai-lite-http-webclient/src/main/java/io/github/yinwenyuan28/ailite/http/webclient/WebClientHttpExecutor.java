@@ -7,6 +7,7 @@ import io.github.yinwenyuan28.ailite.http.HttpRequest;
 import io.github.yinwenyuan28.ailite.http.HttpResult;
 import io.github.yinwenyuan28.ailite.http.RawHttpExecutor;
 import io.github.yinwenyuan28.ailite.http.StreamListener;
+import io.github.yinwenyuan28.ailite.internal.http.Timeouts;
 import io.github.yinwenyuan28.ailite.internal.http.Utf8LineBuffer;
 import io.github.yinwenyuan28.ailite.llm.LlmCallException;
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle;
@@ -85,11 +86,17 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
     public HttpResult execute(HttpRequest request) {
         CompletableFuture<HttpResult> future = executeAsync(request);
         try {
-            return future.get();
+            // 兜底上界：正常路径由 body 的 timeout 收口；这里防的是上游 future
+            // 因任何原因不完成时同步入口永久阻塞。
+            return future.get(Timeouts.connect(request) + Timeouts.read(request),
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (InterruptedException ex) {
             future.cancel(true);
             Thread.currentThread().interrupt();
             throw new LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED);
+        } catch (TimeoutException ex) {
+            future.cancel(true);
+            throw new LlmCallException("模型请求超时", ex, LlmCallException.Kind.TRANSPORT);
         } catch (ExecutionException ex) {
             throw unwrap(ex.getCause());
         }
@@ -105,11 +112,15 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
     public HttpResult executeRaw(HttpRequest request) {
         CompletableFuture<HttpResult> future = exchangeRaw(request);
         try {
-            return future.get();
+            return future.get(Timeouts.connect(request) + Timeouts.read(request),
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (InterruptedException ex) {
             future.cancel(true);
             Thread.currentThread().interrupt();
             throw new LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED);
+        } catch (TimeoutException ex) {
+            future.cancel(true);
+            throw new LlmCallException("模型请求超时", ex, LlmCallException.Kind.TRANSPORT);
         } catch (ExecutionException ex) {
             throw unwrap(ex.getCause());
         }
@@ -122,13 +133,16 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
             return future;
         }
         try {
-            Mono<HttpResult> result = requestMono(request).flatMap(response -> {
+            long readMs = Timeouts.read(request);
+            Mono<HttpResult> result = requestMono(request, false).flatMap(response -> {
                 int status = response.statusCode().value();
                 if (response.statusCode().is2xxSuccessful()) {
-                    return response.bodyToMono(String.class).defaultIfEmpty("")
+                    return response.bodyToMono(String.class)
+                            .timeout(Duration.ofMillis(readMs))
+                            .defaultIfEmpty("")
                             .map(body -> new HttpResult(status, body));
                 }
-                return errorBody(response).defaultIfEmpty("")
+                return errorBody(response, readMs).defaultIfEmpty("")
                         .map(body -> new HttpResult(status, body));
             });
             subscribeMono(result, future, request.getCancel());
@@ -142,11 +156,15 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
     public void executeStreaming(HttpRequest request, StreamListener listener) {
         CompletableFuture<Void> future = executeStreamingAsync(request, listener);
         try {
-            future.get();
+            future.get(Timeouts.connect(request) + Timeouts.read(request),
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (InterruptedException ex) {
             future.cancel(true);
             Thread.currentThread().interrupt();
             throw new LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED);
+        } catch (TimeoutException ex) {
+            future.cancel(true);
+            throw new LlmCallException("模型请求超时", ex, LlmCallException.Kind.TRANSPORT);
         } catch (ExecutionException ex) {
             throw unwrap(ex.getCause());
         }
@@ -159,13 +177,18 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
             return future;
         }
         try {
-            Mono<HttpResult> result = requestMono(request).flatMap(response -> {
+            long readMs = Timeouts.read(request);
+            Mono<HttpResult> result = requestMono(request, false).flatMap(response -> {
                 int status = response.statusCode().value();
                 if (response.statusCode().is2xxSuccessful()) {
-                    return response.bodyToMono(String.class).defaultIfEmpty("")
+                    // 非流式 body 同样要读超时：服务端先回 200 头再停发 body 时，
+                    // 只给 exchange() 加 timeout 是包不住的（F-19）。
+                    return response.bodyToMono(String.class)
+                            .timeout(Duration.ofMillis(readMs))
+                            .defaultIfEmpty("")
                             .map(body -> new HttpResult(status, body));
                 }
-                return errorBody(response).defaultIfEmpty("")
+                return errorBody(response, readMs).defaultIfEmpty("")
                         .flatMap(body -> Mono.<HttpResult>error(httpError(status, body,
                                 response.headers().asHttpHeaders().getFirst("Retry-After"))));
             });
@@ -184,17 +207,20 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
             return future;
         }
         try {
-            Flux<String> lines = requestMono(request).flatMapMany(response -> {
+            long readMs = Timeouts.read(request);
+            Flux<String> lines = requestMono(request, true).flatMapMany(response -> {
                 int status = response.statusCode().value();
                 if (!response.statusCode().is2xxSuccessful()) {
-                    return errorBody(response).defaultIfEmpty("")
+                    return errorBody(response, readMs).defaultIfEmpty("")
                             .flatMapMany(body -> Flux.<String>error(httpError(status, body,
                                     response.headers().asHttpHeaders().getFirst("Retry-After"))));
                 }
-                Flux<DataBuffer> body = response.body(BodyExtractors.toDataBuffers());
-                if (request.getReadTimeoutMs() > 0) {
-                    body = body.timeout(Duration.ofMillis(request.getReadTimeoutMs()));
-                }
+                Flux<DataBuffer> body = response.body(BodyExtractors.toDataBuffers())
+                        // 取消 / 超时 / 提前终止时，concatMap 预取队列里还没投递的
+                        // DataBuffer 不走 mapper 的 finally，必须在这里显式释放，
+                        // 否则堆外内存会一直涨（F-25）。
+                        .doOnDiscard(DataBuffer.class, DataBufferUtils::release)
+                        .timeout(Duration.ofMillis(readMs));
                 final Utf8LineBuffer buffer = new Utf8LineBuffer(MAX_LINE_BYTES);
                 return body.concatMap(dataBuffer -> {
                     byte[] bytes;
@@ -230,9 +256,11 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
 
     /**
      * 构造请求。连接/响应头等待和 body 读空闲分别用两个 timeout：
-     * 前者覆盖建连与首包，后者覆盖流式读取中的空闲。
+     * 前者覆盖建连与首包，后者覆盖读取中的空闲。
+     *
+     * @param streaming true 时禁用压缩：gzip 缓冲会破坏逐行交付语义
      */
-    private Mono<ClientResponse> requestMono(HttpRequest request) {
+    private Mono<ClientResponse> requestMono(HttpRequest request, boolean streaming) {
         WebClient.RequestHeadersSpec<?> spec;
         if (request.isGet()) {
             spec = client.get().uri(request.getUrl());
@@ -243,23 +271,30 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
         if (!request.getHeaders().containsKey("Content-Type")) {
             spec = spec.header("Content-Type", MediaType.APPLICATION_JSON_VALUE);
         }
+        final boolean identity = streaming && !request.getHeaders().containsKey("Accept-Encoding");
         spec = spec.headers(headers -> {
             for (Map.Entry<String, String> header : request.getHeaders().entrySet()) {
                 headers.set(header.getKey(), header.getValue());
             }
+            if (identity) {
+                headers.set("Accept-Encoding", "identity");
+            }
         });
         Mono<ClientResponse> mono = spec.exchange();
-        if (request.getConnectTimeoutMs() > 0) {
-            mono = mono.timeout(Duration.ofMillis(request.getConnectTimeoutMs()));
-        }
+        // 无条件设连接超时：0 曾表示「不设」，等价于无限等待。
+        mono = mono.timeout(Duration.ofMillis(Timeouts.connect(request)));
         return mono;
     }
 
     /**
      * 错误体有界读取：只保留前 64KB，其余 DataBuffer 仍然释放。
+     *
+     * @param readMs 读超时；错误体停在半路同样要收口，不能永久等待
      */
-    private static Mono<String> errorBody(ClientResponse response) {
+    private static Mono<String> errorBody(ClientResponse response, long readMs) {
         return response.body(BodyExtractors.toDataBuffers())
+                .doOnDiscard(DataBuffer.class, DataBufferUtils::release)
+                .timeout(Duration.ofMillis(readMs))
                 .map(dataBuffer -> {
                     try {
                         int readable = Math.min(dataBuffer.readableByteCount(), MAX_ERROR_BYTES);
@@ -283,6 +318,7 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
                                           LlmCancelHandle cancel) {
         final AtomicReference<Disposable> ref = new AtomicReference<Disposable>();
         final AtomicBoolean done = new AtomicBoolean(false);
+        bindAbortEarly(future, ref, done, cancel);
         Disposable disposable = mono.subscribe(
                 value -> {
                     if (done.compareAndSet(false, true)) {
@@ -299,8 +335,7 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
                         future.complete(null);
                     }
                 });
-        ref.set(disposable);
-        afterSubscribe(future, ref, cancel, disposable);
+        afterSubscribe(future, ref, done, cancel, disposable);
     }
 
     private static void subscribeFlux(Flux<String> flux, final StreamListener listener,
@@ -308,9 +343,14 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
                                       final LlmCancelHandle cancel) {
         final AtomicReference<Disposable> ref = new AtomicReference<Disposable>();
         final AtomicBoolean done = new AtomicBoolean(false);
+        // 必须先绑 abort 再订阅：流可能同步跑完，若等 subscribe 返回后才绑，
+        // 第一行回调里发起的取消会因为 abort 还没绑定而被丢掉（F-20）。
+        bindAbortEarly(future, ref, done, cancel);
         Disposable disposable = flux.subscribe(
                 line -> {
-                    if (done.get()) {
+                    // 除了 done，还要直接看取消标志：同步订阅期间 abort 可能尚未
+                    // 执行到 dispose，但 cancelled 已经置位。
+                    if (done.get() || (cancel != null && cancel.isCancelled())) {
                         return;
                     }
                     try {
@@ -335,38 +375,64 @@ public final class WebClientHttpExecutor implements AsyncHttpExecutor, RawHttpEx
                         future.complete(null);
                     }
                 });
-        ref.set(disposable);
-        afterSubscribe(future, ref, cancel, disposable);
+        afterSubscribe(future, ref, done, cancel, disposable);
     }
 
     /**
-     * 订阅可能同步完成，此时 ref 还没赋值；这里统一处理“已完成/已取消”的竞态，
-     * 并让 future.cancel / 取消句柄都能 dispose 底层订阅。
+     * 订阅前先注册取消动作。动作只置位 {@code done} 并尽力 dispose；真正的
+     * Disposable 在订阅返回后由 {@link #afterSubscribe} 补位。
+     */
+    private static void bindAbortEarly(final CompletableFuture<?> future,
+                                       final AtomicReference<Disposable> ref,
+                                       final AtomicBoolean done,
+                                       final LlmCancelHandle cancel) {
+        if (cancel == null) {
+            return;
+        }
+        cancel.bindAbort(new Runnable() {
+            @Override
+            public void run() {
+                // 先置位再 dispose：并发投递中的 onNext 看到 done 就不再回调。
+                done.set(true);
+                Disposable current = ref.get();
+                if (current != null) {
+                    current.dispose();
+                }
+                // dispose() 不保证触发 onError，需要显式收敛 future。
+                if (!future.isDone()) {
+                    future.completeExceptionally(cancelled(null));
+                }
+            }
+        });
+    }
+
+    /**
+     * 订阅返回后补位：处理“已完成/已取消”的竞态，绑上 Disposable，
+     * 并让 future.cancel 也能 dispose 底层订阅。
+     *
+     * <p>{@code done} 必须参与取消路径：只 dispose 不置位时，dispose 前后的
+     * onNext / onComplete 仍可能进来，把取消后的增量继续交给调用方（F-20）。</p>
      */
     private static void afterSubscribe(final CompletableFuture<?> future,
                                        final AtomicReference<Disposable> ref,
+                                       final AtomicBoolean done,
                                        final LlmCancelHandle cancel,
                                        Disposable disposable) {
-        if (future.isDone() || (cancel != null && cancel.isCancelled())) {
+        if (future.isDone() || done.get() || (cancel != null && cancel.isCancelled())) {
+            done.set(true);
             disposable.dispose();
         }
+        ref.set(disposable);
         if (cancel != null) {
-            cancel.bindAbort(new Runnable() {
-                @Override
-                public void run() {
-                    Disposable current = ref.get();
-                    if (current != null) {
-                        current.dispose();
-                    }
-                    // dispose() 不保证触发 onError，需要显式收敛 future。
-                    if (!future.isDone()) {
-                        future.completeExceptionally(cancelled(null));
-                    }
-                }
-            });
+            // 取消可能发生在订阅之前或期间：early 动作已置位，这里补一次 dispose。
+            if (cancel.isCancelled()) {
+                done.set(true);
+                disposable.dispose();
+            }
         }
         future.whenComplete((value, error) -> {
             if (future.isCancelled() || (cancel != null && cancel.isCancelled())) {
+                done.set(true);
                 Disposable current = ref.get();
                 if (current != null) {
                     current.dispose();

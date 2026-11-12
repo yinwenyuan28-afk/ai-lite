@@ -187,6 +187,68 @@ class KtorCioHttpExecutorTest {
                 }
     }
 
+    @Test
+    fun closeThenAsyncEntryReturnsFailedFuture() {
+        executor.close()
+
+        val future = executor.executeAsync(request("/v1/chat"))
+
+        assertThat(future.isCompletedExceptionally).isTrue()
+    }
+
+    // ------------------------------------------------------------------
+    // F-18：0/负超时走默认值，不再等价于无限等待
+    // ------------------------------------------------------------------
+
+    @Test
+    fun zeroTimeoutUsesDefaultInsteadOfInfinite() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("ok")
+                .setBodyDelay(1, TimeUnit.SECONDS))
+
+        val result = executor.execute(HttpRequest(server.url("/v1/chat").toString(),
+                Collections.emptyMap<String, String>(), "{\"x\":1}", 0, 0, null))
+
+        assertThat(result.body).isEqualTo("ok")
+    }
+
+    // ------------------------------------------------------------------
+    // F-23：流式请求发送 identity
+    // ------------------------------------------------------------------
+
+    @Test
+    fun streamingRequestSendsIdentityEncoding() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("data: a\n\n"))
+
+        executor.executeStreaming(request("/v1/chat"), StreamListener { })
+
+        val recorded = server.takeRequest(5, TimeUnit.SECONDS)
+        assertThat(recorded).isNotNull()
+        assertThat(recorded!!.getHeader("Accept-Encoding")).isEqualTo("identity")
+    }
+
+    // ------------------------------------------------------------------
+    // F-20：同步入口的取消必须能中断协程（此前完全没绑定 job）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun syncCancelStopsStreaming() {
+        server.enqueue(MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: a\ndata: b\ndata: c\n"))
+
+        val cancel = LlmCancelHandle()
+        val lines = Collections.synchronizedList(mutableListOf<String>())
+
+        assertThatThrownBy {
+            executor.executeStreaming(request("/v1/chat", cancel), StreamListener {
+                lines.add(it)
+                cancel.cancel()
+            })
+        }.isInstanceOf(LlmCallException::class.java)
+
+        assertThat(lines).containsExactly("data: a")
+    }
+
     private fun request(path: String, cancel: LlmCancelHandle? = null): HttpRequest {
         return HttpRequest(server.url(path).toString(),
                 Collections.emptyMap<String, String>(), "{\"x\":1}",

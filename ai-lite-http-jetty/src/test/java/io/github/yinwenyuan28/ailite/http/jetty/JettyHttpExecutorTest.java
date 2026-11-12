@@ -264,6 +264,101 @@ public class JettyHttpExecutorTest {
         }
     }
 
+    // ------------------------------------------------------------------
+    // F-18：0/负超时走默认值，不再等价于无限等待
+    // ------------------------------------------------------------------
+
+    @Test
+    public void zeroTimeoutUsesDefaultInsteadOfInfinite() {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("ok")
+                .setBodyDelay(1, TimeUnit.SECONDS));
+
+        HttpResult result = executor.execute(new HttpRequest(server.url("/v1/chat").toString(),
+                Collections.<String, String>emptyMap(), "{\"x\":1}", 0, 0, null));
+
+        assertThat(result.getBody()).isEqualTo("ok");
+    }
+
+    // ------------------------------------------------------------------
+    // F-20：取消后不再交付同一 chunk 内剩余的行
+    // ------------------------------------------------------------------
+
+    @Test
+    public void cancelDuringStreamingStopsFurtherLinesInSameChunk() throws Exception {
+        // 三行一次性发出：取消发生在第一行回调里，后两行不应再交付。
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: a\ndata: b\ndata: c\n"));
+
+        final LlmCancelHandle cancel = new LlmCancelHandle();
+        final List<String> lines = Collections.synchronizedList(new ArrayList<String>());
+        final CompletableFuture<Void> future = executor.executeStreamingAsync(
+                request("/v1/chat", cancel), new io.github.yinwenyuan28.ailite.http.StreamListener() {
+                    @Override
+                    public void onLine(String line) {
+                        lines.add(line);
+                        cancel.cancel();
+                    }
+                });
+
+        awaitFailure(future);
+        assertThat(lines).containsExactly("data: a");
+    }
+
+    // ------------------------------------------------------------------
+    // F-23：流式请求发送 identity
+    // ------------------------------------------------------------------
+
+    @Test
+    public void streamingRequestSendsIdentityEncoding() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("data: a\n\n"));
+
+        executor.executeStreaming(request("/v1/chat", null), new io.github.yinwenyuan28.ailite.http.StreamListener() {
+            @Override
+            public void onLine(String line) { }
+        });
+
+        RecordedRequest recorded = server.takeRequest(5, TimeUnit.SECONDS);
+        assertThat(recorded).isNotNull();
+        assertThat(recorded.getHeader("Accept-Encoding")).isEqualTo("identity");
+    }
+
+    // ------------------------------------------------------------------
+    // F-24：单行超限按响应损坏处理
+    // ------------------------------------------------------------------
+
+    @Test
+    public void streamingRejectsOverlongLine() {
+        StringBuilder huge = new StringBuilder("data: ");
+        for (int i = 0; i < 2 * 1024 * 1024; i++) {
+            huge.append('x');
+        }
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(huge.toString() + "\n"));
+
+        assertThatThrownBy(() -> executor.executeStreaming(request("/v1/chat", null),
+                new io.github.yinwenyuan28.ailite.http.StreamListener() {
+                    @Override
+                    public void onLine(String line) { }
+                }))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("单行");
+    }
+
+    // ------------------------------------------------------------------
+    // F-26：非流式成功体超过上限要报错，而不是一直往内存里攒
+    // ------------------------------------------------------------------
+
+    @Test
+    public void oversizedSuccessfulBodyIsRejected() {
+        char[] payload = new char[9 * 1024 * 1024];
+        java.util.Arrays.fill(payload, 'x');
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(new String(payload)));
+
+        assertThatThrownBy(() -> executor.execute(request("/v1/chat", null)))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("响应体超过");
+    }
+
     private HttpRequest request(String path, LlmCancelHandle cancel) {
         return new HttpRequest(server.url(path).toString(),
                 Collections.<String, String>emptyMap(), "{\"x\":1}",

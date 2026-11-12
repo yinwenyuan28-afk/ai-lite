@@ -7,6 +7,7 @@ import io.github.yinwenyuan28.ailite.http.HttpRequest
 import io.github.yinwenyuan28.ailite.http.HttpResult
 import io.github.yinwenyuan28.ailite.http.RawHttpExecutor
 import io.github.yinwenyuan28.ailite.http.StreamListener
+import io.github.yinwenyuan28.ailite.internal.http.Timeouts
 import io.github.yinwenyuan28.ailite.llm.LlmCallException
 import io.github.yinwenyuan28.ailite.llm.LlmCancelHandle
 import io.ktor.client.HttpClient
@@ -95,8 +96,22 @@ class KtorCioHttpExecutor private constructor(
     override fun execute(request: HttpRequest): HttpResult {
         ensureOpen()
         return try {
-            runBlocking { executeInternal(request) }
+            runBlocking {
+                // 同步入口也要能把取消传导到协程：不绑定 job 时 cancel() 只能改
+                // 标志位，runBlocking 里的 I/O 会一直跑到读超时（F-20）。
+                try {
+                    bindSync(coroutineContext[Job], request.cancel)
+                    executeInternal(request)
+                } finally {
+                    request.cancel?.bindAbort(null)
+                }
+            }
         } catch (ex: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED)
+        } catch (ex: CancellationException) {
+            // job.cancel() 让 runBlocking 抛 JobCancellationException；同步入口
+            // 的契约是 LlmCallException(CANCELLED)，不是协程内部异常。
             Thread.currentThread().interrupt()
             throw LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED)
         }
@@ -111,14 +126,21 @@ class KtorCioHttpExecutor private constructor(
         ensureOpen()
         return try {
             runBlocking {
-                checkCancelled(request.cancel)
-                statement(request).execute { response ->
-                    // 与 executeInternal 的唯一区别：不检查状态码，原样返回。
-                    HttpResult(response.status.value, response.bodyAsText())
+                try {
+                    bindSync(coroutineContext[Job], request.cancel)
+                    checkCancelled(request.cancel)
+                    statement(request, false).execute { response ->
+                        // 与 executeInternal 的唯一区别：不检查状态码，原样返回。
+                        HttpResult(response.status.value, response.bodyAsText())
+                    }
+                } finally {
+                    request.cancel?.bindAbort(null)
                 }
             }
         } catch (ex: InterruptedException) {
             Thread.currentThread().interrupt()
+            throw LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED)
+        } catch (ex: CancellationException) {
             throw LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED)
         }
     }
@@ -126,9 +148,18 @@ class KtorCioHttpExecutor private constructor(
     override fun executeStreaming(request: HttpRequest, listener: StreamListener) {
         ensureOpen()
         try {
-            runBlocking { executeStreamingInternal(request, listener) }
+            runBlocking {
+                try {
+                    bindSync(coroutineContext[Job], request.cancel)
+                    executeStreamingInternal(request, listener)
+                } finally {
+                    request.cancel?.bindAbort(null)
+                }
+            }
         } catch (ex: InterruptedException) {
             Thread.currentThread().interrupt()
+            throw LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED)
+        } catch (ex: CancellationException) {
             throw LlmCallException("调用已取消", ex, LlmCallException.Kind.CANCELLED)
         }
     }
@@ -180,7 +211,7 @@ class KtorCioHttpExecutor private constructor(
 
     private suspend fun executeInternal(request: HttpRequest): HttpResult {
         checkCancelled(request.cancel)
-        return statement(request).execute { response ->
+        return statement(request, false).execute { response ->
             val status = response.status.value
             val body = response.bodyAsText()
             if (!response.status.isSuccess()) {
@@ -193,7 +224,7 @@ class KtorCioHttpExecutor private constructor(
     private suspend fun executeStreamingInternal(request: HttpRequest,
                                                  listener: StreamListener) {
         checkCancelled(request.cancel)
-        statement(request).execute { response ->
+        statement(request, true).execute { response ->
             if (!response.status.isSuccess()) {
                 val body = readBoundedText(response.bodyAsChannel())
                 throw httpError(response.status.value, body, response.headers["Retry-After"])
@@ -214,9 +245,16 @@ class KtorCioHttpExecutor private constructor(
         }
     }
 
-    private suspend fun statement(request: HttpRequest) = client.prepareRequest(request.url) {
+    /**
+     * @param streaming true 时禁用压缩：gzip 缓冲会破坏逐行交付语义
+     */
+    private suspend fun statement(request: HttpRequest, streaming: Boolean) =
+            client.prepareRequest(request.url) {
         method = HttpMethod.parse(request.method)
         request.headers.forEach { (name, value) -> header(name, value) }
+        if (streaming && request.headers.keys.none { it.equals("Accept-Encoding", true) }) {
+            header("Accept-Encoding", "identity")
+        }
         if (!request.isGet) {
             if (request.headers.keys.none { it.equals("Content-Type", true) }) {
                 contentType(ContentType.Application.Json)
@@ -225,12 +263,9 @@ class KtorCioHttpExecutor private constructor(
         }
         timeout {
             requestTimeoutMillis = HttpTimeout.INFINITE_TIMEOUT_MS
-            if (request.connectTimeoutMs > 0) {
-                connectTimeoutMillis = request.connectTimeoutMs.toLong()
-            }
-            if (request.readTimeoutMs > 0) {
-                socketTimeoutMillis = request.readTimeoutMs.toLong()
-            }
+            // 无条件设：0 曾表示「不设」，等价于无限等待。
+            connectTimeoutMillis = Timeouts.connect(request).toLong()
+            socketTimeoutMillis = Timeouts.read(request).toLong()
         }
     }
 
@@ -255,8 +290,24 @@ class KtorCioHttpExecutor private constructor(
         return out.toString("UTF-8")
     }
 
-    private fun bind(future: CompletableFuture<*>, job: Job, cancel: LlmCancelHandle?) {
-        // launch 可能在 bind 之前就被取消（甚至还没开始执行），需要一个兜底收敛。
+    /**
+     * 同步入口的取消绑定：把 runBlocking 的 job 挂到取消句柄上。
+     *
+     * <p>不绑定的话，`cancel()` 只改标志位，`executeInternal` 里那次
+     * `checkCancelled` 已经过了，I/O 会一直跑到读超时（F-20）。</p>
+     */
+    private suspend fun bindSync(job: Job?, cancel: LlmCancelHandle?) {
+        if (cancel == null || job == null) {
+            return
+        }
+        cancel.bindAbort { job.cancel() }
+        if (cancel.isCancelled) {
+            job.cancel()
+            throw cancelled(null)
+        }
+    }
+
+    private fun bind(future: CompletableFuture<*>, job: Job, cancel: LlmCancelHandle?) {        // launch 可能在 bind 之前就被取消（甚至还没开始执行），需要一个兜底收敛。
         job.invokeOnCompletion { cause ->
             if (!future.isDone) {
                 if (cancel != null && cancel.isCancelled) {

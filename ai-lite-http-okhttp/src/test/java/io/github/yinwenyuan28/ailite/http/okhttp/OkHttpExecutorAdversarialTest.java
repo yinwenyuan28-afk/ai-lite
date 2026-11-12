@@ -298,6 +298,128 @@ public class OkHttpExecutorAdversarialTest {
                         .isEqualTo(LlmCallException.Kind.TRANSPORT));
     }
 
+    // ------------------------------------------------------------------
+    // F-22：close 后异步入口返回失败 future；单参构造器不关闭用户 dispatcher
+    // ------------------------------------------------------------------
+
+    @Test
+    public void closeThenAsyncEntryReturnsFailedFuture() {
+        http.close();
+
+        java.util.concurrent.CompletableFuture<HttpResult> future =
+                http.executeAsync(request(5000, null));
+
+        assertThat(future).isCompletedExceptionally();
+        assertThatThrownBy(() -> future.get(1, TimeUnit.SECONDS))
+                .hasCauseInstanceOf(LlmCallException.class);
+        assertThat(server.getRequestCount()).isZero();
+    }
+
+    @Test
+    public void closeThenSyncEntryFailsWithConfigKind() {
+        http.close();
+
+        assertThatThrownBy(() -> http.execute(request(5000, null)))
+                .isInstanceOf(LlmCallException.class)
+                .satisfies(ex -> assertThat(((LlmCallException) ex).getKind())
+                        .isEqualTo(LlmCallException.Kind.CONFIG));
+    }
+
+    @Test
+    public void singleArgConstructorDoesNotShutdownUserDispatcher() throws Exception {
+        okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder().build();
+        OkHttpExecutor owned = new OkHttpExecutor(client);
+
+        owned.close();
+
+        // 单参构造器声明「不拥有 dispatcher」：close 之后它必须还能接任务。
+        final java.util.concurrent.CountDownLatch ran =
+                new java.util.concurrent.CountDownLatch(1);
+        client.dispatcher().executorService().execute(ran::countDown);
+        assertThat(ran.await(2, TimeUnit.SECONDS)).isTrue();
+    }
+
+    // ------------------------------------------------------------------
+    // F-23：流式请求发送 Accept-Encoding: identity（OkHttp 默认会自动加 gzip）
+    // ------------------------------------------------------------------
+
+    @Test
+    public void streamingRequestSendsIdentityEncoding() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("data: a\n\n"));
+
+        http.executeStreaming(request(5000, null), collecting(new ArrayList<String>()));
+
+        okhttp3.mockwebserver.RecordedRequest recorded = server.takeRequest(2, TimeUnit.SECONDS);
+        assertThat(recorded).isNotNull();
+        assertThat(recorded.getHeader("Accept-Encoding")).isEqualTo("identity");
+    }
+
+    @Test
+    public void nonStreamingRequestLeavesEncodingToOkHttpDefaults() throws Exception {
+        // 非流式不需要禁用压缩：这里只确认没有强行改成 identity，
+        // 具体值由 OkHttp 的 transparentGzip 决定。
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
+
+        http.execute(request(5000, null));
+
+        okhttp3.mockwebserver.RecordedRequest recorded = server.takeRequest(2, TimeUnit.SECONDS);
+        assertThat(recorded).isNotNull();
+        assertThat(recorded.getHeader("Accept-Encoding")).isNotEqualTo("identity");
+    }
+
+    // ------------------------------------------------------------------
+    // F-24：单行超过上限按响应损坏处理
+    // ------------------------------------------------------------------
+
+    @Test
+    public void streamingRejectsOverlongLine() {
+        StringBuilder huge = new StringBuilder();
+        for (int i = 0; i < 2 * 1024 * 1024; i++) {
+            huge.append('x');
+        }
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(huge.toString() + "\n"));
+
+        assertThatThrownBy(() -> http.executeStreaming(request(5000, null),
+                collecting(new ArrayList<String>())))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("单行");
+    }
+
+    // ------------------------------------------------------------------
+    // F-26：错误体按上限读，不能先把整个响应读进内存再截断
+    // ------------------------------------------------------------------
+
+    @Test
+    public void oversizedErrorBodyIsCappedWhileReading() {
+        StringBuilder huge = new StringBuilder();
+        for (int i = 0; i < 2 * 1024 * 1024; i++) {
+            huge.append('e');
+        }
+        server.enqueue(new MockResponse().setResponseCode(500).setBody(huge.toString()));
+
+        // 上限内截断后仍能报出状态码（64KB 足够承载摘要），不应因读入而失败。
+        assertThatThrownBy(() -> http.execute(request(5000, null)))
+                .isInstanceOf(LlmCallException.class)
+                .hasMessageContaining("状态码：500");
+    }
+
+    // ------------------------------------------------------------------
+    // F-28：executeRaw 不跟随 3xx
+    // ------------------------------------------------------------------
+
+    @Test
+    public void executeRawDoesNotFollowRedirect() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(302)
+                .setHeader("Location", "/elsewhere").setBody("redirect"));
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("final"));
+
+        HttpResult raw = http.executeRaw(request(5000, null));
+
+        assertThat(raw.getStatus()).isEqualTo(302);
+        assertThat(raw.getBody()).isEqualTo("redirect");
+        assertThat(server.getRequestCount()).isEqualTo(1);
+    }
+
     private HttpRequest request(int readTimeoutMs, LlmCancelHandle cancel) {
         return new HttpRequest(server.url("/chat").toString(), Collections.<String, String>emptyMap(),
                 "{\"hello\":1}", 2000, readTimeoutMs, cancel);
